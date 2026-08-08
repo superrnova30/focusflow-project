@@ -1,0 +1,291 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  STUDENT
+  ADMIN
+}
+
+enum AccountStatus {
+  ACTIVE
+  DISABLED
+}
+
+model User {
+  id                     String        @id @default(cuid())
+  email                  String        @unique
+  passwordHash           String
+  name                   String
+  role                   Role          @default(STUDENT)
+  status                 AccountStatus @default(ACTIVE)
+  profilePicture         String?
+  studentId              String?
+  course                 String?
+  yearLevel              String?
+  section                String?
+  studyGoals             String?
+  preferredStudyDuration Int?
+  dailyGoalMinutes       Int           @default(120)
+  focusMinutes           Int           @default(25)
+  shortBreakMinutes      Int           @default(5)
+  longBreakMinutes       Int           @default(15)
+  sessionsBeforeLongBreak Int          @default(4)
+  remindersEnabled       Boolean       @default(true)
+  reminderTime           String        @default("18:00")
+
+  // Gamification (XP + Hearts)
+  xp                    Int           @default(0)
+  hearts                Int           @default(5)
+  correctAnswers        Int           @default(0)
+  wrongAnswers          Int           @default(0)
+  totalXpEarned         Int           @default(0)
+
+  // Gamification polish — streaks, levels, challenges
+  streakCount           Int           @default(0)
+  longestStreak         Int           @default(0)
+  lastActiveDate        String?       // "YYYY-MM-DD"
+  currentLevel          Int           @default(1)
+  challengesCompleted   Int           @default(0)
+
+  createdAt              DateTime      @default(now())
+  lastActiveAt           DateTime?
+
+  tasks             Task[]
+  subjects          Subject[]
+  sessions          PomodoroSession[]
+  materialsUploaded StudyMaterial[]   @relation("UploadedBy")
+  quizzesCreated    Quiz[]            @relation("QuizCreatedBy")
+  quizAttempts      QuizAttempt[]
+  quizAssignments   QuizAssignment[]
+  activityLogs      ActivityLog[]
+  flashcardCollections FlashcardCollection[]
+  notes             StudyNote[]
+  deviceTokens      DeviceToken[]
+  challengeCompletions DailyChallengeCompletion[]
+}
+
+model Subject {
+  id         String    @id @default(cuid())
+  name       String
+  ownerId    String
+  owner      User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  archived   Boolean   @default(false)
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  tasks     Task[]
+  sessions  PomodoroSession[]
+  materials StudyMaterial[]
+
+  @@index([ownerId])
+}
+
+model Task {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subjectId      String?
+  subject        Subject? @relation(fields: [subjectId], references: [id])
+  title          String
+  estMinutes     Int      @default(25)
+  completed      Boolean  @default(false)
+  archived       Boolean  @default(false)
+  archivedAt     DateTime?
+  pomodorosSpent Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  @@index([userId])
+  @@index([userId, archived])
+}
+
+model PomodoroSession {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subjectId String?
+  subject   Subject? @relation(fields: [subjectId], references: [id])
+  taskId    String?
+  type      String // "focus" | "short" | "long"
+  minutes   Int
+  startedAt DateTime @default(now())
+
+  @@index([userId, startedAt])
+}
+
+model StudyMaterial {
+  id            String   @id @default(cuid())
+  title         String
+  subjectId     String?
+  subject       Subject? @relation(fields: [subjectId], references: [id])
+  uploadedById  String
+  uploadedBy    User     @relation("UploadedBy", fields: [uploadedById], references: [id], onDelete: Cascade)
+  fileUrl       String?
+  fileType      String // "pdf" | "pptx" | "docx" | "txt"
+  rawText       String?  @db.Text
+  archived      Boolean  @default(false)
+aiSummary            String?  @db.Text
+  aiKeyConcepts        Json?
+  aiLearningObjectives Json?
+  aiImportantTerms     Json?
+  aiShortAnswer        Json?
+  aiPracticeQuestions  Json?
+  createdAt            DateTime @default(now())
+
+  flashcards Flashcard[]
+  quizzes    Quiz[]
+
+  @@index([uploadedById])
+}
+
+model FlashcardCollection {
+  id        String      @id @default(cuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime    @default(now())
+
+  flashcards Flashcard[]
+
+  @@index([userId])
+}
+
+model Flashcard {
+  id           String              @id @default(cuid())
+  materialId   String?
+  material     StudyMaterial?      @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  collectionId String?
+  collection   FlashcardCollection? @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  front        String
+  back         String
+
+  @@index([collectionId])
+  @@index([materialId])
+}
+
+model Quiz {
+  id            String   @id @default(cuid())
+  materialId    String?
+  material      StudyMaterial? @relation(fields: [materialId], references: [id])
+  createdById   String
+  createdBy     User     @relation("QuizCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  title         String
+  isPublished   Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  questions   QuizQuestion[]
+  attempts    QuizAttempt[]
+  assignments QuizAssignment[]
+}
+
+model QuizQuestion {
+  id       String @id @default(cuid())
+  quizId   String
+  quiz     Quiz   @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  type     String // "mcq" | "true_false" | "identification" | "short_answer"
+  question String
+  options  Json?
+  answer   String
+  order    Int    @default(0)
+}
+
+model QuizAssignment {
+  id        String    @id @default(cuid())
+  quizId    String
+  quiz      Quiz      @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  studentId String
+  student   User      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  dueAt     DateTime?
+  createdAt DateTime  @default(now())
+
+  @@unique([quizId, studentId])
+}
+
+model StudyNote {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String
+  contentJson Json     // rich text blocks
+  source      String   @default("manual") // "ai" | "manual"
+  aiSummary       String?  @db.Text
+  aiKeyConcepts   Json?
+  aiImportantTerms Json?
+  aiStudyTips     Json?
+  aiLearningObjectives Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model QuizAttempt {
+  id      String   @id @default(cuid())
+  quizId  String
+  quiz    Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  userId  String
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  score   Int
+  total   Int
+  takenAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action    String
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model DeviceToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  platform  String   @default("unknown") // "ios" | "android"
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model DailyChallenge {
+  id           String   @id @default(cuid())
+  date         String   @unique // "YYYY-MM-DD"
+  title        String
+  description  String
+  xpReward     Int      @default(100)
+  targetValue  Int      @default(1)
+  metric       String   @default("quiz_correct") // "quiz_correct" | "focus_minutes" | "cards_reviewed" | "login"
+  createdAt    DateTime @default(now())
+
+  completions DailyChallengeCompletion[]
+}
+
+model DailyChallengeCompletion {
+  id          String         @id @default(cuid())
+  challengeId String
+  challenge   DailyChallenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime       @default(now())
+
+  @@unique([challengeId, userId])
+}
+
+model SystemSettings {
+  id               Int     @id @default(1)
+  maintenanceMode  Boolean @default(false)
+  allowSignups     Boolean @default(true)
+  defaultDailyGoal Int     @default(120)
+}

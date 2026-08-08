@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "FocusFlow",
+    "slug": "focusflow",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "backgroundColor": "#0E1220"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.focusflow.app"
+    },
+    "android": {
+      "package": "com.focusflow.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#0E1220"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-audio",
+      "expo-asset"
+    ]
+  }
+}
