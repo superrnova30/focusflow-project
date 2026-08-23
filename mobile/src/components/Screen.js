@@ -35,5 +35,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 14,
     padding: SPACING.lg,
+    // subtle elevation for modern look
+    elevation: 3,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
   },
 });

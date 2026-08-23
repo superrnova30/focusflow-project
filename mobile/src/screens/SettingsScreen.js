@@ -6,8 +6,6 @@ import { Screen, Card } from "../components/Screen";
 import { Input, Button } from "../components/Inputs";
 import { useTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
-import { ALARM_SOUNDS, loadAlarmPrefs, saveAlarmPrefs } from "../lib/alarmPrefs";
-import { previewAlarm } from "../lib/alarmPlayer";
 import { registerForPushNotifications, unregisterPushNotifications, sendTestPush, getSavedPushToken } from "../lib/push";
 import client from "../api/client";
 
@@ -28,18 +26,10 @@ export default function SettingsScreen() {
   const [section, setSection] = useState(user?.section || "");
   const [profilePicture, setProfilePicture] = useState(user?.profilePicture || "");
   const [dailyGoal, setDailyGoal] = useState(String(user?.dailyGoalMinutes ?? 120));
-  const [focusMinutes, setFocusMinutes] = useState(String(user?.focusMinutes ?? 25));
-  const [shortBreak, setShortBreak] = useState(String(user?.shortBreakMinutes ?? 5));
-  const [longBreak, setLongBreak] = useState(String(user?.longBreakMinutes ?? 15));
-  const [sessionsBeforeLong, setSessionsBeforeLong] = useState(String(user?.sessionsBeforeLongBreak ?? 4));
+  
   const [reminderTime, setReminderTime] = useState(user?.reminderTime || "18:00");
   const [reminders, setReminders] = useState(user?.remindersEnabled ?? true);
   const [saving, setSaving] = useState(false);
-
-  // Alarm settings
-  const [alarmEnabled, setAlarmEnabled] = useState(true);
-  const [alarmSoundId, setAlarmSoundId] = useState("chime");
-  const [alarmVolume, setAlarmVolume] = useState(0.8);
 
   // Push notification settings
   const [pushEnabled, setPushEnabled] = useState(false);
@@ -53,11 +43,7 @@ export default function SettingsScreen() {
   }, []);
 
   useEffect(() => {
-    loadAlarmPrefs().then((prefs) => {
-      setAlarmEnabled(prefs.enabled);
-      setAlarmSoundId(prefs.soundId);
-      setAlarmVolume(prefs.volume);
-    });
+    // no-op: alarm prefs handled in Timer screen
   }, []);
 
   const togglePush = async (value) => {
@@ -126,14 +112,10 @@ export default function SettingsScreen() {
         section,
         profilePicture,
         dailyGoalMinutes: Number(dailyGoal) || 120,
-        focusMinutes: Number(focusMinutes) || 25,
-        shortBreakMinutes: Number(shortBreak) || 5,
-        longBreakMinutes: Number(longBreak) || 15,
-        sessionsBeforeLongBreak: Number(sessionsBeforeLong) || 4,
         reminderTime,
         remindersEnabled: reminders,
       });
-      await saveAlarmPrefs({ enabled: alarmEnabled, soundId: alarmSoundId, volume: alarmVolume });
+      // Pomodoro + alarm prefs are managed from the Focus Timer screen
       await refreshUser();
       Alert.alert("Saved", "Your settings have been updated.");
     } catch (e) {
@@ -143,14 +125,7 @@ export default function SettingsScreen() {
     }
   };
 
-  const changeSound = (id) => {
-    setAlarmSoundId(id);
-    previewAlarm(id, alarmVolume);
-  };
-
-  const adjustVolume = (delta) => {
-    setAlarmVolume((v) => Math.max(0, Math.min(1, Math.round((v + delta) * 10) / 10)));
-  };
+  
 
   return (
     <Screen>
@@ -183,43 +158,7 @@ export default function SettingsScreen() {
           <Text style={styles.hint}>Choose a light, dark, or system-following appearance.</Text>
         </Card>
 
-        <Card style={{ marginBottom: 14 }}>
-          <Text style={styles.sectionLabel}>ALARM</Text>
-          <View style={styles.toggleRow}>
-            <Text style={styles.toggleLabel}>Play alarm when focus ends</Text>
-            <Switch value={alarmEnabled} onValueChange={setAlarmEnabled} trackColor={{ true: colors.tomato }} />
-          </View>
-
-          <Text style={styles.subLabel}>SOUND</Text>
-          <View style={styles.soundRow}>
-            {ALARM_SOUNDS.map((s) => {
-              const selected = alarmSoundId === s.id;
-              return (
-                <Pressable
-                  key={s.id}
-                  onPress={() => changeSound(s.id)}
-                  style={[styles.soundChip, selected && { borderColor: colors.tomato, backgroundColor: colors.tomatoSoft }]}
-                >
-                  <Text style={[styles.soundChipText, selected && { color: colors.tomato }]}>{s.label}</Text>
-                </Pressable>
-              );
-            })}
-          </View>
-
-          <Text style={styles.subLabel}>VOLUME</Text>
-          <View style={styles.volumeRow}>
-            <Pressable onPress={() => adjustVolume(-0.1)} style={styles.volumeBtn}>
-              <Text style={styles.volumeBtnText}>−</Text>
-            </Pressable>
-            <View style={styles.volumeTrack}>
-              <View style={[styles.volumeFill, { width: `${alarmVolume * 100}%`, backgroundColor: colors.tomato }]} />
-            </View>
-            <Pressable onPress={() => adjustVolume(0.1)} style={styles.volumeBtn}>
-              <Text style={styles.volumeBtnText}>+</Text>
-            </Pressable>
-            <Text style={styles.volumePct}>{Math.round(alarmVolume * 100)}%</Text>
-          </View>
-        </Card>
+        
 
         <Card style={{ marginBottom: 14 }}>
           <Text style={styles.sectionLabel}>PROFILE PICTURE</Text>
@@ -245,13 +184,7 @@ export default function SettingsScreen() {
           <Input value={dailyGoal} onChangeText={setDailyGoal} placeholder="Daily goal (minutes)" keyboardType="number-pad" />
         </Card>
 
-        <Card style={{ marginBottom: 14 }}>
-          <Text style={styles.sectionLabel}>POMODORO TIMER</Text>
-          <Input value={focusMinutes} onChangeText={setFocusMinutes} placeholder="Focus length (minutes)" keyboardType="number-pad" />
-          <Input value={shortBreak} onChangeText={setShortBreak} placeholder="Short break (minutes)" keyboardType="number-pad" />
-          <Input value={longBreak} onChangeText={setLongBreak} placeholder="Long break (minutes)" keyboardType="number-pad" />
-          <Input value={sessionsBeforeLong} onChangeText={setSessionsBeforeLong} placeholder="Sessions before long break" keyboardType="number-pad" />
-        </Card>
+        
 
         <Card style={{ marginBottom: 14 }}>
           <Text style={styles.sectionLabel}>REMINDERS</Text>

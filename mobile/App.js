@@ -43,7 +43,10 @@ const StudyStack = createNativeStackNavigator();
 
 function AuthNavigator() {
   return (
-    <AuthStack.Navigator initialRouteName="Home" screenOptions={{ headerShown: false }}>
+    <AuthStack.Navigator
+      initialRouteName="Home"
+      screenOptions={{ headerShown: false, animation: "none" }}
+    >
       <AuthStack.Screen name="Home" component={HomeScreen} />
       <AuthStack.Screen name="Login" component={LoginScreen} />
       <AuthStack.Screen name="Signup" component={SignupScreen} />

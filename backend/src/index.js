@@ -26,6 +26,9 @@ app.use(express.json({ limit: "50mb" })); // generous limit for pasted notes + b
 app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
 app.get("/health", (req, res) => res.json({ ok: true, service: "focusflow-api" }));
+// Provide an alias under /api so clients that prepend `/api` to the base URL
+// (e.g. `http://host:4000/api`) can check health at `/api/health`.
+app.get("/api/health", (req, res) => res.json({ ok: true, service: "focusflow-api" }));
 
 app.use("/api/auth", authRoutes);
 app.use("/api/tasks", taskRoutes);
@@ -68,8 +71,9 @@ function getAvailablePort(port) {
 async function start() {
   const requestedPort = Number(process.env.PORT || 4000);
   const port = await getAvailablePort(requestedPort);
-  app.listen(port, () => {
-    console.log(`FocusFlow API listening on http://localhost:${port}`);
+  // Bind to 0.0.0.0 so the server is reachable from other devices on the LAN
+  app.listen(port, "0.0.0.0", () => {
+    console.log(`FocusFlow API listening on http://localhost:${port} (bound to 0.0.0.0)`);
   });
 
   // Daily reminder scheduler: every 60s check if it's time to send reminders.

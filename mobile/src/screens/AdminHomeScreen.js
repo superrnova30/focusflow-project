@@ -1,5 +1,5 @@
 import React from "react";
-import { View, Text, StyleSheet, Pressable } from "react-native";
+import { View, Text, StyleSheet, Pressable, Image } from "react-native";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -19,7 +19,10 @@ function AdminHeader({ title }) {
   return (
     <SafeAreaView edges={["top"]} style={[styles.headerSafe, { backgroundColor: colors.bg }]}>
       <View style={styles.headerRow}>
-        <Text style={[styles.headerTitle, { color: colors.text }]}>{title}</Text>
+        <View style={{ flexDirection: "row", alignItems: "center" }}>
+          <Image source={require("../theme/logo.png")} style={styles.logoImg} resizeMode="contain" />
+          <Text style={[styles.headerTitle, { color: colors.text }]}>· Admin</Text>
+        </View>
         <Pressable
           onPress={logout}
           style={[styles.logoutBtn, { borderColor: colors.border, backgroundColor: colors.surface }]}
@@ -36,7 +39,7 @@ export default function AdminHomeScreen() {
   return (
     <Tabs.Navigator
       screenOptions={{
-        header: () => <AdminHeader title="FocusFlow Admin" />,
+        header: () => <AdminHeader />,
         tabBarActiveTintColor: colors.tomato,
         tabBarInactiveTintColor: colors.textMuted,
         tabBarStyle: { backgroundColor: colors.surface, borderTopColor: colors.border },
@@ -86,6 +89,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16, paddingVertical: 12,
   },
   headerTitle: { fontSize: 18, fontWeight: "700" },
+  logoImg: { width: 36, height: 36, marginRight: 10 },
   logoutBtn: {
     borderWidth: 1,
     paddingVertical: 6, paddingHorizontal: 14, borderRadius: 8,

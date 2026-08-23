@@ -115,7 +115,7 @@ export async function unregisterPushNotifications() {
 /** Send a test push from the backend to confirm the device is wired up. */
 export async function sendTestPush() {
   const { data } = await client.post("/push/send-test", {
-    title: "FocusFlow test",
+    title: "AI Pomodoro Study System test",
     body: "You're all set for push notifications! 🎉",
   });
   return data;

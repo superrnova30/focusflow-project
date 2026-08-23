@@ -22,6 +22,13 @@ function resolveApiBaseUrl() {
 
 const API_BASE_URL = resolveApiBaseUrl();
 
+// Print resolved API URL in development to help debugging network issues.
+if (typeof __DEV__ !== "undefined" && __DEV__) {
+  // Metro/Expo will show this in the JS console/logs.
+  // eslint-disable-next-line no-console
+  console.log("API_BASE_URL:", API_BASE_URL);
+}
+
 // Default timeout is generous (60s) because AI features (e.g. the study
 // coach) call an external LLM which can take a while to respond.
 const DEFAULT_TIMEOUT = 60000;

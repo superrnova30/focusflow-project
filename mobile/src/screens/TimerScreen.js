@@ -1,12 +1,14 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { View, Text, StyleSheet, Pressable, ScrollView, Modal } from "react-native";
+import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from "react";
+import { View, Text, StyleSheet, Pressable, ScrollView, Modal, Switch, Image, Alert } from "react-native";
 import Constants from "expo-constants";
 import { useFocusEffect } from "@react-navigation/native";
 import { Screen, Card } from "../components/Screen";
+import { Input, Button } from "../components/Inputs";
 import { useTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
-import { loadAlarmPrefs, getAlarmSound } from "../lib/alarmPrefs";
-import { playAlarm, stopAlarm } from "../lib/alarmPlayer";
+import { loadAlarmPrefs, getAlarmSound, saveAlarmPrefs, ALARM_SOUNDS } from "../lib/alarmPrefs";
+import { playAlarm, stopAlarm, previewAlarm } from "../lib/alarmPlayer";
+import { useNavigation } from "@react-navigation/native";
 import client, { queueRequest } from "../api/client";
 
 const fmtClock = (secs) => {
@@ -42,7 +44,7 @@ export default function TimerScreen() {
     }
   }, []);
 
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
   const durations = {
     focus: user?.focusMinutes ?? 25,
     short: user?.shortBreakMinutes ?? 5,
@@ -60,6 +62,14 @@ export default function TimerScreen() {
   const [activeSubjectId, setActiveSubjectId] = useState(null);
   const [alarmVisible, setAlarmVisible] = useState(false);
   const [alarmPrefs, setAlarmPrefs] = useState({ enabled: true, soundId: "chime", volume: 0.8 });
+  const [settingsVisible, setSettingsVisible] = useState(false);
+  const [editFocus, setEditFocus] = useState(String(user?.focusMinutes ?? 25));
+  const [editShort, setEditShort] = useState(String(user?.shortBreakMinutes ?? 5));
+  const [editLong, setEditLong] = useState(String(user?.longBreakMinutes ?? 15));
+  const [editSessionsBeforeLong, setEditSessionsBeforeLong] = useState(String(user?.sessionsBeforeLongBreak ?? 4));
+  const [editAlarmEnabled, setEditAlarmEnabled] = useState(true);
+  const [editAlarmSoundId, setEditAlarmSoundId] = useState("chime");
+  const [editAlarmVolume, setEditAlarmVolume] = useState(0.8);
 
   const intervalRef = useRef(null);
 
@@ -67,8 +77,19 @@ useEffect(() => {
     if (NotificationsModule) {
       NotificationsModule.requestPermissionsAsync().catch(() => {});
     }
-    loadAlarmPrefs().then(setAlarmPrefs).catch(() => {});
+    loadAlarmPrefs().then((p)=>{ setAlarmPrefs(p); }).catch(() => {});
   }, [NotificationsModule]);
+
+  const navigation = useNavigation();
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerRight: () => (
+        <Pressable onPress={() => setSettingsVisible(true)} style={{ padding: 8 }}>
+          <Text style={{ fontSize: 20 }}>⚙️</Text>
+        </Pressable>
+      ),
+    });
+  }, [navigation]);
 
   // Refetch tasks AND subjects whenever the screen gains focus so newly
   // added/deleted subjects and tasks from the Tasks / Study tabs appear
@@ -120,6 +141,40 @@ useEffect(() => {
     setAlarmVisible(false);
     stopAlarm();
   }, []);
+
+  // When opening settings modal, initialize editable state from user + stored prefs
+  useEffect(() => {
+    if (settingsVisible) {
+      setEditFocus(String(user?.focusMinutes ?? 25));
+      setEditShort(String(user?.shortBreakMinutes ?? 5));
+      setEditLong(String(user?.longBreakMinutes ?? 15));
+      setEditSessionsBeforeLong(String(user?.sessionsBeforeLongBreak ?? 4));
+      loadAlarmPrefs().then((p) => {
+        setEditAlarmEnabled(p.enabled);
+        setEditAlarmSoundId(p.soundId);
+        setEditAlarmVolume(p.volume);
+      }).catch(()=>{});
+    }
+  }, [settingsVisible, user]);
+
+  const saveTimerSettings = async () => {
+    try {
+      await client.patch('/auth/me', {
+        focusMinutes: Number(editFocus) || 25,
+        shortBreakMinutes: Number(editShort) || 5,
+        longBreakMinutes: Number(editLong) || 15,
+        sessionsBeforeLongBreak: Number(editSessionsBeforeLong) || 4,
+      });
+      await saveAlarmPrefs({ enabled: editAlarmEnabled, soundId: editAlarmSoundId, volume: editAlarmVolume });
+      setAlarmPrefs({ enabled: editAlarmEnabled, soundId: editAlarmSoundId, volume: editAlarmVolume });
+      await refreshUser();
+      // update timer durations in-place
+      setSecondsLeft(durationFor(mode) * 60);
+      setSettingsVisible(false);
+    } catch (e) {
+      Alert.alert('Error', e.message);
+    }
+  };
 
   const handleSessionComplete = useCallback(async () => {
     setRunning(false);
@@ -314,6 +369,67 @@ try {
             </Pressable>
           </View>
         </View>
+      </Modal>
+
+      <Modal
+        visible={settingsVisible}
+        animationType="slide"
+        onRequestClose={() => setSettingsVisible(false)}
+      >
+        <Screen>
+          <ScrollView contentContainerStyle={{ padding: 18 }}>
+            <Text style={[styles.modalTitle, { marginBottom: 6 }]}>Timer Settings</Text>
+            <Text style={styles.modalBody}>Manage Pomodoro durations and alarm preferences.</Text>
+
+            <Card style={{ marginTop: 12 }}>
+              <Text style={styles.cardTitle || styles.modalSound}>Pomodoro</Text>
+              <Input value={editFocus} onChangeText={setEditFocus} placeholder="Focus minutes" keyboardType="number-pad" />
+              <View style={{ height: 8 }} />
+              <Input value={editShort} onChangeText={setEditShort} placeholder="Short break minutes" keyboardType="number-pad" />
+              <View style={{ height: 8 }} />
+              <Input value={editLong} onChangeText={setEditLong} placeholder="Long break minutes" keyboardType="number-pad" />
+              <View style={{ height: 8 }} />
+              <Input value={editSessionsBeforeLong} onChangeText={setEditSessionsBeforeLong} placeholder="Sessions before long break" keyboardType="number-pad" />
+            </Card>
+
+            <Card style={{ marginTop: 12 }}>
+              <Text style={styles.cardTitle || styles.modalSound}>Alarm</Text>
+              <View style={styles.toggleRow}>
+                <Text style={styles.toggleLabel}>Play alarm when focus ends</Text>
+                <Switch value={editAlarmEnabled} onValueChange={setEditAlarmEnabled} trackColor={{ true: colors.tomato }} />
+              </View>
+
+              <Text style={styles.subLabel}>Sound</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+                {ALARM_SOUNDS.map((s) => {
+                  const sel = editAlarmSoundId === s.id;
+                  return (
+                    <Pressable key={s.id} onPress={() => { setEditAlarmSoundId(s.id); previewAlarm(s.id, editAlarmVolume); }} style={[{
+                      paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, borderWidth: 1, marginRight: 8, marginBottom: 8
+                    }, sel ? { borderColor: colors.tomato, backgroundColor: colors.tomatoSoft } : { borderColor: colors.border, backgroundColor: colors.surface }] }>
+                      <Text style={{ color: sel ? colors.tomato : colors.textMuted, fontWeight: '700' }}>{s.label}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.subLabel}>Volume</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <Pressable onPress={() => setEditAlarmVolume((v) => Math.max(0, Math.round((v - 0.1) * 10) / 10))} style={styles.volumeBtn}><Text style={styles.volumeBtnText}>−</Text></Pressable>
+                <View style={{ flex: 1, height: 8, backgroundColor: colors.border, borderRadius: 4, overflow: 'hidden' }}>
+                  <View style={{ width: `${editAlarmVolume * 100}%`, height: '100%', backgroundColor: colors.tomato }} />
+                </View>
+                <Pressable onPress={() => setEditAlarmVolume((v) => Math.min(1, Math.round((v + 0.1) * 10) / 10))} style={styles.volumeBtn}><Text style={styles.volumeBtnText}>+</Text></Pressable>
+                <Text style={styles.volumePct}>{Math.round(editAlarmVolume * 100)}%</Text>
+              </View>
+            </Card>
+
+            <View style={{ marginTop: 18, flexDirection: 'row', gap: 10 }}>
+              <Button title="Save" onPress={saveTimerSettings} />
+              <Button title="Cancel" onPress={() => setSettingsVisible(false)} variant="secondary" />
+            </View>
+          </ScrollView>
+        </Screen>
       </Modal>
     </Screen>
   );

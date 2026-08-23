@@ -10,6 +10,7 @@ import {
   useWindowDimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { Image } from "react-native";
 import { useTheme } from "../context/ThemeContext";
 
 const getFeatures = (c) => [
@@ -48,27 +49,7 @@ const getFeatures = (c) => [
 ];
 
 function LogoMark({ size = 72 }) {
-  const { colors } = useTheme();
-  const styles = useStyles(colors);
-  const inner = size * 0.62;
-  return (
-    <View style={{ width: size, height: size }}>
-      <View style={[styles.logoRing, { width: size, height: size, borderRadius: size / 2 }]}>
-        <View
-          style={{
-            width: inner,
-            height: inner,
-            borderRadius: inner / 2,
-            backgroundColor: colors.tomato,
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <View style={styles.logoDot} />
-        </View>
-      </View>
-    </View>
-  );
+  return <Image source={require("../theme/logo.png")} style={{ width: size, height: size }} resizeMode="contain" />;
 }
 
 export default function HomeScreen({ navigation }) {
@@ -161,7 +142,7 @@ export default function HomeScreen({ navigation }) {
                 width: 96,
                 height: 96,
                 borderRadius: 48,
-backgroundColor: colors.tomato,
+                backgroundColor: colors.tomato,
                 opacity: glowOpacity,
                 transform: [{ scale: glowScale }],
               }}
@@ -169,7 +150,7 @@ backgroundColor: colors.tomato,
             <LogoMark size={72} />
           </View>
 
-          <Text style={styles.brand}>FocusFlow</Text>
+          <Text style={styles.brandLong}>AI Pomodoro Study System</Text>
           <Text style={styles.tagline}>
             Study smarter, stay focused, and crush your goals — all in one place.
           </Text>
@@ -247,7 +228,7 @@ backgroundColor: colors.tomato,
             Start studying free — Create your account
           </Text>
         </Pressable>
-        <Text style={styles.footer}>© FocusFlow · Make every minute count</Text>
+        <Text style={styles.footer}>© AI Pomodoro Study System · Make every minute count</Text>
       </ScrollView>
     </SafeAreaView>
   );
@@ -278,11 +259,13 @@ const useStyles = (colors) =>
       borderRadius: 7,
       backgroundColor: "#fff",
     },
-    brand: {
+    brandLong: {
       color: colors.text,
-      fontSize: 34,
-      fontWeight: "800",
-      letterSpacing: 0.5,
+      fontSize: 20,
+      fontWeight: "700",
+      letterSpacing: 0.2,
+      textAlign: "center",
+      maxWidth: 560,
     },
     tagline: {
       color: colors.textMuted,
