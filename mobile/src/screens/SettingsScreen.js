@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { View, Text, StyleSheet, ScrollView, Switch, Alert, Image, Pressable } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import Constants from "expo-constants";
 import * as ImagePicker from "expo-image-picker";
 import { Screen, Card } from "../components/Screen";
@@ -7,6 +8,8 @@ import { Input, Button } from "../components/Inputs";
 import { useTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { registerForPushNotifications, unregisterPushNotifications, sendTestPush, getSavedPushToken } from "../lib/push";
+import { ALARM_SOUNDS, loadAlarmPrefs, saveAlarmPrefs } from "../lib/alarmPrefs";
+import { previewAlarm } from "../lib/alarmPlayer";
 import client from "../api/client";
 
 const THEME_OPTIONS = [
@@ -26,10 +29,20 @@ export default function SettingsScreen() {
   const [section, setSection] = useState(user?.section || "");
   const [profilePicture, setProfilePicture] = useState(user?.profilePicture || "");
   const [dailyGoal, setDailyGoal] = useState(String(user?.dailyGoalMinutes ?? 120));
+  const [focusMinutes, setFocusMinutes] = useState(String(user?.focusMinutes ?? 25));
+  const [shortBreak, setShortBreak] = useState(String(user?.shortBreakMinutes ?? 5));
+  const [longBreak, setLongBreak] = useState(String(user?.longBreakMinutes ?? 15));
+  const [sessionsBeforeLong, setSessionsBeforeLong] = useState(String(user?.sessionsBeforeLongBreak ?? 4));
+  const [pomodoroExpanded, setPomodoroExpanded] = useState(false);
   
   const [reminderTime, setReminderTime] = useState(user?.reminderTime || "18:00");
   const [reminders, setReminders] = useState(user?.remindersEnabled ?? true);
   const [saving, setSaving] = useState(false);
+  // Change password UI state
+  const [changeOpen, setChangeOpen] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changing, setChanging] = useState(false);
 
   // Push notification settings
   const [pushEnabled, setPushEnabled] = useState(false);
@@ -43,8 +56,18 @@ export default function SettingsScreen() {
   }, []);
 
   useEffect(() => {
-    // no-op: alarm prefs handled in Timer screen
+    // Load alarm prefs for this screen too so settings remain visible here
+    loadAlarmPrefs().then((prefs) => {
+      setAlarmEnabled(prefs.enabled);
+      setAlarmSoundId(prefs.soundId);
+      setAlarmVolume(prefs.volume);
+    }).catch(()=>{});
   }, []);
+
+  // Alarm settings
+  const [alarmEnabled, setAlarmEnabled] = useState(true);
+  const [alarmSoundId, setAlarmSoundId] = useState("chime");
+  const [alarmVolume, setAlarmVolume] = useState(0.8);
 
   const togglePush = async (value) => {
     setPushBusy(true);
@@ -112,10 +135,14 @@ export default function SettingsScreen() {
         section,
         profilePicture,
         dailyGoalMinutes: Number(dailyGoal) || 120,
+        focusMinutes: Number(focusMinutes) || 25,
+        shortBreakMinutes: Number(shortBreak) || 5,
+        longBreakMinutes: Number(longBreak) || 15,
+        sessionsBeforeLongBreak: Number(sessionsBeforeLong) || 4,
         reminderTime,
         remindersEnabled: reminders,
       });
-      // Pomodoro + alarm prefs are managed from the Focus Timer screen
+      await saveAlarmPrefs({ enabled: alarmEnabled, soundId: alarmSoundId, volume: alarmVolume });
       await refreshUser();
       Alert.alert("Saved", "Your settings have been updated.");
     } catch (e) {
@@ -158,6 +185,45 @@ export default function SettingsScreen() {
           <Text style={styles.hint}>Choose a light, dark, or system-following appearance.</Text>
         </Card>
 
+        <Card style={{ marginBottom: 14 }}>
+          <Text style={styles.sectionLabel}>ALARM</Text>
+          <View style={styles.toggleRow}>
+            <Text style={styles.toggleLabel}>Play alarm when focus ends</Text>
+            <Switch value={alarmEnabled} onValueChange={setAlarmEnabled} trackColor={{ true: colors.tomato }} />
+          </View>
+
+          <Text style={styles.subLabel}>SOUND</Text>
+          <View style={styles.soundRow}>
+            {ALARM_SOUNDS.map((s) => {
+              const selected = alarmSoundId === s.id;
+              return (
+                <Pressable
+                  key={s.id}
+                  onPress={() => { setAlarmSoundId(s.id); previewAlarm(s.id, alarmVolume); }}
+                  style={[styles.soundChip, selected && { borderColor: colors.tomato, backgroundColor: colors.tomatoSoft }]}
+                >
+                  <Text style={[styles.soundChipText, selected && { color: colors.tomato }]}>{s.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <Text style={styles.subLabel}>VOLUME</Text>
+          <View style={styles.volumeRow}>
+            <Pressable onPress={() => setAlarmVolume((v) => Math.max(0, Math.round((v - 0.1) * 10) / 10))} style={styles.volumeBtn}>
+              <Text style={styles.volumeBtnText}>−</Text>
+            </Pressable>
+            <View style={styles.volumeTrack}>
+              <View style={[styles.volumeFill, { width: `${alarmVolume * 100}%`, backgroundColor: colors.tomato }]} />
+            </View>
+            <Pressable onPress={() => setAlarmVolume((v) => Math.min(1, Math.round((v + 0.1) * 10) / 10))} style={styles.volumeBtn}>
+              <Text style={styles.volumeBtnText}>+</Text>
+            </Pressable>
+            <Text style={styles.volumePct}>{Math.round(alarmVolume * 100)}%</Text>
+          </View>
+        </Card>
+
+
         
 
         <Card style={{ marginBottom: 14 }}>
@@ -173,6 +239,27 @@ export default function SettingsScreen() {
             <Text style={styles.avatarHint}>Tap to change photo</Text>
           </Pressable>
         </Card>
+
+        <Card style={{ marginBottom: 14 }}>
+          <Text style={styles.sectionLabel}>POMODORO TIMER</Text>
+          <Pressable style={styles.dropdownHeader} onPress={() => setPomodoroExpanded((v) => !v)}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.dropdownTitle}>Timer settings</Text>
+              <Text style={styles.dropdownSummary}>{`${focusMinutes}m • ${shortBreak}m • ${longBreak}m • ${sessionsBeforeLong} sessions`}</Text>
+            </View>
+            <Ionicons name={pomodoroExpanded ? "chevron-up" : "chevron-down"} size={20} color={colors.textMuted} />
+          </Pressable>
+
+          {pomodoroExpanded && (
+            <View style={{ marginTop: 8 }}>
+              <Input label="Focus (minutes)" value={focusMinutes} onChangeText={setFocusMinutes} placeholder="25" keyboardType="number-pad" />
+              <Input label="Short break (minutes)" value={shortBreak} onChangeText={setShortBreak} placeholder="5" keyboardType="number-pad" />
+              <Input label="Long break (minutes)" value={longBreak} onChangeText={setLongBreak} placeholder="15" keyboardType="number-pad" />
+              <Input label="Sessions before long break" value={sessionsBeforeLong} onChangeText={setSessionsBeforeLong} placeholder="4" keyboardType="number-pad" />
+            </View>
+          )}
+        </Card>
+
 
         <Card style={{ marginBottom: 14 }}>
           <Text style={styles.sectionLabel}>PROFILE</Text>
@@ -222,6 +309,38 @@ export default function SettingsScreen() {
           )}
         </Card>
 
+        <Card style={{ marginBottom: 14 }}>
+          <Text style={styles.sectionLabel}>SECURITY</Text>
+          {!changeOpen ? (
+            <Button title="Change Password" onPress={() => setChangeOpen(true)} variant="secondary" />
+          ) : (
+            <>
+              <Input label="New password" value={newPassword} onChangeText={setNewPassword} placeholder="At least 8 characters" secureTextEntry />
+              <Input label="Confirm password" value={confirmPassword} onChangeText={setConfirmPassword} placeholder="Confirm new password" secureTextEntry />
+              <View style={{ flexDirection: 'row', marginTop: 8 }}>
+                <View style={{ flex: 1, marginRight: 8 }}>
+                  <Button title="Save password" onPress={async () => {
+                    if (newPassword.length < 8) { Alert.alert('Password too short', 'Password must be at least 8 characters.'); return; }
+                    if (newPassword !== confirmPassword) { Alert.alert('Mismatch', 'Passwords do not match.'); return; }
+                    setChanging(true);
+                    try {
+                      await client.patch('/auth/me/password', { newPassword });
+                      await refreshUser();
+                      Alert.alert('Password changed', 'Your password was updated successfully.');
+                      setNewPassword(''); setConfirmPassword(''); setChangeOpen(false);
+                    } catch (e) {
+                      Alert.alert('Error', e.message || 'Failed to change password');
+                    } finally { setChanging(false); }
+                  }} loading={changing} />
+                </View>
+                <View style={{ width: 120 }}>
+                  <Button title="Cancel" onPress={() => { setChangeOpen(false); setNewPassword(''); setConfirmPassword(''); }} variant="secondary" />
+                </View>
+              </View>
+            </>
+          )}
+        </Card>
+
         <Button title={saving ? "Saving…" : "Save changes"} onPress={save} loading={saving} />
       </ScrollView>
     </Screen>
@@ -238,26 +357,26 @@ const useStyles = (colors) =>
     toggleLabel: { color: colors.text, fontSize: 14 },
     hint: { color: colors.textMuted, fontSize: 11.5, marginTop: 6 },
     subLabel: { color: colors.textMuted, fontSize: 11, fontWeight: "700", marginTop: 8, marginBottom: 6 },
-    themeRow: { flexDirection: "row", gap: 8 },
+    themeRow: { flexDirection: "row" },
     themeChip: {
       flex: 1, paddingVertical: 9, borderRadius: 10, borderWidth: 1,
-      borderColor: colors.border, backgroundColor: colors.bg, alignItems: "center",
+      borderColor: colors.border, backgroundColor: colors.bg, alignItems: "center", marginRight: 8,
     },
     themeChipText: { color: colors.textMuted, fontSize: 12, fontWeight: "700" },
-    soundRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
+    soundRow: { flexDirection: "row", flexWrap: "wrap" },
     soundChip: {
       paddingVertical: 8, paddingHorizontal: 14, borderRadius: 10, borderWidth: 1,
-      borderColor: colors.border, backgroundColor: colors.bg,
+      borderColor: colors.border, backgroundColor: colors.bg, marginRight: 8,
     },
     soundChipText: { color: colors.textMuted, fontSize: 12, fontWeight: "700" },
-    volumeRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+    volumeRow: { flexDirection: "row", alignItems: "center" },
     volumeBtn: {
       width: 34, height: 34, borderRadius: 17, borderWidth: 1, borderColor: colors.border,
-      backgroundColor: colors.bg, alignItems: "center", justifyContent: "center",
+      backgroundColor: colors.bg, alignItems: "center", justifyContent: "center", marginRight: 8,
     },
     volumeBtnText: { color: colors.text, fontSize: 18, fontWeight: "700" },
     volumeTrack: {
-      flex: 1, height: 8, borderRadius: 4, backgroundColor: colors.border, overflow: "hidden",
+      flex: 1, height: 8, borderRadius: 4, backgroundColor: colors.border, overflow: "hidden", marginRight: 8,
     },
     volumeFill: { height: "100%", borderRadius: 4 },
     volumePct: { color: colors.textMuted, fontSize: 12, fontWeight: "700", width: 40, textAlign: "right" },
@@ -266,4 +385,7 @@ const useStyles = (colors) =>
     avatarFallback: { alignItems: "center", justifyContent: "center" },
     avatarInitial: { fontSize: 34, fontWeight: "700" },
     avatarHint: { color: colors.textMuted, fontSize: 12, marginTop: 8 },
+    dropdownHeader: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingHorizontal: 6, borderRadius: 10, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+    dropdownTitle: { color: colors.text, fontSize: 14, fontWeight: '700' },
+    dropdownSummary: { color: colors.textMuted, fontSize: 12, marginTop: 4 },
   });

@@ -118,10 +118,15 @@ useEffect(() => {
   const fetchSubjects = async () => {
     try {
       const { data } = await client.get("/subjects");
-      setSubjects(data.subjects);
-      // Clear a stale selected subject if it was archived or deleted.
+      // Filter out the legacy "Data Structures" subject so it does not
+      // appear in the Timer section UI.
+      const filtered = data.subjects.filter(
+        (s) => (s.name || "").toLowerCase().trim() !== "data structures"
+      );
+      setSubjects(filtered);
+      // Clear a stale selected subject if it was archived, deleted, or filtered out.
       setActiveSubjectId((current) =>
-        current && !data.subjects.some((s) => s.id === current) ? null : current
+        current && !filtered.some((s) => s.id === current) ? null : current
       );
     } catch (e) {
       // Non-fatal
@@ -265,7 +270,15 @@ try {
   return (
     <Screen>
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingTop: 16, paddingBottom: 40 }}>
-        <Text style={styles.greeting}>Hi, {user?.name?.split(" ")[0] || "there"}</Text>
+        <View style={styles.greetingRow}>
+          <Image source={require("../theme/logo.png")} style={styles.logo} />
+          <View style={styles.greetingTextWrap}>
+            <Text style={styles.greeting}>Hi, {user?.name?.split(" ")[0] || "there"}</Text>
+            <View style={styles.greetingPill}>
+              <Text style={styles.greetingPillText}>Student</Text>
+            </View>
+          </View>
+        </View>
 
         <View style={styles.modeRow}>
           {Object.entries(MODES).map(([key, meta]) => (
@@ -437,7 +450,12 @@ try {
 
 const useStyles = (colors) =>
   StyleSheet.create({
-    greeting: { color: colors.text, fontSize: 19, fontWeight: "700", marginBottom: 16 },
+    greeting: { color: colors.text, fontSize: 20, fontWeight: "800", marginBottom: 0 },
+    greetingRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
+    greetingTextWrap: { flexDirection: 'row', alignItems: 'center' },
+      logo: { width: 48, height: 48, marginRight: 14, borderRadius: 10 },
+      greetingPill: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, marginLeft: 8 },
+      greetingPillText: { color: colors.textMuted, fontSize: 12, fontWeight: '700' },
     modeRow: { flexDirection: "row", backgroundColor: colors.surface, borderRadius: 14, padding: 4, marginBottom: 24 },
     modeButton: { flex: 1, paddingVertical: 9, borderRadius: 10, alignItems: "center" },
     modeButtonText: { color: colors.textMuted, fontWeight: "700", fontSize: 12 },

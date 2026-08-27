@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from "react";
-import { View, Text, StyleSheet, FlatList, Pressable, Alert } from "react-native";
+import { View, Text, StyleSheet, FlatList, Pressable, Alert, useWindowDimensions } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
 import { Screen, Card } from "../components/Screen";
@@ -10,6 +10,8 @@ import client from "../api/client";
 export default function TasksScreen() {
   const { colors } = useTheme();
   const styles = useStyles(colors);
+  const { width } = useWindowDimensions();
+  const isWide = width >= 720;
   const [tasks, setTasks] = useState([]);
   const [subjects, setSubjects] = useState([]);
   const [title, setTitle] = useState("");
@@ -163,25 +165,49 @@ export default function TasksScreen() {
         </Pressable>
       </View>
 
-      <View style={styles.addRow}>
-        <Input
-          value={title}
-          onChangeText={setTitle}
-          placeholder={showArchived ? "Archived tasks cannot be added" : "New task..."}
-          editable={!showArchived}
-          style={{ flex: 1, marginBottom: 0, marginRight: 8 }}
-        />
-        <Input
-          value={subjectName}
-          onChangeText={setSubjectName}
-          placeholder="New subject (optional)"
-          editable={!showArchived}
-          style={{ flex: 1, marginBottom: 0, marginRight: 8 }}
-        />
-        <Pressable onPress={addTask} style={styles.addButton} disabled={showArchived}>
-          <Text style={styles.addButtonText}>+</Text>
-        </Pressable>
-      </View>
+      {isWide ? (
+        <View style={styles.addRow}>
+          <Input
+            value={title}
+            onChangeText={setTitle}
+            placeholder={showArchived ? "Archived tasks cannot be added" : "New task..."}
+            editable={!showArchived}
+            style={[styles.inputFlex, { backgroundColor: colors.surface, borderColor: colors.mint, borderWidth: 1 }]}
+          />
+          <Input
+            value={subjectName}
+            onChangeText={setSubjectName}
+            placeholder="New subject (optional)"
+            editable={!showArchived}
+            style={[styles.inputFlex, { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1 }]}
+          />
+          <Pressable onPress={addTask} style={styles.addButton} disabled={showArchived} accessibilityLabel="Add task">
+            <Text style={styles.addButtonText}>+</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <View style={styles.addRowStack}>
+          <Input
+            value={title}
+            onChangeText={setTitle}
+            placeholder={showArchived ? "Archived tasks cannot be added" : "New task..."}
+            editable={!showArchived}
+            style={[styles.inputFlex, { marginBottom: 50, backgroundColor: colors.surface, borderColor: colors.mint, borderWidth: 1 }]}
+          />
+          <View style={styles.subjectRow}>
+            <Input
+              value={subjectName}
+              onChangeText={setSubjectName}
+              placeholder="New subject (optional)"
+              editable={!showArchived}
+              style={[styles.subjectInput, { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1 }]}
+            />
+            <Pressable onPress={addTask} style={[styles.addButton, styles.addButtonCompact]} disabled={showArchived} accessibilityLabel="Add task">
+              <Text style={styles.addButtonText}>+</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
 
       <FlatList
         data={tasks}
@@ -213,20 +239,20 @@ export default function TasksScreen() {
               <View style={styles.actionGroup}>
                 {showArchived ? (
                   <>
-                    <Pressable onPress={() => restoreTask(item)} style={styles.actionBtn}>
-                      <Text style={[styles.actionText, { color: colors.mint }]}>Restore</Text>
+                    <Pressable onPress={() => restoreTask(item)} style={[styles.actionBtn, !isWide && styles.actionBtnCompact]}>
+                      <Text style={[styles.actionText, { color: colors.mint, fontSize: isWide ? 13 : 12 }]}>Restore</Text>
                     </Pressable>
-                    <Pressable onPress={() => deleteTask(item)} style={styles.actionBtn}>
-                      <Text style={[styles.actionText, { color: colors.tomato }]}>Delete</Text>
+                    <Pressable onPress={() => deleteTask(item)} style={[styles.actionBtn, !isWide && styles.actionBtnCompact]}>
+                      <Text style={[styles.actionText, { color: colors.tomato, fontSize: isWide ? 13 : 12 }]}>Delete</Text>
                     </Pressable>
                   </>
                 ) : (
                   <>
-                    <Pressable onPress={() => archiveTask(item)} style={styles.actionBtn}>
-                      <Text style={[styles.actionText, { color: colors.violet }]}>Archive</Text>
+                    <Pressable onPress={() => archiveTask(item)} style={[styles.actionBtn, !isWide && styles.actionBtnCompact]}>
+                      <Text style={[styles.actionText, { color: colors.violet, fontSize: isWide ? 13 : 12 }]}>Archive</Text>
                     </Pressable>
-                    <Pressable onPress={() => deleteTask(item)} style={styles.actionBtn}>
-                      <Text style={[styles.actionText, { color: colors.tomato }]}>Delete</Text>
+                    <Pressable onPress={() => deleteTask(item)} style={[styles.actionBtn, !isWide && styles.actionBtnCompact]}>
+                      <Text style={[styles.actionText, { color: colors.tomato, fontSize: isWide ? 13 : 12 }]}>Delete</Text>
                     </Pressable>
                   </>
                 )}
@@ -249,10 +275,48 @@ const useStyles = (colors) =>
     progressPct: { color: colors.mint, fontSize: 22, fontWeight: "700" },
     progressLabel: { color: colors.text, fontWeight: "700", fontSize: 13 },
     progressSub: { color: colors.textMuted, fontSize: 11.5 },
-    addRow: { flexDirection: "row", alignItems: "center" },
+    addRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+    },
+    addRowStack: {
+      flexDirection: "column",
+      alignItems: "stretch",
+      gap: 12,
+    },
+    subjectRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      width: "100%",
+      gap: 10,
+      marginTop: 2,
+    },
+    inputFlex: {
+      flex: 1,
+      minWidth: 0,
+    },
+    subjectInput: {
+      flex: 1,
+      minWidth: 0,
+    },
     addButton: {
-      width: 44, height: 44, borderRadius: 10, backgroundColor: colors.tomato,
-      alignItems: "center", justifyContent: "center",
+      width: 48,
+      height: 48,
+      borderRadius: 12,
+      backgroundColor: colors.tomato,
+      alignItems: "center",
+      justifyContent: "center",
+      marginLeft: 2,
+      shadowColor: "#000",
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.12,
+      shadowRadius: 6,
+      elevation: 2,
+    },
+    addButtonCompact: {
+      width: 48,
+      marginLeft: 0,
     },
     addButtonText: { color: "#fff", fontSize: 20, fontWeight: "700" },
     sectionHeader: { color: colors.text, fontSize: 22, fontWeight: "700" },
@@ -261,7 +325,8 @@ const useStyles = (colors) =>
     disabledButton: { opacity: 0.4 },
     taskCard: { marginBottom: 10, borderRadius: 16, borderWidth: 1, borderColor: colors.border },
     actionGroup: { flexDirection: "row", alignItems: "center" },
-actionBtn: { marginLeft: 10, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+    actionBtn: { marginLeft: 10, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+    actionBtnCompact: { marginLeft: 8, paddingVertical: 4, paddingHorizontal: 8 },
     actionText: { fontSize: 13, fontWeight: "700" },
     mutedText: { color: colors.textMuted, fontSize: 13, textAlign: "center", marginTop: 20 },
     taskRow: {

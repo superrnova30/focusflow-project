@@ -16,7 +16,6 @@ export function AuthProvider({ children }) {
         try {
           const { data } = await client.get("/auth/me");
           setUser(data.user);
-          // Once authenticated, register for push and replay any offline writes.
           registerForPushNotifications();
           retryOfflineWrites();
         } catch (e) {
@@ -27,21 +26,53 @@ export function AuthProvider({ children }) {
     })();
   }, []);
 
-const login = useCallback(async (email, password) => {
-    const { data } = await client.post("/auth/login", { email, password });
-    await AsyncStorage.setItem("focusflow_token", data.token);
-    setUser(data.user);
-    registerForPushNotifications();
-    retryOfflineWrites();
-    return data.user;
+  const login = useCallback(async (email, password) => {
+    try {
+      const { data } = await client.post("/auth/login", { email, password });
+      await AsyncStorage.setItem("focusflow_token", data.token);
+      setUser(data.user);
+      registerForPushNotifications();
+      retryOfflineWrites();
+      return data.user;
+    } catch (err) {
+      if (err.response?.status === 403 && err.response?.data?.requiresVerification) {
+        throw Object.assign(new Error(err.response.data.error), {
+          requiresVerification: true,
+          email: err.response.data.email,
+        });
+      }
+      throw err;
+    }
   }, []);
 
   const signup = useCallback(async (name, email, password) => {
     const { data } = await client.post("/auth/signup", { name, email, password });
-    await AsyncStorage.setItem("focusflow_token", data.token);
-    setUser(data.user);
-    registerForPushNotifications();
-    return data.user;
+    return data;
+  }, []);
+
+  const requestPasswordReset = useCallback(async (email) => {
+    const { data } = await client.post("/auth/forgot-password", { email });
+    return data;
+  }, []);
+
+  const resetPassword = useCallback(async (email, code, newPassword) => {
+    const { data } = await client.post("/auth/reset-password", { email, code, newPassword });
+    return data;
+  }, []);
+
+  const verifyEmail = useCallback(async (email, code) => {
+    const { data } = await client.post("/auth/verify-email", { email, code });
+    if (data.token) {
+      await AsyncStorage.setItem("focusflow_token", data.token);
+      setUser(data.user);
+      registerForPushNotifications();
+    }
+    return data;
+  }, []);
+
+  const sendVerificationCode = useCallback(async (email) => {
+    const { data } = await client.post("/auth/send-verification", { email });
+    return data;
   }, []);
 
   const logout = useCallback(async () => {
@@ -57,7 +88,21 @@ const login = useCallback(async (email, password) => {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, setUser, booting, login, signup, logout, refreshUser }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        setUser,
+        booting,
+        login,
+        signup,
+        logout,
+        refreshUser,
+        requestPasswordReset,
+        resetPassword,
+        verifyEmail,
+        sendVerificationCode,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

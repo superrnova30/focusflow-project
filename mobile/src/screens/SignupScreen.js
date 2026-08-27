@@ -16,16 +16,21 @@ export default function SignupScreen({ navigation }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
   const submit = async () => {
     setError(null);
-    if (!name.trim() || !email || !password) return setError("All fields are required.");
+    if (!name.trim() || !email || !password || !confirmPassword) return setError("All fields are required.");
     if (password.length < 8) return setError("Password must be at least 8 characters.");
+    if (password !== confirmPassword) return setError("Passwords do not match.");
     setLoading(true);
     try {
       await signup(name.trim(), email.trim().toLowerCase(), password);
+      // After successful signup, navigate to email verification and
+      // instruct the screen to show the resend message immediately.
+      navigation.navigate("VerifyEmail", { email: email.trim().toLowerCase(), autoSend: true });
     } catch (e) {
       setError(e.message);
     } finally {
@@ -50,6 +55,7 @@ export default function SignupScreen({ navigation }) {
                 <Input style={styles.fullWidth} value={name} onChangeText={setName} placeholder="Full name" />
                 <Input style={styles.fullWidth} value={email} onChangeText={setEmail} placeholder="Email" autoCapitalize="none" keyboardType="email-address" />
                 <Input style={styles.fullWidth} value={password} onChangeText={setPassword} placeholder="Password (min. 8 characters)" secureTextEntry />
+                <Input style={styles.fullWidth} value={confirmPassword} onChangeText={setConfirmPassword} placeholder="Confirm password" secureTextEntry />
 
                 {error && <Text style={styles.error}>{error}</Text>}
 

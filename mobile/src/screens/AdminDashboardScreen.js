@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useCallback } from "react";
 import { View, Text, StyleSheet, ScrollView } from "react-native";
+import { useFocusEffect } from "@react-navigation/native";
 import { Screen, Card } from "../components/Screen";
 import { useTheme } from "../context/ThemeContext";
 import client from "../api/client";
@@ -18,9 +19,20 @@ export default function AdminDashboardScreen() {
   const { colors } = useTheme();
   const [analytics, setAnalytics] = useState(null);
 
-  useEffect(() => {
-    client.get("/admin/analytics").then(({ data }) => setAnalytics(data.analytics ?? data)).catch(() => {});
+  const fetchAnalytics = useCallback(async () => {
+    try {
+      const { data } = await client.get("/admin/analytics");
+      setAnalytics(data.analytics ?? data);
+    } catch (e) {
+      setAnalytics(null);
+    }
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchAnalytics();
+    }, [fetchAnalytics])
+  );
 
   return (
     <Screen>
@@ -37,8 +49,11 @@ export default function AdminDashboardScreen() {
               <Stat label="Students" value={analytics.students} />
               <Stat label="Materials" value={analytics.totalMaterials} />
               <Stat label="Quizzes" value={analytics.totalQuizzes} />
-              <Stat label="Sessions" value={analytics.totalSessions} />
-              <Stat label="Avg Study/Student" value={`${analytics.avgStudyMinutes}m`} />
+              <Stat label="Sessions" value={analytics.totalFocusSessions ?? analytics.totalSessions} />
+              <Stat label="Study Time" value={`${Math.floor((analytics.totalStudyMinutes ?? 0) / 60)}h ${((analytics.totalStudyMinutes ?? 0) % 60)}m`} />
+              <Stat label="Task Completion" value={`${analytics.taskCompletionRate ?? analytics.completionRate ?? 0}%`} />
+              <Stat label="Quiz Avg" value={`${analytics.averageQuizScore ?? 0}%`} />
+              <Stat label="Avg Study/Student" value={`${analytics.avgStudyMinutes ?? analytics.averageStudyMinutes ?? 0}m`} />
             </View>
 
             <Text style={[styles.sectionLabel, { color: colors.textMuted }]}>MOST ACTIVE USERS</Text>

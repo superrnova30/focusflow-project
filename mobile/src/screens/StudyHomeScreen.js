@@ -185,6 +185,19 @@ useFocusEffect(
         return;
       }
 
+      // Use the AI study endpoint to generate a study pack first.
+      try {
+        const { data } = await client.post("/ai/study", { topic: payload.topic, mode: "pack" }, { timeout: 120000 });
+        if (data && data.pack) {
+          setGenerating(false);
+          navigation.navigate("StudyAI", { pack: data.pack, topic: payload.topic });
+          return;
+        }
+      } catch (err) {
+        // If pack generation failed, fall back to quiz generation.
+      }
+
+      // Fallback: try the existing quiz generator
       const { data } = await client.post("/game/quiz", payload, { timeout: 120000 });
       if (!data.questions || data.questions.length === 0) {
         Alert.alert("No questions", "The AI didn't generate any questions. Try a different topic.");

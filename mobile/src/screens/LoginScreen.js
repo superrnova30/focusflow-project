@@ -27,7 +27,14 @@ export default function LoginScreen({ navigation }) {
       // Navigation happens automatically — RootNavigator re-renders once
       // `user` is set and routes by role.
     } catch (e) {
-      setError(e.message);
+      // Check if the error is due to unverified email
+      if (e.requiresVerification) {
+        // Send user to the VerifyEmail screen and trigger an automatic
+        // resend of the verification code so they can immediately verify.
+        navigation.navigate("VerifyEmail", { email: e.email, autoSend: true });
+      } else {
+        setError(e.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -53,6 +60,7 @@ export default function LoginScreen({ navigation }) {
                 {error && <Text style={styles.error}>{error}</Text>}
 
                 <Button style={styles.fullWidth} title="Log in" onPress={submit} loading={loading} />
+                <Button style={[styles.fullWidth, styles.linkButton]} title="Forgot Password?" onPress={() => navigation.navigate("ForgotPassword")} variant="ghost" />
 
                 <Button style={[styles.fullWidth, styles.ghost]} title="New here? Sign up" onPress={() => navigation.navigate("Signup")} variant="ghost" />
               </Card>
@@ -81,4 +89,5 @@ const useStyles = (colors) =>
     subtitle: { color: colors.textMuted, fontSize: 14, marginBottom: 24, lineHeight: 20 },
     error: { color: colors.tomato, fontSize: 13, marginBottom: 12 },
     ghost: { marginTop: 8 },
+    linkButton: { marginTop: 8 },
   });

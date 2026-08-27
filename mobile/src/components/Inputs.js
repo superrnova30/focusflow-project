@@ -7,13 +7,40 @@ export function Input({ style, label, secureTextEntry, ...props }) {
   const { colors } = useTheme();
   const [secure, setSecure] = useState(!!secureTextEntry);
 
+  // Resolve marginBottom whether `style` is an object or array
+  let wrapperMarginBottom = 12;
+  if (style) {
+    if (Array.isArray(style)) {
+      for (const s of style) {
+        if (s && typeof s === "object" && s.marginBottom != null) {
+          wrapperMarginBottom = s.marginBottom;
+          break;
+        }
+      }
+    } else if (style.marginBottom != null) {
+      wrapperMarginBottom = style.marginBottom;
+    }
+  }
+
   return (
-    <View style={[styles.inputWrapper, { marginBottom: style?.marginBottom ?? 12 }]}> 
+    <View style={[styles.inputWrapper, { marginBottom: wrapperMarginBottom }]}> 
       {label && <Text style={[styles.label, { color: colors.text }]}>{label}</Text>}
-      <View style={[styles.inputRow, { backgroundColor: colors.surface, borderColor: colors.border }, style]}>
+      <View
+        style={[
+          styles.inputRow,
+          {
+            backgroundColor: colors.surface,
+            borderColor: colors.border,
+          },
+          style,
+        ]}
+      >
         <TextInput
           placeholderTextColor={colors.textMuted}
-          style={[styles.input, { color: colors.text }]}
+          style={[
+            styles.input,
+            { color: colors.text },
+          ]}
           secureTextEntry={secure}
           {...props}
         />
@@ -55,12 +82,12 @@ export function Button({ title, onPress, loading, variant = "primary", disabled,
 
 const styles = StyleSheet.create({
   input: {
-    borderWidth: 1,
-    borderRadius: RADIUS.md,
+    flex: 1,
+    minHeight: 48,
     paddingHorizontal: 14,
     paddingVertical: 12,
-    fontSize: 15,
-    marginBottom: 12,
+    fontSize: 16,
+    minWidth: 0,
   },
   button: {
     borderRadius: RADIUS.lg,
@@ -76,7 +103,8 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
   },
   inputWrapper: {
-    width: "100%",
+    flex: 1,
+    alignSelf: "stretch",
   },
   label: {
     fontSize: 13,
@@ -88,14 +116,11 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS.md,
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
+    minHeight: 50,
+    minWidth: 0,
   },
   buttonText: { fontWeight: "700", fontSize: 15 },
-  input: {
-    flex: 1,
-    paddingVertical: 12,
-    fontSize: 15,
-  },
   toggle: {
     paddingHorizontal: 10,
     paddingVertical: 8,

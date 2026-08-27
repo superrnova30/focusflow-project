@@ -13,12 +13,16 @@ import { flushQueue } from "./src/api/client";
 import HomeScreen from "./src/screens/HomeScreen";
 import LoginScreen from "./src/screens/LoginScreen";
 import SignupScreen from "./src/screens/SignupScreen";
+import ForgotPasswordScreen from "./src/screens/ForgotPasswordScreen";
+import VerifyEmailScreen from "./src/screens/VerifyEmailScreen";
 import TimerScreen from "./src/screens/TimerScreen";
 import TasksScreen from "./src/screens/TasksScreen";
 import StatsScreen from "./src/screens/StatsScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
 import StudyHomeScreen from "./src/screens/StudyHomeScreen";
 import CoachScreen from "./src/screens/CoachScreen";
+import StudyAIResultScreen from "./src/screens/StudyAIResultScreen";
+import StudyChatScreen from "./src/screens/StudyChatScreen";
 import SubjectsScreen from "./src/screens/SubjectsScreen";
 import MaterialDetailScreen from "./src/screens/MaterialDetailScreen";
 import QuizTakeScreen from "./src/screens/QuizTakeScreen";
@@ -50,6 +54,8 @@ function AuthNavigator() {
       <AuthStack.Screen name="Home" component={HomeScreen} />
       <AuthStack.Screen name="Login" component={LoginScreen} />
       <AuthStack.Screen name="Signup" component={SignupScreen} />
+      <AuthStack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
+      <AuthStack.Screen name="VerifyEmail" component={VerifyEmailScreen} />
     </AuthStack.Navigator>
   );
 }
@@ -59,6 +65,8 @@ function StudyNavigator() {
     <StudyStack.Navigator screenOptions={{ headerShown: false }}>
       <StudyStack.Screen name="StudyHome" component={StudyHomeScreen} />
       <StudyStack.Screen name="Coach" component={CoachScreen} />
+      <StudyStack.Screen name="StudyAI" component={StudyAIResultScreen} />
+      <StudyStack.Screen name="StudyChat" component={StudyChatScreen} />
       <StudyStack.Screen name="Subjects" component={SubjectsScreen} />
       <StudyStack.Screen name="Material" component={MaterialDetailScreen} />
       <StudyStack.Screen name="Quiz" component={QuizTakeScreen} />

@@ -87,8 +87,17 @@ router.get("/logs", async (req, res) => {
 // ---- Analytics ----
 router.get("/analytics", async (req, res) => {
   const [
-    totalUsers, activeUsers, students, totalMaterials, totalQuizzes, totalSessions,
-    totalTasks, totalCompletedTasks, totalSessionsAgg, totalAttempts, totalQuizIncludes,
+    totalUsers,
+    activeUsers,
+    students,
+    totalMaterials,
+    totalQuizzes,
+    totalSessions,
+    totalTasks,
+    totalCompletedTasks,
+    totalSessionsAgg,
+    totalAttempts,
+    totalQuizIncludes,
   ] = await Promise.all([
     prisma.user.count(),
     prisma.user.count({ where: { status: "ACTIVE" } }),
@@ -106,7 +115,6 @@ router.get("/analytics", async (req, res) => {
   const totalStudyMinutes = totalSessionsAgg._sum.minutes || 0;
   const avgStudyMinutes = students ? Math.round(totalStudyMinutes / students) : 0;
 
-  // System-wide completion metrics so admin analytics mirror the student stats.
   const taskCompletionRate = totalTasks ? Math.round((totalCompletedTasks / totalTasks) * 100) : 0;
   const quizTotal = totalQuizIncludes?._sum?.total || 0;
   const quizScored = totalQuizIncludes?._sum?.score || 0;
@@ -120,20 +128,59 @@ router.get("/analytics", async (req, res) => {
     orderBy: { _sum: { minutes: "desc" } },
     take: 6,
   });
+
   const topStudentUsers = await prisma.user.findMany({
     where: { id: { in: topStudents.map((t) => t.userId) } },
     select: { id: true, name: true },
   });
+
   const mostActiveUsers = topStudents.map((t) => ({
     name: topStudentUsers.find((u) => u.id === t.userId)?.name || "Unknown",
-    minutes: t._sum.minutes,
+    minutes: t._sum.minutes || 0,
   }));
 
+  const now = new Date();
+  const last7Days = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    const daySessions = await prisma.pomodoroSession.findMany({
+      where: {
+        type: "focus",
+        startedAt: {
+          gte: new Date(`${key}T00:00:00.000Z`),
+          lt: new Date(`${key}T23:59:59.999Z`),
+        },
+      },
+      select: { minutes: true },
+    });
+    const minutes = daySessions.reduce((sum, session) => sum + (session.minutes || 0), 0);
+    last7Days.push({ date: key, minutes });
+  }
+
   res.json({
-    totalUsers, activeUsers, students, totalMaterials, totalQuizzes,
-    totalSessions, totalStudyMinutes, avgStudyMinutes, mostActiveUsers,
-    totalTasks, totalCompletedTasks, taskCompletionRate,
-    totalAttempts, averageQuizScore, quizCompletionRate,
+    totalUsers,
+    activeUsers,
+    students,
+    totalMaterials,
+    totalQuizzes,
+    totalSessions,
+    totalFocusSessions: totalSessions,
+    totalStudyMinutes,
+    avgStudyMinutes,
+    mostActiveUsers,
+    totalTasks,
+    totalCompletedTasks,
+    taskCompletionRate,
+    totalAttempts,
+    averageQuizScore,
+    quizCompletionRate,
+    last7Days,
+    completionRate: taskCompletionRate,
+    averageStudyMinutes: avgStudyMinutes,
+    quizCompletionRate,
+    totalCompletedTasks,
   });
 });
 

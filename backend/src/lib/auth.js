@@ -32,7 +32,7 @@ function verifyToken(token) {
 
 // Strip sensitive fields before sending a user object back to the client
 function publicUser(user) {
-  const { passwordHash, ...safe } = user;
+  const { passwordHash, emailVerificationCode, ...safe } = user;
   return safe;
 }
 
