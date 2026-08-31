@@ -27,11 +27,10 @@ export default function LoginScreen({ navigation }) {
       // Navigation happens automatically — RootNavigator re-renders once
       // `user` is set and routes by role.
     } catch (e) {
-      // Check if the error is due to unverified email
       if (e.requiresVerification) {
-        // Send user to the VerifyEmail screen and trigger an automatic
-        // resend of the verification code so they can immediately verify.
         navigation.navigate("VerifyEmail", { email: e.email, autoSend: true });
+      } else if (e.maintenanceMode) {
+        setError("The app is currently in maintenance mode. Please try again later.");
       } else {
         setError(e.message);
       }

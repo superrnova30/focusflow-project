@@ -103,8 +103,9 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
   },
   inputWrapper: {
-    flex: 1,
+    width: "100%",
     alignSelf: "stretch",
+    marginBottom: 12,
   },
   label: {
     fontSize: 13,

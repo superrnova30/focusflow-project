@@ -20,6 +20,7 @@ export function AuthProvider({ children }) {
           retryOfflineWrites();
         } catch (e) {
           await AsyncStorage.removeItem("focusflow_token");
+          setUser(null);
         }
       }
       setBooting(false);
@@ -39,6 +40,11 @@ export function AuthProvider({ children }) {
         throw Object.assign(new Error(err.response.data.error), {
           requiresVerification: true,
           email: err.response.data.email,
+        });
+      }
+      if (err.response?.status === 503 && err.response?.data?.maintenanceMode) {
+        throw Object.assign(new Error(err.response.data.error), {
+          maintenanceMode: true,
         });
       }
       throw err;

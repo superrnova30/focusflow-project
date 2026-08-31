@@ -13,6 +13,10 @@ const router = express.Router();
 const resetTokens = new Map();
 const verificationTokens = new Map();
 
+async function getSystemSettings() {
+  return prisma.systemSettings.findUnique({ where: { id: 1 } });
+}
+
 function buildResetPayload(user, rawToken) {
   const token = rawToken || crypto.randomBytes(8).toString("hex").toUpperCase();
   const code = token.slice(0, 8).toUpperCase();
@@ -189,6 +193,14 @@ router.post("/login", async (req, res) => {
     if (!user) return res.status(401).json({ error: "Incorrect email or password" });
     if (user.status === "DISABLED") return res.status(403).json({ error: "This account has been disabled" });
 
+    const settings = await getSystemSettings();
+    if (settings?.maintenanceMode && user.role !== "ADMIN") {
+      return res.status(503).json({
+        error: "The system is currently in maintenance mode. Please try again later.",
+        maintenanceMode: true,
+      });
+    }
+
     const ok = await verifyPassword(password, user.passwordHash);
     if (!ok) return res.status(401).json({ error: "Incorrect email or password" });
 
@@ -364,8 +376,20 @@ router.post("/verify-email", async (req, res) => {
   }
 });
 
-router.get("/me", requireAuth, (req, res) => {
+router.get("/me", requireAuth, async (req, res) => {
+  const settings = await getSystemSettings();
+  if (settings?.maintenanceMode && req.user.role !== "ADMIN") {
+    return res.status(503).json({
+      error: "The system is currently in maintenance mode. Please try again later.",
+      maintenanceMode: true,
+    });
+  }
   res.json({ user: publicUser(req.user) });
+});
+
+router.get("/system-status", async (req, res) => {
+  const settings = await getSystemSettings();
+  res.json({ maintenanceMode: Boolean(settings?.maintenanceMode) });
 });
 
 // GET /api/auth/verify-email?token=...

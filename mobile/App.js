@@ -1,14 +1,14 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { NavigationContainer, DefaultTheme, DarkTheme } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { StatusBar } from "expo-status-bar";
-import { AppState, View, ActivityIndicator } from "react-native";
+import { AppState, View, ActivityIndicator, Text } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
 import { ThemeProvider, useTheme } from "./src/context/ThemeContext";
-import { flushQueue } from "./src/api/client";
+import client, { flushQueue } from "./src/api/client";
 
 import HomeScreen from "./src/screens/HomeScreen";
 import LoginScreen from "./src/screens/LoginScreen";
@@ -44,6 +44,22 @@ import AdminHomeScreen from "./src/screens/AdminHomeScreen";
 const AuthStack = createNativeStackNavigator();
 const StudentTabs = createBottomTabNavigator();
 const StudyStack = createNativeStackNavigator();
+
+function MaintenanceScreen() {
+  const { colors } = useTheme();
+  return (
+    <View style={{ flex: 1, backgroundColor: colors.bg, justifyContent: "center", alignItems: "center", padding: 24 }}>
+      <View style={{ maxWidth: 420, width: "100%", padding: 24, borderRadius: 20, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }}>
+        <Text style={{ color: colors.text, fontSize: 24, fontWeight: "700", textAlign: "center", marginBottom: 12 }}>
+          System Maintenance
+        </Text>
+        <Text style={{ color: colors.textMuted, fontSize: 14, lineHeight: 22, textAlign: "center" }}>
+          FocusFlow is temporarily unavailable while the admin performs maintenance. Please try again later.
+        </Text>
+      </View>
+    </View>
+  );
+}
 
 function AuthNavigator() {
   return (
@@ -133,8 +149,37 @@ function StudentNavigator() {
 }
 
 function RootNavigator() {
-  const { user, booting } = useAuth();
+  const { user, booting, logout } = useAuth();
   const { colors, isDark } = useTheme();
+  const [maintenanceMode, setMaintenanceMode] = useState(false);
+
+  useEffect(() => {
+    if (!user || user.role === "ADMIN") {
+      setMaintenanceMode(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { data } = await client.get("/auth/system-status");
+        if (!cancelled) {
+          const inMaintenance = Boolean(data?.maintenanceMode);
+          setMaintenanceMode(inMaintenance);
+          if (inMaintenance) {
+            await logout();
+          }
+        }
+      } catch (e) {
+        if (!cancelled) setMaintenanceMode(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, logout]);
 
   const navTheme = {
     ...(isDark ? DarkTheme : DefaultTheme),
@@ -154,6 +199,10 @@ function RootNavigator() {
         <ActivityIndicator color={colors.tomato} />
       </View>
     );
+  }
+
+  if (maintenanceMode) {
+    return <MaintenanceScreen />;
   }
 
   return (
