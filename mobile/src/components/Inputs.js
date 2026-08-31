@@ -83,9 +83,9 @@ export function Button({ title, onPress, loading, variant = "primary", disabled,
 const styles = StyleSheet.create({
   input: {
     flex: 1,
-    minHeight: 48,
+    minHeight: 52,
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingVertical: 14,
     fontSize: 16,
     minWidth: 0,
   },
@@ -104,6 +104,8 @@ const styles = StyleSheet.create({
   },
   inputWrapper: {
     width: "100%",
+    flex: 1,
+    minWidth: 0,
     alignSelf: "stretch",
     marginBottom: 12,
   },
@@ -118,8 +120,9 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 10,
-    minHeight: 50,
+    minHeight: 54,
     minWidth: 0,
+    width: "100%",
   },
   buttonText: { fontWeight: "700", fontSize: 15 },
   toggle: {
