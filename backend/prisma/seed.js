@@ -11,15 +11,35 @@ async function main() {
 
   const admin = await prisma.user.upsert({
     where: { email: "admin@school.edu" },
-    update: {},
-    create: { name: "You (Admin)", email: "admin@school.edu", passwordHash: adminPasswordHash, role: "ADMIN" },
+    update: {
+      passwordHash: adminPasswordHash,
+      role: "ADMIN",
+      emailVerified: true,
+      status: "ACTIVE",
+    },
+    create: { name: "You (Admin)", email: "admin@school.edu", passwordHash: adminPasswordHash, role: "ADMIN", emailVerified: true },
   });
 
   const student = await prisma.user.upsert({
     where: { email: "student1@school.edu" },
-    update: {},
+    update: {
+      passwordHash: demoPasswordHash,
+      role: "STUDENT",
+      emailVerified: true,
+      status: "ACTIVE",
+      course: "BS Computer Science",
+      yearLevel: "2nd Year",
+      section: "CS-2A",
+      studentId: "2024-10234",
+      xp: 0,
+      hearts: 5,
+      correctAnswers: 0,
+      wrongAnswers: 0,
+      totalXpEarned: 0,
+    },
     create: {
       name: "Mika Santos", email: "student1@school.edu", passwordHash: demoPasswordHash, role: "STUDENT",
+      emailVerified: true,
       course: "BS Computer Science", yearLevel: "2nd Year", section: "CS-2A", studentId: "2024-10234",
       xp: 0, hearts: 5, correctAnswers: 0, wrongAnswers: 0, totalXpEarned: 0,
     },

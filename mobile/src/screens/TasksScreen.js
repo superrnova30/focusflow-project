@@ -16,6 +16,9 @@ export default function TasksScreen() {
   const [subjects, setSubjects] = useState([]);
   const [title, setTitle] = useState("");
   const [subjectName, setSubjectName] = useState("");
+  const [editingTask, setEditingTask] = useState(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editSubjectName, setEditSubjectName] = useState("");
   const [loading, setLoading] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -55,6 +58,32 @@ export default function TasksScreen() {
     setSubjectName("");
   };
 
+  const resetEditTaskForm = () => {
+    setEditingTask(null);
+    setEditTitle("");
+    setEditSubjectName("");
+  };
+
+  const closeTaskModal = () => {
+    setShowAddModal(false);
+    resetNewTaskForm();
+    resetEditTaskForm();
+  };
+
+  const upsertSubjectByName = async (rawName) => {
+    const inlineName = (rawName || "").trim();
+    if (!inlineName) return null;
+
+    const existing = subjects.find(
+      (s) => s.name.toLowerCase() === inlineName.toLowerCase()
+    );
+    if (existing) return existing.id;
+
+    const { data: subData } = await client.post("/subjects", { name: inlineName });
+    setSubjects((prev) => [subData.subject, ...prev]);
+    return subData.subject.id;
+  };
+
   const addTask = async () => {
     if (!title.trim()) {
       Alert.alert("Missing title", "Please enter a task name.");
@@ -62,20 +91,7 @@ export default function TasksScreen() {
     }
     setLoading(true);
     try {
-      const inlineName = subjectName.trim();
-      let subjectId = null;
-      if (inlineName) {
-        const existing = subjects.find(
-          (s) => s.name.toLowerCase() === inlineName.toLowerCase()
-        );
-        if (existing) {
-          subjectId = existing.id;
-        } else {
-          const { data: subData } = await client.post("/subjects", { name: inlineName });
-          subjectId = subData.subject.id;
-          setSubjects((prev) => [subData.subject, ...prev]);
-        }
-      }
+      const subjectId = await upsertSubjectByName(subjectName);
       const { data } = await client.post("/tasks", {
         title: title.trim(),
         subjectId,
@@ -84,6 +100,35 @@ export default function TasksScreen() {
       setTasks((prev) => [data.task, ...prev]);
       await fetchTasks();
       setShowAddModal(false);
+    } catch (e) {
+      Alert.alert("Error", e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateTask = async () => {
+    if (!editingTask) return;
+    if (!editTitle.trim()) {
+      Alert.alert("Missing title", "Please enter a task name.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const subjectId = (editSubjectName || "").trim()
+        ? await upsertSubjectByName(editSubjectName)
+        : null;
+
+      const { data } = await client.patch(`/tasks/${editingTask.id}`, {
+        title: editTitle.trim(),
+        subjectId,
+      });
+
+      const updatedTask = data.task;
+      setTasks((prev) => prev.map((task) => task.id === editingTask.id ? { ...task, ...updatedTask, subject: updatedTask.subject || task.subject } : task));
+      await fetchTasks();
+      closeTaskModal();
     } catch (e) {
       Alert.alert("Error", e.message);
     } finally {
@@ -167,7 +212,15 @@ export default function TasksScreen() {
             <Text style={styles.toggle}>{showArchived ? "View Active" : "View Archived"}</Text>
           </Pressable>
           {!showArchived && (
-            <Pressable onPress={() => setShowAddModal(true)} style={styles.primaryActionButton} accessibilityLabel="Open add task modal">
+            <Pressable
+              onPress={() => {
+                resetNewTaskForm();
+                resetEditTaskForm();
+                setShowAddModal(true);
+              }}
+              style={styles.primaryActionButton}
+              accessibilityLabel="Open add task modal"
+            >
               <Text style={styles.primaryActionText}>＋</Text>
             </Pressable>
           )}
@@ -178,9 +231,9 @@ export default function TasksScreen() {
         visible={showAddModal}
         transparent
         animationType="fade"
-        onRequestClose={() => setShowAddModal(false)}
+        onRequestClose={closeTaskModal}
       >
-        <Pressable style={styles.modalOverlay} onPress={() => setShowAddModal(false)}>
+        <Pressable style={styles.modalOverlay} onPress={closeTaskModal}>
           <KeyboardAvoidingView
             behavior={Platform.OS === "ios" ? "padding" : undefined}
             style={styles.modalContainer}
@@ -191,8 +244,8 @@ export default function TasksScreen() {
                 contentContainerStyle={styles.modalScrollContent}
               >
                 <View style={styles.modalHeader}>
-                  <Text style={styles.modalTitle}>New Task</Text>
-                  <Pressable onPress={() => setShowAddModal(false)} style={styles.closeButton} accessibilityLabel="Close new task modal">
+                  <Text style={styles.modalTitle}>{editingTask ? "Edit Task" : "New Task"}</Text>
+                  <Pressable onPress={closeTaskModal} style={styles.closeButton} accessibilityLabel="Close task modal">
                     <Text style={styles.closeButtonText}>×</Text>
                   </Pressable>
                 </View>
@@ -200,8 +253,8 @@ export default function TasksScreen() {
                 <View style={styles.modalFieldGroup}>
                   <Input
                     label="Task name"
-                    value={title}
-                    onChangeText={setTitle}
+                    value={editingTask ? editTitle : title}
+                    onChangeText={editingTask ? setEditTitle : setTitle}
                     placeholder={showArchived ? "Archived tasks cannot be added" : "What do you need to do?"}
                     editable={!showArchived}
                     style={[styles.modalInput, { backgroundColor: colors.surface, borderColor: colors.mint, borderWidth: 1.5 }]}
@@ -212,34 +265,25 @@ export default function TasksScreen() {
                 <View style={styles.modalFieldGroup}>
                   <Input
                     label="Subject (optional)"
-                    value={subjectName}
-                    onChangeText={setSubjectName}
+                    value={editingTask ? editSubjectName : subjectName}
+                    onChangeText={editingTask ? setEditSubjectName : setSubjectName}
                     placeholder="e.g. Math, Biology, History"
                     editable={!showArchived}
                     style={[styles.modalInput, { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1.2 }]}
                   />
-
-                  <Pressable
-                    onPress={addTask}
-                    style={[styles.subjectAddButton, showArchived && styles.disabledButton]}
-                    disabled={showArchived || loading}
-                    accessibilityLabel="Add task with optional subject"
-                  >
-                    <Text style={styles.subjectAddButtonText}>{loading ? "..." : "+"}</Text>
-                  </Pressable>
                 </View>
 
                 <Pressable
-                  onPress={addTask}
+                  onPress={editingTask ? updateTask : addTask}
                   style={[styles.modalAddButton, loading && styles.disabledButton]}
                   disabled={showArchived || loading}
-                  accessibilityLabel="Add new task"
+                  accessibilityLabel={editingTask ? "Save task" : "Add new task"}
                 >
                   <View style={styles.modalAddButtonInner}>
                     <View style={styles.modalPlusBadge}>
                       <Text style={styles.modalPlusText}>{loading ? "..." : "+"}</Text>
                     </View>
-                    <Text style={styles.modalAddButtonText}>{loading ? "Adding..." : "Add Task"}</Text>
+                    <Text style={styles.modalAddButtonText}>{loading ? (editingTask ? "Saving..." : "Adding...") : (editingTask ? "Save Changes" : "Add Task")}</Text>
                   </View>
                 </Pressable>
               </ScrollView>
@@ -287,6 +331,14 @@ export default function TasksScreen() {
                   </>
                 ) : (
                   <>
+                    <Pressable onPress={() => {
+                      setEditingTask(item);
+                      setEditTitle(item.title || "");
+                      setEditSubjectName(item.subject?.name || "");
+                      setShowAddModal(true);
+                    }} style={[styles.actionBtn, !isWide && styles.actionBtnCompact]}>
+                      <Text style={[styles.actionText, { color: colors.mint, fontSize: isWide ? 13 : 12 }]}>Edit</Text>
+                    </Pressable>
                     <Pressable onPress={() => archiveTask(item)} style={[styles.actionBtn, !isWide && styles.actionBtnCompact]}>
                       <Text style={[styles.actionText, { color: colors.violet, fontSize: isWide ? 13 : 12 }]}>Archive</Text>
                     </Pressable>
@@ -396,35 +448,37 @@ const useStyles = (colors) =>
       backgroundColor: "rgba(0,0,0,0.46)",
       justifyContent: "center",
       alignItems: "center",
-      padding: 20,
+      paddingHorizontal: 18,
+      paddingVertical: 28,
     },
     modalContainer: {
       width: "100%",
-      maxWidth: 460,
+      maxWidth: 620,
       alignItems: "center",
     },
     modalCard: {
       width: "100%",
-      maxHeight: "82%",
+      maxHeight: "96%",
+      minHeight: 470,
       backgroundColor: colors.surface,
-      borderRadius: 20,
+      borderRadius: 28,
       borderWidth: 1,
       borderColor: colors.border,
-      padding: 18,
+      padding: 22,
       shadowColor: "#000",
-      shadowOffset: { width: 0, height: 5 },
-      shadowOpacity: 0.18,
-      shadowRadius: 18,
-      elevation: 8,
+      shadowOffset: { width: 0, height: 8 },
+      shadowOpacity: 0.22,
+      shadowRadius: 24,
+      elevation: 12,
     },
     modalScrollContent: {
-      paddingBottom: 4,
+      paddingBottom: 12,
     },
     modalHeader: {
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "space-between",
-      marginBottom: 14,
+      marginBottom: 18,
     },
     modalTitle: {
       color: colors.text,
@@ -449,46 +503,23 @@ const useStyles = (colors) =>
     },
     modalFieldGroup: {
       width: "100%",
-      marginBottom: 8,
-    },
-    subjectAddButton: {
-      alignSelf: "flex-end",
-      width: 46,
-      height: 46,
-      borderRadius: 14,
-      backgroundColor: colors.tomato,
-      alignItems: "center",
-      justifyContent: "center",
-      marginTop: 8,
-      shadowColor: "#000",
-      shadowOffset: { width: 0, height: 2 },
-      shadowOpacity: 0.15,
-      shadowRadius: 7,
-      elevation: 3,
-      borderWidth: 2,
-      borderColor: "rgba(255,255,255,0.35)",
-    },
-    subjectAddButtonText: {
-      color: "#fff",
-      fontSize: 28,
-      fontWeight: "800",
-      lineHeight: 28,
+      marginBottom: 16,
     },
     modalInput: {
       width: "100%",
-      marginBottom: 10,
+      marginBottom: 16,
     },
     modalAddButton: {
       width: "100%",
-      minHeight: 62,
-      borderRadius: 16,
+      minHeight: 74,
+      borderRadius: 18,
       backgroundColor: colors.tomato,
       alignItems: "center",
       justifyContent: "center",
       alignSelf: "stretch",
-      marginTop: 10,
-      paddingVertical: 14,
-      paddingHorizontal: 16,
+      marginTop: 14,
+      paddingVertical: 18,
+      paddingHorizontal: 20,
       shadowColor: "#000",
       shadowOffset: { width: 0, height: 3 },
       shadowOpacity: 0.18,

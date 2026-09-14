@@ -3,12 +3,12 @@ import { TextInput, Pressable, Text, StyleSheet, ActivityIndicator, View } from 
 import { RADIUS } from "../theme/theme";
 import { useTheme } from "../context/ThemeContext";
 
-export function Input({ style, label, secureTextEntry, ...props }) {
+export function Input({ style, label, secureTextEntry, compact = false, ...props }) {
   const { colors } = useTheme();
   const [secure, setSecure] = useState(!!secureTextEntry);
 
   // Resolve marginBottom whether `style` is an object or array
-  let wrapperMarginBottom = 12;
+  let wrapperMarginBottom = compact ? 8 : 12;
   if (style) {
     if (Array.isArray(style)) {
       for (const s of style) {
@@ -32,6 +32,7 @@ export function Input({ style, label, secureTextEntry, ...props }) {
             backgroundColor: colors.surface,
             borderColor: colors.border,
           },
+          compact && styles.compactInputRow,
           style,
         ]}
       >
@@ -39,6 +40,7 @@ export function Input({ style, label, secureTextEntry, ...props }) {
           placeholderTextColor={colors.textMuted}
           style={[
             styles.input,
+            compact && styles.compactInput,
             { color: colors.text },
           ]}
           secureTextEntry={secure}
@@ -89,6 +91,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     minWidth: 0,
   },
+  compactInput: {
+    minHeight: 38,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    fontSize: 14,
+  },
   button: {
     borderRadius: RADIUS.lg,
     paddingVertical: 14,
@@ -123,6 +131,11 @@ const styles = StyleSheet.create({
     minHeight: 54,
     minWidth: 0,
     width: "100%",
+  },
+  compactInputRow: {
+    minHeight: 38,
+    height: 38,
+    paddingHorizontal: 8,
   },
   buttonText: { fontWeight: "700", fontSize: 15 },
   toggle: {

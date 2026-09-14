@@ -1,45 +1,22 @@
 import React from "react";
-import { View, Text, StyleSheet, Pressable, Image } from "react-native";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "../context/ThemeContext";
-import { useAuth } from "../context/AuthContext";
 
 import AdminDashboardScreen from "./AdminDashboardScreen";
 import AdminUsersScreen from "./AdminUsersScreen";
+import AdminContentScreen from "./AdminContentScreen";
 import AdminLogsScreen from "./AdminLogsScreen";
 import AdminSettingsScreen from "./AdminSettingsScreen";
 
 const Tabs = createBottomTabNavigator();
-
-function AdminHeader({ title }) {
-  const { logout } = useAuth();
-  const { colors } = useTheme();
-  return (
-    <SafeAreaView edges={["top"]} style={[styles.headerSafe, { backgroundColor: colors.bg }]}>
-      <View style={styles.headerRow}>
-        <View style={{ flexDirection: "row", alignItems: "center" }}>
-          <Image source={require("../theme/logo.png")} style={styles.logoImg} resizeMode="contain" />
-          <Text style={[styles.headerTitle, { color: colors.text }]}>· Admin</Text>
-        </View>
-        <Pressable
-          onPress={logout}
-          style={[styles.logoutBtn, { borderColor: colors.border, backgroundColor: colors.surface }]}
-        >
-          <Text style={[styles.logoutText, { color: colors.textMuted }]}>Log out</Text>
-        </Pressable>
-      </View>
-    </SafeAreaView>
-  );
-}
 
 export default function AdminHomeScreen() {
   const { colors } = useTheme();
   return (
     <Tabs.Navigator
       screenOptions={{
-        header: () => <AdminHeader />,
+        headerShown: false,
         tabBarActiveTintColor: colors.tomato,
         tabBarInactiveTintColor: colors.textMuted,
         tabBarStyle: { backgroundColor: colors.surface, borderTopColor: colors.border },
@@ -63,6 +40,14 @@ export default function AdminHomeScreen() {
         }}
       />
       <Tabs.Screen
+        name="Content"
+        component={AdminContentScreen}
+        options={{
+          tabBarLabel: "Content",
+          tabBarIcon: ({ color, size }) => <Ionicons name="albums" color={color} size={size} />,
+        }}
+      />
+      <Tabs.Screen
         name="Logs"
         component={AdminLogsScreen}
         options={{
@@ -81,18 +66,3 @@ export default function AdminHomeScreen() {
     </Tabs.Navigator>
   );
 }
-
-const styles = StyleSheet.create({
-  headerSafe: {},
-  headerRow: {
-    flexDirection: "row", justifyContent: "space-between", alignItems: "center",
-    paddingHorizontal: 16, paddingVertical: 12,
-  },
-  headerTitle: { fontSize: 18, fontWeight: "700" },
-  logoImg: { width: 36, height: 36, marginRight: 10 },
-  logoutBtn: {
-    borderWidth: 1,
-    paddingVertical: 6, paddingHorizontal: 14, borderRadius: 8,
-  },
-  logoutText: { fontSize: 12, fontWeight: "700" },
-});

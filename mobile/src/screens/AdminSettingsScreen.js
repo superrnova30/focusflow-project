@@ -3,10 +3,12 @@ import { View, Text, StyleSheet, ScrollView, Switch, Alert } from "react-native"
 import { Screen, Card } from "../components/Screen";
 import { Input, Button } from "../components/Inputs";
 import { useTheme } from "../context/ThemeContext";
+import { useAuth } from "../context/AuthContext";
 import client from "../api/client";
 
 export default function AdminSettingsScreen() {
   const { colors } = useTheme();
+  const { logout } = useAuth();
   const styles = useStyles(colors);
   const [maintenanceMode, setMaintenanceMode] = useState(false);
   const [allowSignups, setAllowSignups] = useState(true);
@@ -74,6 +76,11 @@ export default function AdminSettingsScreen() {
         </Card>
 
         <Button title="Save settings" onPress={save} loading={saving} />
+
+        <Card style={{ marginTop: 24 }}>
+          <Text style={styles.sectionLabel}>ACCOUNT</Text>
+          <Button title="Log out" onPress={logout} variant="secondary" />
+        </Card>
       </ScrollView>
     </Screen>
   );
@@ -85,4 +92,5 @@ const useStyles = (colors) =>
     toggleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
     toggleLabel: { color: colors.text, fontSize: 14 },
     hint: { color: colors.textMuted, fontSize: 11.5, marginTop: 6 },
+    sectionLabel: { color: colors.textMuted, fontSize: 12, fontWeight: "700", marginBottom: 10 },
   });

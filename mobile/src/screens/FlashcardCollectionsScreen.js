@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useLayoutEffect } from "react";
 import { View, Text, StyleSheet, FlatList, Pressable, Alert } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { Screen, Card } from "../components/Screen";
@@ -23,6 +23,16 @@ export default function FlashcardCollectionsScreen({ navigation }) {
       Alert.alert("Error", e.message);
     }
   }, []);
+
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerShown: true,
+      title: "Flashcard Collections",
+      headerTitleStyle: { fontWeight: "700", fontSize: 18 },
+      headerBackTitle: "Back",
+      headerTintColor: colors.text,
+    });
+  }, [navigation, colors.text]);
 
   useFocusEffect(
     useCallback(() => {

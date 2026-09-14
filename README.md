@@ -58,7 +58,7 @@ data model, AI integration) already made and tested.
 - [PostgreSQL](https://www.postgresql.org/download/) running locally (or a hosted instance)
 - [VS Code](https://code.visualstudio.com/) with the **ESLint** and **Prisma** extensions (optional but helpful)
 - [Expo Go](https://expo.dev/go) app on your phone, or an iOS/Android simulator, for running the mobile app
-- An [Anthropic API key](https://console.anthropic.com/) for the AI features
+- A [Google AI Studio API key](https://aistudio.google.com/app/apikey) for the backend AI features
 
 ---
 
@@ -73,7 +73,8 @@ cp .env.example .env
 Edit `.env`:
 - `DATABASE_URL` — your PostgreSQL connection string
 - `JWT_SECRET` — any long random string
-- `ANTHROPIC_API_KEY` — your API key
+- `GEMINI_API_KEY` — your Google Gemini API key
+- `OPENAI_API_KEY` — optional fallback if you still want the legacy provider enabled
 
 Create the database and run migrations:
 

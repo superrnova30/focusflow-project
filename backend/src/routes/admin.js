@@ -11,7 +11,7 @@ router.get("/users", async (req, res) => {
   const { search, role, status } = req.query;
   const users = await prisma.user.findMany({
     where: {
-      ...(search ? { OR: [{ name: { contains: search, mode: "insensitive" } }, { email: { contains: search, mode: "insensitive" } }] } : {}),
+      ...(search ? { name: { contains: search, mode: "insensitive" } } : {}),
       ...(role ? { role } : {}),
       ...(status ? { status } : {}),
     },
@@ -200,6 +200,185 @@ router.patch("/system", async (req, res) => {
     where: { id: 1 }, update: data, create: { id: 1, ...data },
   });
   res.json({ settings });
+});
+
+// ---- Content oversight (Cards / Notes / AI Coach) ----
+// Admins can inspect and moderate student-generated study content. These
+// endpoints read the SAME tables the student screens write to, so the admin
+// side always reflects what users create (kept in sync by the database).
+
+function normalizeSearch(search) {
+  return search && String(search).trim() ? String(search).trim() : null;
+}
+
+// Aggregate counts for the admin content dashboard.
+router.get("/content-stats", async (req, res) => {
+  const countOrZero = (p) => p.catch(() => 0);
+  const results = await Promise.all([
+    countOrZero(prisma.flashcardCollection.count()),
+    countOrZero(prisma.flashcard.count()),
+    countOrZero(prisma.studyNote.count()),
+    countOrZero(prisma.studyNote.count({ where: { source: "ai" } })),
+    countOrZero(prisma.studyNote.count({ where: { source: "manual" } })),
+    countOrZero(prisma.coachInsight.count()),
+  ]);
+  const totalCollections = results[0];
+  const totalFlashcards = results[1];
+  const totalNotes = results[2];
+  const aiNotes = results[3];
+  const manualNotes = results[4];
+  const totalCoachInsights = results[5];
+  res.json({
+    stats: {
+      totalCollections,
+      totalFlashcards,
+      totalNotes,
+      aiNotes,
+      manualNotes,
+      totalCoachInsights,
+    },
+  });
+});
+
+// ---- Cards ----
+// List flashcard collections across all users (optionally filtered).
+router.get("/flashcards", async (req, res) => {
+  const search = normalizeSearch(req.query.search);
+  const { userId } = req.query;
+  const collections = await prisma.flashcardCollection.findMany({
+    where: {
+      ...(userId ? { userId } : {}),
+      ...(search ? { name: { contains: search, mode: "insensitive" } } : {}),
+    },
+    include: {
+      _count: { select: { flashcards: true } },
+      user: { select: { id: true, name: true, email: true } },
+      flashcards: { take: 5 },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 200,
+  });
+  res.json({ collections });
+});
+
+// Read one collection with all its cards.
+router.get("/flashcards/collections/:id", async (req, res) => {
+  const collection = await prisma.flashcardCollection.findUnique({
+    where: { id: req.params.id },
+    include: {
+      flashcards: true,
+      user: { select: { id: true, name: true, email: true } },
+    },
+  });
+  if (!collection) return res.status(404).json({ error: "Collection not found" });
+  res.json({ collection });
+});
+
+// Delete a student collection (its cards cascade).
+// Declared BEFORE /flashcards/:id on purpose — Express matches in order, so
+// otherwise "collections" would be captured as the :id of the card route.
+router.delete("/flashcards/collections/:id", async (req, res) => {
+  const result = await prisma.flashcardCollection.deleteMany({ where: { id: req.params.id } });
+  if (result.count === 0) return res.status(404).json({ error: "Collection not found" });
+  await prisma.activityLog.create({
+    data: { userId: req.user.id, action: "admin_delete_collection", meta: { collectionId: req.params.id } },
+  });
+  res.json({ ok: true });
+});
+
+// Delete a single flashcard.
+router.delete("/flashcards/:id", async (req, res) => {
+  const result = await prisma.flashcard.deleteMany({ where: { id: req.params.id } });
+  if (result.count === 0) return res.status(404).json({ error: "Flashcard not found" });
+  await prisma.activityLog.create({
+    data: { userId: req.user.id, action: "admin_delete_flashcard", meta: { flashcardId: req.params.id } },
+  });
+  res.json({ ok: true });
+});
+
+
+// ---- Notes ----
+// List study notes across all users (optionally filtered).
+router.get("/notes", async (req, res) => {
+  const search = normalizeSearch(req.query.search);
+  const { userId, source } = req.query;
+  const notes = await prisma.studyNote.findMany({
+    where: {
+      ...(userId ? { userId } : {}),
+      ...(source ? { source } : {}),
+      ...(search ? { title: { contains: search, mode: "insensitive" } } : {}),
+    },
+    include: { user: { select: { id: true, name: true, email: true } } },
+    orderBy: { updatedAt: "desc" },
+    take: 200,
+  });
+  res.json({ notes });
+});
+
+// Read one note in full (admins can open any student note).
+router.get("/notes/:id", async (req, res) => {
+  const note = await prisma.studyNote.findUnique({
+    where: { id: req.params.id },
+    include: { user: { select: { id: true, name: true, email: true } } },
+  });
+  if (!note) return res.status(404).json({ error: "Note not found" });
+  res.json({ note });
+});
+
+// Delete an inappropriate note.
+router.delete("/notes/:id", async (req, res) => {
+  const result = await prisma.studyNote.deleteMany({ where: { id: req.params.id } });
+  if (result.count === 0) return res.status(404).json({ error: "Note not found" });
+  await prisma.activityLog.create({
+    data: { userId: req.user.id, action: "admin_delete_note", meta: { noteId: req.params.id } },
+  });
+  res.json({ ok: true });
+});
+
+// ---- AI Coach ----
+// List recent coach insights (all students) for admin review.
+router.get("/coach-insights", async (req, res) => {
+  let insights = [];
+  try {
+    insights = await prisma.coachInsight.findMany({
+      include: { user: { select: { id: true, name: true, email: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+  } catch (e) {
+    insights = [];
+  }
+  res.json({ insights });
+});
+
+// Generate a coach insight for ANY student (admin oversight / support).
+router.post("/coach/:userId", async (req, res) => {
+  try {
+    const { generateCoachInsight } = require("../lib/ai");
+    const { buildCoachPayloadForUser } = require("../lib/coach");
+    const payload = await buildCoachPayloadForUser(req.params.userId);
+    if (!payload) return res.status(404).json({ error: "Student not found" });
+    const insight = await generateCoachInsight(payload);
+    try {
+      await prisma.coachInsight.create({
+        data: {
+          userId: req.params.userId,
+          summary: insight.summary || null,
+          data: insight,
+          generatedById: req.user.id,
+        },
+      });
+    } catch (e) {
+      console.warn("Could not persist coach insight:", e && e.message);
+    }
+    await prisma.activityLog.create({
+      data: { userId: req.user.id, action: "admin_generate_coach", meta: { studentId: req.params.userId } },
+    });
+    res.json({ insight, payload });
+  } catch (err) {
+    console.error("Admin coach generation failed", err);
+    res.status(502).json({ error: "Could not generate a coach insight right now. Please try again." });
+  }
 });
 
 module.exports = router;

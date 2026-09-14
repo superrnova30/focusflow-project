@@ -7,6 +7,7 @@ const cors = require("cors");
 const authRoutes = require("./routes/auth");
 const taskRoutes = require("./routes/tasks");
 const aiChatRoutes = require("./routes/ai_chat");
+const aiDebugRoutes = require("./routes/ai_debug");
 const subjectRoutes = require("./routes/subjects");
 const sessionRoutes = require("./routes/sessions");
 const materialRoutes = require("./routes/materials");
@@ -23,15 +24,52 @@ const app = express();
 
 const passport = require("passport");
 
-// mounted AI routes (study pack + chat)
-app.use("/api/ai", aiRoutes);
-app.use("/api/ai", aiChatRoutes);
-
+// Apply CORS and JSON body parsing middleware early so all routes,
+// including debug routes mounted before other routers, receive parsed bodies.
 app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
-app.use(express.json({ limit: "50mb" })); // generous limit for pasted notes + base64 PDFs
+
+// Capture the raw request body for improved error messages when JSON parsing fails.
+// `verify` is called with the raw bytes before body-parser transforms them.
+app.use(express.json({
+  limit: "50mb",
+  verify: (req, _res, buf) => {
+    try {
+      req.rawBody = buf && buf.toString ? buf.toString() : undefined;
+    } catch (e) {
+      req.rawBody = undefined;
+    }
+  },
+})); // generous limit for pasted notes + base64 PDFs
+
+// Also accept urlencoded bodies from debug clients that post JS-style object
+// literals without proper JSON quoting.
+app.use(express.urlencoded({
+  extended: true,
+  limit: "50mb",
+  verify: (req, _res, buf) => {
+    try {
+      req.rawBody = buf && buf.toString ? buf.toString() : req.rawBody;
+    } catch (e) {
+      // ignore
+    }
+  },
+}));
 
 // Initialize passport for OAuth endpoints (strategies configured in routes)
 app.use(passport.initialize());
+
+// mounted AI routes (study pack + chat)
+// Optional debug-only route for local testing. Mount it BEFORE the
+// auth-protected AI routes so router-level `requireAuth` doesn't intercept
+// requests intended for the debug endpoint. Enable by setting
+// ENABLE_AI_DEBUG=true in your backend .env (do NOT enable in production).
+if (String(process.env.ENABLE_AI_DEBUG).toLowerCase() === 'true') {
+  console.log('AI debug routes enabled at /api/ai/debug-chat');
+  app.use('/api/ai', aiDebugRoutes);
+}
+
+app.use("/api/ai", aiRoutes);
+app.use("/api/ai", aiChatRoutes);
 
 // Serve uploaded PDFs so fileUrl links resolve to a real file.
 app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
@@ -56,27 +94,44 @@ app.use("/api/push", pushRoutes);
 // Fallback 404
 app.use((req, res) => res.status(404).json({ error: "Not found" }));
 
-// Central error handler — keeps stack traces out of API responses
+// Central error handler — keeps stack traces out of API responses and
+// returns a clearer message for invalid JSON payloads.
 app.use((err, req, res, next) => {
+  // If body-parser failed to parse JSON, it sets `type: 'entity.parse.failed'`.
+  if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError)) {
+    console.error('JSON parse error for request:', req.method, req.originalUrl);
+    console.error('Raw body:', typeof req.rawBody === 'string' ? req.rawBody : '<unavailable>');
+    return res.status(400).json({
+      error: 'Invalid JSON payload',
+      message: err.message,
+      rawBody: typeof req.rawBody === 'string' ? req.rawBody : undefined,
+    });
+  }
+
   console.error(err);
-  res.status(500).json({ error: "Something went wrong" });
+  res.status(500).json({ error: 'Something went wrong' });
 });
 
-function getAvailablePort(port) {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once("error", (err) => {
-      if (err.code === "EADDRINUSE") {
-        resolve(getAvailablePort(port + 1));
-      } else {
-        reject(err);
-      }
+async function getAvailablePort(startPort, maxAttempts = 25) {
+  let port = Number(startPort);
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const isTaken = await new Promise((resolve) => {
+      const server = net.createServer();
+      server.once("error", (err) => {
+        resolve(err && err.code === "EADDRINUSE");
+      });
+      server.once("listening", () => {
+        server.close(() => resolve(false));
+      });
+      server.listen(port, "0.0.0.0");
     });
-    server.once("listening", () => {
-      server.close(() => resolve(port));
-    });
-    server.listen(port);
-  });
+
+    if (!isTaken) return port;
+    port += 1;
+  }
+
+  throw new Error(`No available port found starting from ${startPort}`);
 }
 
 // Global handlers to prevent the server from crashing on unexpected errors
@@ -91,9 +146,16 @@ process.on('uncaughtException', (err) => {
 async function start() {
   const requestedPort = Number(process.env.PORT || 4000);
   const port = await getAvailablePort(requestedPort);
-  // Bind to 0.0.0.0 so the server is reachable from other devices on the LAN
-  let server = app.listen(port, "0.0.0.0", () => {
+  console.log(`Starting FocusFlow API on port ${port} after checking for occupied ports...`);
+
+  // Bind to 0.0.0.0 so the server is reachable from other devices on the LAN.
+  const server = app.listen(port, "0.0.0.0", () => {
     console.log(`FocusFlow API listening on http://localhost:${port} (bound to 0.0.0.0)`);
+    // Log AI provider configuration so devs can verify keys are present without
+    // printing the keys themselves.
+    const geminiConfigured = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
+    const openaiConfigured = Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.trim());
+    console.log(`AI providers - Gemini configured: ${geminiConfigured}, OpenAI configured: ${openaiConfigured}`);
   });
 
   // Log unhandled errors to avoid silent crashes during dev.
@@ -104,19 +166,9 @@ async function start() {
     console.error('Uncaught Exception:', err);
   });
 
-  server.on('error', async (err) => {
+  server.on('error', (err) => {
     if (err && err.code === 'EADDRINUSE') {
-      console.warn(`Port ${port} in use, searching for another port...`);
-      try {
-        const newPort = await getAvailablePort(port + 1);
-        server.close(() => {
-          server = app.listen(newPort, '0.0.0.0', () => {
-            console.log(`FocusFlow API listening on http://localhost:${newPort} (bound to 0.0.0.0)`);
-          });
-        });
-      } catch (e) {
-        console.error('Failed to bind to a new port', e);
-      }
+      console.warn(`Port ${port} became occupied after startup. Please free it or set PORT to a different value.`);
     } else {
       console.error('Server error', err);
     }

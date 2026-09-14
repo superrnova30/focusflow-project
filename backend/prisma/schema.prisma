@@ -71,6 +71,8 @@ model User {
   notes             StudyNote[]
   deviceTokens      DeviceToken[]
   challengeCompletions DailyChallengeCompletion[]
+  coachInsights     CoachInsight[]   @relation("CoachInsightOwner")
+  coachInsightsGenerated CoachInsight[] @relation("CoachInsightGeneratedBy")
 }
 
 model Subject {
@@ -260,6 +262,22 @@ model DeviceToken {
   createdAt DateTime @default(now())
 
   @@index([userId])
+}
+
+// AI Coach insights. A student can generate their own; admins can also generate
+// one on a student's behalf (generatedById records who triggered it). Storing
+// them keeps the user and admin sides in sync and gives admins an audit trail.
+model CoachInsight {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation("CoachInsightOwner", fields: [userId], references: [id], onDelete: Cascade)
+  summary       String?  @db.Text
+  data          Json     // the full generated insight object
+  generatedById String?
+  generatedBy   User?    @relation("CoachInsightGeneratedBy", fields: [generatedById], references: [id], onDelete: SetNull)
+  createdAt     DateTime @default(now())
+
+  @@index([userId, createdAt])
 }
 
 model DailyChallenge {

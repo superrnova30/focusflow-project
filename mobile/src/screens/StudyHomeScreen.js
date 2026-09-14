@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
   View,
   Text,
@@ -10,6 +10,9 @@ import {
   Animated,
   useWindowDimensions,
   TextInput,
+  ScrollView,
+  KeyboardAvoidingView,
+  Platform,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
@@ -18,6 +21,7 @@ import { useTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import BottomSheet from "../components/BottomSheet";
 import client from "../api/client";
+import { useAIChat } from '../context/AIChatContext';
 
 const XP_PER_CORRECT = 200;
 const MAX_HEARTS = 5;
@@ -45,9 +49,10 @@ export default function StudyHomeScreen({ navigation }) {
   const [challenge, setChallenge] = useState(null);
   const [completingChallenge, setCompletingChallenge] = useState(false);
 
-  // "I want to study..." generator
+  // Lightweight input that navigates to the dedicated AI conversation page
   const [studyTopic, setStudyTopic] = useState("");
-  const [generating, setGenerating] = useState(false);
+  const [navigatingToChat, setNavigatingToChat] = useState(false);
+  const { messages: chatMessagesContext, appendMessage } = useAIChat();
 
   // Bottom-sheet state
   const [sheetVisible, setSheetVisible] = useState(false);
@@ -161,60 +166,48 @@ useFocusEffect(
     }, [fetchAll, fetchGameState, fetchStreakLevel, fetchChallenge])
   );
 
-  // "I want to study..." → generate a gamified quiz from the topic.
-  const generateStudy = async (source) => {
-    const topic = studyTopic.trim();
-    if (source === "topic" && !topic) {
+  // When invoked, open the dedicated StudyChat page and hand off the topic.
+  const sendStudyPrompt = async (promptOverride) => {
+    const trimmed = (promptOverride ?? studyTopic ?? "").trim();
+    if (!trimmed) {
       Alert.alert("Enter a topic", "Type what you want to study, e.g. \"Photosynthesis\".");
       return;
     }
 
-    setGenerating(true);
-    try {
-      const payload = { topic: topic || "General" };
-      if (source === "notes") {
-        // Delegate to the note-import flow for pasted notes.
-        setGenerating(false);
-        navigation.navigate("NoteImport");
-        return;
-      }
-      if (source === "pdf") {
-        // Delegate to card-import flow which supports PDF upload + AI.
-        setGenerating(false);
-        navigation.navigate("CardImport");
-        return;
-      }
+    if (navigatingToChat) return; // debounce double tap
+    setNavigatingToChat(true);
+    setStudyTopic("");
+    navigation.navigate('StudyChat', { initialTopic: trimmed });
+    // reset after short delay in case component remains mounted
+    setTimeout(() => setNavigatingToChat(false), 800);
+  };
 
-      // Use the AI study endpoint to generate a study pack first.
-      try {
-        const { data } = await client.post("/ai/study", { topic: payload.topic, mode: "pack" }, { timeout: 120000 });
-        if (data && data.pack) {
-          setGenerating(false);
-          navigation.navigate("StudyAI", { pack: data.pack, topic: payload.topic });
-          return;
-        }
-      } catch (err) {
-        // If pack generation failed, fall back to quiz generation.
-      }
-
-      // Fallback: try the existing quiz generator
-      const { data } = await client.post("/game/quiz", payload, { timeout: 120000 });
-      if (!data.questions || data.questions.length === 0) {
-        Alert.alert("No questions", "The AI didn't generate any questions. Try a different topic.");
-        return;
-      }
-      navigation.navigate("GamifiedQuiz", {
-        questions: data.questions,
-        answerKey: data.answerKey,
-        topic: data.topic,
-        xp,
-        hearts,
-      });
-    } catch (e) {
-      Alert.alert("Generation failed", e.message);
-    } finally {
+  // "I want to study..." → generate a study response in-page and stay on this screen.
+  const generateStudy = async (source) => {
+    if (source === "notes") {
       setGenerating(false);
+      navigation.navigate("NoteImport");
+      return;
     }
+
+    if (source === "pdf") {
+      setGenerating(false);
+      navigation.navigate("CardImport");
+      return;
+    }
+
+    if (source === "topic") {
+      await sendStudyPrompt();
+      return;
+    }
+
+    const topic = studyTopic.trim();
+    if (!topic) {
+      Alert.alert("Enter a topic", "Type what you want to study, e.g. \"Photosynthesis\".");
+      return;
+    }
+
+    await sendStudyPrompt(topic);
   };
 
   const openSheet = () => {
@@ -509,35 +502,53 @@ useFocusEffect(
 
 </Animated.View>
 
-            {/* "I want to study..." generator */}
+            {/* Study chat area */}
             <View style={[styles.generatorCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <Text style={styles.generatorLabel}>WHAT DO YOU WANT TO LEARN?</Text>
-              <View style={styles.generatorRow}>
-                <TextInput
-                  value={studyTopic}
-                  onChangeText={setStudyTopic}
-                  placeholder="I want to study..."
-                  placeholderTextColor={colors.textMuted}
-                  style={[styles.generatorInput, { backgroundColor: colors.bg, borderColor: colors.border, color: colors.text }]}
-                  onSubmitEditing={() => generateStudy("topic")}
-                  returnKeyType="go"
-                />
-                <Pressable
-                  onPress={() => generateStudy("topic")}
-                  disabled={generating}
-                  style={({ pressed }) => [
-                    styles.generateBtn,
-                    { backgroundColor: colors.tomato, opacity: pressed || generating ? 0.8 : 1 },
-                  ]}
-                >
-                  {generating ? (
-                    <ActivityIndicator color="#fff" />
-                  ) : (
-                    <Ionicons name="sparkles" size={18} color="#fff" />
-                  )}
-                  <Text style={styles.generateBtnText}>Generate</Text>
-                </Pressable>
-              </View>
+              <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ width: '100%' }} keyboardVerticalOffset={90}>
+                <View style={styles.chatContainer}>
+                  {/* Preview: show last assistant response if available */}
+                  <View style={{ padding: 12 }}>
+                    {chatMessagesContext && chatMessagesContext.length > 0 ? (
+                      (() => {
+                        const last = [...chatMessagesContext].reverse().find((m) => m.role === 'assistant');
+                        return last ? (
+                          <View style={[styles.chatBubble, styles.assistantBubble, { backgroundColor: colors.bg, borderColor: colors.border }]}> 
+                            <Text style={[styles.chatText, { color: colors.text }]} numberOfLines={3} ellipsizeMode="tail">{last.content}</Text>
+                          </View>
+                        ) : (
+                          <Text style={{ color: colors.textMuted }}>Start a conversation with Gemini — tap Ask to open the AI chat page.</Text>
+                        );
+                      })()
+                    ) : (
+                      <Text style={{ color: colors.textMuted }}>Start a conversation with Gemini — tap Ask to open the AI chat page.</Text>
+                    )}
+                  </View>
+
+                  <View style={styles.generatorRow}>
+                    <TextInput
+                      value={studyTopic}
+                      onChangeText={setStudyTopic}
+                      placeholder="Ask Gemini about a topic..."
+                      placeholderTextColor={colors.textMuted}
+                      style={[styles.generatorInput, { backgroundColor: colors.bg, borderColor: colors.border, color: colors.text }]}
+                      onSubmitEditing={() => generateStudy("topic")}
+                      returnKeyType="send"
+                      multiline={false}
+                    />
+                    <Pressable
+                      onPress={() => generateStudy("topic")}
+                      style={({ pressed }) => [
+                        styles.generateBtn,
+                        { backgroundColor: colors.tomato, opacity: pressed ? 0.9 : 1 },
+                      ]}
+                    >
+                      <Ionicons name="sparkles" size={18} color="#fff" />
+                      <Text style={styles.generateBtnText}>Ask</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              </KeyboardAvoidingView>
 
               {/* PDF / paste-notes shortcuts */}
               <View style={styles.generatorShortcuts}>
@@ -789,25 +800,82 @@ const useStyles = (colors) =>
       letterSpacing: 0.6,
       marginBottom: 10,
     },
-    generatorRow: { flexDirection: "row", gap: 8, alignItems: "center" },
+    chatContainer: {
+      borderRadius: 16,
+      overflow: "hidden",
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.bg,
+      marginBottom: 12,
+      maxWidth: "100%",
+      // Responsive height: allow scrolling inside this container
+      minHeight: 120,
+      maxHeight: 440,
+    },
+    chatMessages: {
+      padding: 12,
+      gap: 8,
+      width: "100%",
+    },
+    chatBubble: {
+      borderRadius: 14,
+      borderWidth: 1,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      maxWidth: "85%",
+      flexShrink: 1,
+    },
+    userBubble: {
+      alignSelf: "flex-end",
+    },
+    assistantBubble: {
+      alignSelf: "flex-start",
+    },
+    chatText: {
+      fontSize: 13.5,
+      lineHeight: 20,
+      flexShrink: 1,
+      flexWrap: "wrap",
+    },
+    typingRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      flexShrink: 1,
+    },
+    generatorRow: {
+      flexDirection: "row",
+      gap: 8,
+      alignItems: "center",
+      padding: 12,
+      borderTopWidth: 1,
+      borderTopColor: colors.border,
+      width: "100%",
+      maxWidth: "100%",
+    },
     generatorInput: {
       flex: 1,
+      minWidth: 0,
       borderWidth: 1,
       borderRadius: 12,
       paddingHorizontal: 14,
       paddingVertical: 12,
       fontSize: 15,
+      maxWidth: "100%",
     },
     generateBtn: {
       flexDirection: "row",
       alignItems: "center",
+      justifyContent: "center",
       gap: 6,
       borderRadius: 12,
       paddingVertical: 12,
       paddingHorizontal: 16,
+      minWidth: 90,
+      maxWidth: "30%",
     },
     generateBtnText: { color: "#fff", fontWeight: "800", fontSize: 14 },
-    generatorShortcuts: { flexDirection: "row", gap: 8, marginTop: 10 },
+    generatorShortcuts: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
     shortcutBtn: {
       flex: 1,
       flexDirection: "row",

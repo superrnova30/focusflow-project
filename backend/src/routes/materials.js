@@ -370,6 +370,19 @@ router.delete("/:id", async (req, res) => {
 router.post("/coach", requireRole("STUDENT"), async (req, res) => {
   try {
     const insight = await generateCoachInsight(req.body);
+    // Persist the insight (best-effort) so it stays available and the admin
+    // side can review what students are being advised.
+    try {
+      await prisma.coachInsight.create({
+        data: {
+          userId: req.user.id,
+          summary: insight.summary || null,
+          data: insight,
+        },
+      });
+    } catch (e) {
+      console.warn("Could not persist coach insight:", e && e.message);
+    }
     res.json({ insight });
   } catch (err) {
     console.error(err);

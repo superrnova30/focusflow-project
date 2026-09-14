@@ -16,8 +16,11 @@ export function AuthProvider({ children }) {
         try {
           const { data } = await client.get("/auth/me");
           setUser(data.user);
-          registerForPushNotifications();
-          retryOfflineWrites();
+          // Start optional background work without blocking the boot flow.
+          setTimeout(() => {
+            registerForPushNotifications().catch(() => {});
+            retryOfflineWrites().catch(() => {});
+          }, 0);
         } catch (e) {
           await AsyncStorage.removeItem("focusflow_token");
           setUser(null);
@@ -32,8 +35,10 @@ export function AuthProvider({ children }) {
       const { data } = await client.post("/auth/login", { email, password });
       await AsyncStorage.setItem("focusflow_token", data.token);
       setUser(data.user);
-      registerForPushNotifications();
-      retryOfflineWrites();
+      setTimeout(() => {
+        registerForPushNotifications().catch(() => {});
+        retryOfflineWrites().catch(() => {});
+      }, 0);
       return data.user;
     } catch (err) {
       if (err.response?.status === 403 && err.response?.data?.requiresVerification) {
@@ -71,7 +76,9 @@ export function AuthProvider({ children }) {
     if (data.token) {
       await AsyncStorage.setItem("focusflow_token", data.token);
       setUser(data.user);
-      registerForPushNotifications();
+      setTimeout(() => {
+        registerForPushNotifications().catch(() => {});
+      }, 0);
     }
     return data;
   }, []);

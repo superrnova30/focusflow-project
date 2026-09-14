@@ -3,7 +3,7 @@ import { NavigationContainer, DefaultTheme, DarkTheme } from "@react-navigation/
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { StatusBar } from "expo-status-bar";
-import { AppState, View, ActivityIndicator, Text } from "react-native";
+import { AppState, View, ActivityIndicator, Text, Pressable } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
@@ -40,6 +40,7 @@ import GamifiedQuizScreen from "./src/screens/GamifiedQuizScreen";
 import ProgressScreen from "./src/screens/ProgressScreen";
 import LeaderboardScreen from "./src/screens/LeaderboardScreen";
 import AdminHomeScreen from "./src/screens/AdminHomeScreen";
+import { AIChatProvider } from './src/context/AIChatContext';
 
 const AuthStack = createNativeStackNavigator();
 const StudentTabs = createBottomTabNavigator();
@@ -77,10 +78,22 @@ function AuthNavigator() {
 }
 
 function StudyNavigator() {
+  const { colors } = useTheme();
   return (
-    <StudyStack.Navigator screenOptions={{ headerShown: false }}>
-      <StudyStack.Screen name="StudyHome" component={StudyHomeScreen} />
-      <StudyStack.Screen name="Coach" component={CoachScreen} />
+    <StudyStack.Navigator
+      screenOptions={{
+        // Pushed screens get a consistent header + back affordance. The tab
+        // root (StudyHome) opts out below so it keeps its custom hero layout.
+        headerShown: true,
+        headerStyle: { backgroundColor: colors.surface },
+        headerTitleStyle: { color: colors.text, fontWeight: "700", fontSize: 17 },
+        headerTintColor: colors.tomato,
+        headerBackTitle: "Back",
+        headerShadowVisible: false,
+      }}
+    >
+      <StudyStack.Screen name="StudyHome" component={StudyHomeScreen} options={{ headerShown: false }} />
+      <StudyStack.Screen name="Coach" component={CoachScreen} options={{ title: "AI Study Coach" }} />
       <StudyStack.Screen name="StudyAI" component={StudyAIResultScreen} />
       <StudyStack.Screen name="StudyChat" component={StudyChatScreen} />
       <StudyStack.Screen name="Subjects" component={SubjectsScreen} />
@@ -213,7 +226,9 @@ function RootNavigator() {
       ) : user.role === "ADMIN" ? (
         <AdminHomeScreen />
       ) : (
-        <StudentNavigator />
+        <AIChatProvider>
+          <StudentNavigator />
+        </AIChatProvider>
       )}
     </NavigationContainer>
   );
@@ -229,13 +244,103 @@ export default function App() {
       }
     });
 
+    // Install a global JS error handler so we can surface errors clearly
+    try {
+      if (global && global.ErrorUtils) {
+        // Replace the global handler with a no-op that logs and lets our
+        // ErrorBoundary render a friendly fallback instead of Expo's redbox.
+        global.ErrorUtils.setGlobalHandler((error, isFatal) => {
+          // eslint-disable-next-line no-console
+          console.error("Global error caught (swallowed):", error, "isFatal:", isFatal);
+          // Store the last error for diagnostics if needed.
+          try {
+            global.__APP_LAST_ERROR__ = { error: String(error), isFatal };
+          } catch (e) {
+            // ignore
+          }
+        });
+      }
+    } catch (e) {
+      // ignore
+    }
+    // Catch unhandled promise rejections where possible to avoid app crash overlay.
+    try {
+      if (typeof process !== "undefined" && process && typeof process.on === "function") {
+        process.on("unhandledRejection", (reason) => {
+          // eslint-disable-next-line no-console
+          console.error("Unhandled promise rejection:", reason);
+        });
+      }
+      if (typeof globalThis !== "undefined" && typeof globalThis.addEventListener === "function") {
+        globalThis.addEventListener("unhandledrejection", (ev) => {
+          // eslint-disable-next-line no-console
+          console.error("Unhandled promise rejection (globalThis):", ev.reason || ev);
+        });
+      }
+    } catch (e) {
+      // ignore
+    }
+
     return () => subscription.remove();
   }, []);
+
+  // Simple error boundary to catch render-time errors and provide a retry.
+  class ErrorBoundary extends React.Component {
+    constructor(props) {
+      super(props);
+      this.state = { hasError: false, error: null };
+    }
+    static getDerivedStateFromError(error) {
+      return { hasError: true, error };
+    }
+    componentDidCatch(error, info) {
+      // eslint-disable-next-line no-console
+      console.error("Uncaught render error:", error, info);
+    }
+    render() {
+      if (this.state.hasError) {
+        const { colors } = this.props.theme || { colors: { bg: "#fff", text: "#000", surface: "#fff" } };
+        return (
+          <View style={{ flex: 1, backgroundColor: colors.bg, justifyContent: "center", alignItems: "center", padding: 24 }}>
+            <View style={{ maxWidth: 520, width: "100%", padding: 20, borderRadius: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: "#ddd" }}>
+              <Text style={{ color: colors.text, fontSize: 18, fontWeight: "700", marginBottom: 12 }}>Something went wrong</Text>
+              <Text style={{ color: colors.text, marginBottom: 12 }}>{this.state.error?.message || "An unexpected error occurred."}</Text>
+              <Text style={{ color: colors.textMuted, marginBottom: 12 }}>Check the Metro/Expo logs for details. You can reload the app or return to Expo home.</Text>
+            </View>
+          </View>
+        );
+      }
+      return this.props.children;
+    }
+  }
+
+  const [launched, setLaunched] = useState(false);
+
+  if (!launched) {
+    const { colors } = { colors: { bg: "#ffffff", text: "#000" } };
+    return (
+      <ThemeProvider>
+        <AuthProvider>
+          <View style={{ flex: 1, backgroundColor: colors.bg, justifyContent: "center", alignItems: "center", padding: 24 }}>
+            <View style={{ maxWidth: 420, width: "100%", padding: 20, borderRadius: 12, backgroundColor: "#fff", borderWidth: 1, borderColor: "#eee" }}>
+              <Text style={{ fontSize: 18, fontWeight: "700", marginBottom: 12 }}>FocusFlow (Safe Launch)</Text>
+              <Text style={{ color: "#666", marginBottom: 16 }}>Tap to mount the full app. This prevents crashes during initial startup.</Text>
+              <Pressable onPress={() => setLaunched(true)} style={{ backgroundColor: "#2b6cb0", padding: 12, borderRadius: 8, alignItems: "center" }}>
+                <Text style={{ color: "#fff", fontWeight: "700" }}>Open App</Text>
+              </Pressable>
+            </View>
+          </View>
+        </AuthProvider>
+      </ThemeProvider>
+    );
+  }
 
   return (
     <ThemeProvider>
       <AuthProvider>
-        <RootNavigator />
+        <ErrorBoundary>
+          <RootNavigator />
+        </ErrorBoundary>
       </AuthProvider>
     </ThemeProvider>
   );

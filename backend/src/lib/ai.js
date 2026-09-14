@@ -1,8 +1,53 @@
 const OpenAI = require("openai");
+const { GoogleGenAI } = require("@google/genai");
 
 const hasOpenAIKey = Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.trim());
+const hasGeminiKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
 const client = hasOpenAIKey ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+const geminiClient = hasGeminiKey ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null;
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+// Study packs / quizzes ask the model for large JSON payloads. A low cap makes
+// the model stop mid-string (finishReason MAX_TOKENS), which breaks JSON.parse
+// and silently degraded every study-pack request to the local template. Keep a
+// generous default so full responses complete in one call.
+const DEFAULT_MAX_OUTPUT_TOKENS = Number(process.env.AI_MAX_OUTPUT_TOKENS || 4096);
+
+function looksCutOff(text) {
+  const value = String(text || "").trim();
+  if (!value || value.length < 180) return false;
+  return !/[.!?]["')\]]?\s*$/.test(value);
+}
+
+async function continueIncompleteAnswer(provider, prompt, previousText) {
+  if (!provider || !previousText || !looksCutOff(previousText)) return previousText;
+
+  const continuationPrompt = [
+    "The previous answer appears incomplete or cut off. Continue only from the last sentence and finish the explanation completely.",
+    "Do not repeat the opening or reintroduce the same summary. Build on the existing response and complete it with a clear ending or takeaway.",
+    "Keep the voice natural and educational, and ensure the final answer is complete and coherent.",
+    "Previous response:", previousText.slice(-1200),
+  ].join("\n");
+
+  try {
+    if (provider === "gemini") {
+      const { generateContentWithRetry } = require('./genai_helper');
+      const response = await generateContentWithRetry(geminiClient, {
+        model: GEMINI_MODEL,
+        contents: continuationPrompt,
+        config: { temperature: 0.4, maxOutputTokens: 1200 },
+      });
+      const nextText = extractGeminiText(response);
+      if (nextText && nextText.length > 40) {
+        return `${previousText.trim()} ${nextText.trim()}`;
+      }
+    }
+  } catch (err) {
+    console.warn('AI continuation failed:', err && err.message ? err.message : err);
+  }
+
+  return previousText;
+}
 
 function buildFallbackStudyPack(subject, notes) {
   const lines = (notes || "")
@@ -108,36 +153,283 @@ function extractJsonString(raw) {
   if (!cleaned) return cleaned;
 
   const firstBrace = cleaned.indexOf("{");
-  const lastBrace = cleaned.lastIndexOf("}");
-  if (firstBrace !== -1 && lastBrace !== -1 && firstBrace < lastBrace) {
-    return cleaned.slice(firstBrace, lastBrace + 1);
+  if (firstBrace === -1) return cleaned;
+
+  // Walk the string tracking brace depth and whether we're inside a quoted
+  // string, so we can stop at the FIRST complete top-level object. Using
+  // lastIndexOf("}") previously broke when the model appended prose after the
+  // JSON ("Unexpected non-whitespace character after JSON") — it grabbed a
+  // stray brace from the trailing text. String-awareness also prevents treating
+  // braces/escaped quotes inside string values as structure.
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = firstBrace; i < cleaned.length; i += 1) {
+    const ch = cleaned[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return cleaned.slice(firstBrace, i + 1);
+      }
+    }
   }
-  return cleaned;
+
+  // No balanced object found (likely truncated) — return what we have so the
+  // caller's sanitizer/repair path can attempt recovery.
+  return cleaned.slice(firstBrace);
+}
+
+/**
+ * Gemini (and other models) frequently emit JSON that contains literal
+ * control characters inside string values — most often raw newlines/tabs in
+ * long fields like "summary" or "definition". JSON.parse rejects those with
+ * "Bad control character in string literal", which previously forced every
+ * study-pack request onto the local template fallback. This escapes any raw
+ * control character that is inside a string so the payload parses cleanly.
+ *
+ * It tracks whether we're inside a quoted string and escapes unescaped
+ * control chars (\u0000-\u001F) there; structural whitespace between tokens is
+ * left untouched. Already-escaped sequences (\n, \") are preserved.
+ */
+function sanitizeJsonControlChars(text) {
+  const value = String(text || "");
+  let out = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i];
+
+    if (inString) {
+      if (escaped) {
+        // Keep the escaped char as-is (e.g. the n in \n).
+        out += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        out += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        out += ch;
+        inString = false;
+        continue;
+      }
+      const code = ch.charCodeAt(0);
+      if (code < 0x20) {
+        // Escape raw control characters that are illegal inside JSON strings.
+        if (ch === "\n") out += "\\n";
+        else if (ch === "\r") out += "\\r";
+        else if (ch === "\t") out += "\\t";
+        else out += `\\u${code.toString(16).padStart(4, "0")}`;
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+    }
+    out += ch;
+  }
+
+  return out;
+}
+
+/**
+ * Parse model-produced JSON defensively: first try as-is, then retry after
+ * escaping raw control characters that models sometimes leave inside strings.
+ */
+function safeParseModelJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch (firstErr) {
+    const sanitized = sanitizeJsonControlChars(text);
+    if (sanitized !== text) {
+      try {
+        return JSON.parse(sanitized);
+      } catch (secondErr) {
+        // fall through and rethrow the original error for clearer messaging
+      }
+    }
+
+    // Last resort: the model was cut off mid-response (e.g. MAX_TOKENS), so
+    // close any dangling string/array/object and try once more. This salvages a
+    // partially-complete study pack instead of discarding a usable response.
+    try {
+      const repaired = closeTruncatedJson(sanitized);
+      if (repaired && repaired !== sanitized) {
+        return JSON.parse(repaired);
+      }
+    } catch (repairErr) {
+      // fall through and rethrow the original error for clearer messaging
+    }
+
+    throw firstErr;
+  }
+}
+
+/**
+ * Best-effort repair of JSON that was truncated mid-token: closes an open
+ * string, then balances any open arrays/objects. Only used as a final fallback
+ * when a model response cannot be parsed as-is.
+ */
+function closeTruncatedJson(text) {
+  let value = String(text || '').trim();
+  if (!value) return value;
+
+  // Drop a trailing incomplete token (e.g. `"term": "unfinished`).
+  let inString = false;
+  let escaped = false;
+  const stack = [];
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') stack.push(ch);
+    else if (ch === '}' || ch === ']') stack.pop();
+  }
+
+  // Trim a dangling separator so the appended closers produce valid JSON.
+  value = value.replace(/[\s,]+$/, '');
+  if (inString) value += '"';
+
+  const closers = stack
+    .reverse()
+    .map((open) => (open === '{' ? '}' : ']'))
+    .join('');
+  return value + closers;
+}
+
+function extractGeminiText(response) {
+  if (!response) return "";
+
+  if (typeof response.text === "string" && response.text.trim()) return response.text.trim();
+  if (typeof response.output_text === "string" && response.output_text.trim()) return response.output_text.trim();
+
+  const visited = new Set();
+  function findText(obj) {
+    if (!obj || visited.has(obj)) return null;
+    if (typeof obj === 'string' && obj.trim()) return obj.trim();
+    if (typeof obj !== 'object') return null;
+    visited.add(obj);
+    const keys = ['output_text', 'text', 'content', 'parts', 'outputs', 'candidates', 'message', 'messages'];
+    for (const k of keys) {
+      if (obj[k]) {
+        const found = findText(obj[k]);
+        if (found) return found;
+      }
+    }
+    for (const k in obj) {
+      try {
+        const found = findText(obj[k]);
+        if (found) return found;
+      } catch (e) {}
+    }
+    return null;
+  }
+
+  const text = findText(response) || '';
+  if (!text) console.warn('extractGeminiText(lib): no text found in response');
+  return text;
 }
 
 async function generateJSON({ system, prompt, maxTokens = 1600, fallback }) {
-  if (!client) {
+  if (!client && !geminiClient) {
     if (fallback) return fallback(prompt);
-    throw new Error("AI provider is not configured. Set OPENAI_API_KEY to enable AI features.");
+    throw new Error("AI provider is not configured. Set GEMINI_API_KEY or OPENAI_API_KEY to enable AI features.");
   }
 
   try {
-    const response = await client.responses.create({
-      model: MODEL,
-      max_output_tokens: maxTokens,
-      instructions: system,
-      input: prompt,
-    });
+    let responseText = "";
 
-    const parsedText = extractJsonString(getResponseText(response));
+    if (geminiClient) {
+      const { generateContentWithRetry } = require('./genai_helper');
+      const response = await generateContentWithRetry(geminiClient, {
+        model: GEMINI_MODEL,
+        contents: `${system}\n\n${prompt}`,
+        config: { temperature: 0.2, maxOutputTokens: Math.max(maxTokens, DEFAULT_MAX_OUTPUT_TOKENS) },
+      });
+      responseText = extractGeminiText(response);
+    } else {
+      const response = await client.responses.create({
+        model: MODEL,
+        max_output_tokens: Math.max(maxTokens, DEFAULT_MAX_OUTPUT_TOKENS),
+        instructions: system,
+        input: prompt,
+      });
+      responseText = getResponseText(response);
+    }
+
+    if (geminiClient && looksCutOff(responseText)) {
+      responseText = await continueIncompleteAnswer('gemini', prompt, responseText);
+    }
+
+    const parsedText = extractJsonString(responseText);
     if (!parsedText) {
+      // Attempt a lightweight "repair" call: ask the model to re-output only
+      // the requested JSON object based on its previous response. This helps
+      // when the model returns markdown or explanatory text instead of the
+      // raw JSON we asked for.
+      if (geminiClient) {
+        try {
+          const { generateContentWithRetry: retryGen } = require('./genai_helper');
+          const repairPrompt =
+            `${system}\n\n${prompt}\n\nPrevious response:\n${responseText}\n\n` +
+            "You previously returned explanatory text. Now please output ONLY the exact JSON object requested earlier, with no surrounding text or markdown fences.";
+
+          const repairResp = await retryGen(geminiClient, {
+            model: GEMINI_MODEL,
+            contents: repairPrompt,
+            config: { temperature: 0.0, maxOutputTokens: Math.min(maxTokens, 1200) },
+          });
+          const repairText = extractGeminiText(repairResp);
+          const repaired = extractJsonString(repairText);
+          if (repaired) {
+            return safeParseModelJson(repaired);
+          }
+        } catch (e) {
+          // ignore and fall through to original error handling/fallback
+          console.warn('AI repair attempt failed:', e && e.message);
+        }
+      }
+
       throw new Error("AI returned empty response text.");
     }
 
-    return JSON.parse(parsedText);
+    return safeParseModelJson(parsedText);
   } catch (err) {
-    if (fallback) return fallback(prompt);
+    const message = err && (err.message || String(err));
+    const isRateLimit = err && (err.status === 429 || /429|rate limit/i.test(message));
+
+    if (fallback) {
+      console.warn("AI provider failed, using built-in local fallback:", message);
+      return fallback(prompt);
+    }
+
     console.error("AI generation failed:", err);
+
+    if (isRateLimit) {
+      throw new Error("The AI service is rate-limited right now. Please try again in a moment.");
+    }
+
     throw new Error("The AI service is currently unavailable. Please try again in a moment.");
   }
 }
