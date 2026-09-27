@@ -17,6 +17,7 @@
     },
     "android": {
       "package": "com.focusflow.app",
+      "softwareKeyboardLayoutMode": "pan",
       "adaptiveIcon": {
         "backgroundColor": "#0E1220"
       }

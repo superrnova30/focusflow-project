@@ -21,6 +21,7 @@ const pushRoutes = require("./routes/push");
 const aiRoutes = require("./routes/ai");
 const premiumRoutes = require("./routes/premium");
 const { sendDailyReminders } = require("./lib/reminders");
+const { isEmailConfigured, verifyEmailDelivery } = require("./lib/mailer");
 
 const app = express();
 
@@ -162,6 +163,17 @@ async function start() {
     const geminiConfigured = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
     const openaiConfigured = Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.trim());
     console.log(`AI providers - Gemini configured: ${geminiConfigured}, OpenAI configured: ${openaiConfigured}`);
+    if (!isEmailConfigured()) {
+      console.warn("[mailer] Email is not configured — verification codes cannot be sent.");
+    } else {
+      verifyEmailDelivery()
+        .then((result) => {
+          console.log(`[mailer] Email delivery ready (${result.provider})`);
+        })
+        .catch((err) => {
+          console.error("[mailer] Email delivery check failed:", err.message || err);
+        });
+    }
   });
 
   // Log unhandled errors to avoid silent crashes during dev.

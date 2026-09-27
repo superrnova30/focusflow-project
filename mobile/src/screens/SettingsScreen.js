@@ -56,6 +56,9 @@ export default function SettingsScreen({ navigation }) {
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   const isExpoGo = Constants.appOwnership === "expo";
+  const [alarmEnabled, setAlarmEnabled] = useState(true);
+  const [alarmSoundId, setAlarmSoundId] = useState("chime");
+  const [alarmVolume, setAlarmVolume] = useState(0.8);
 
   useEffect(() => {
     getSavedPushToken()
@@ -64,18 +67,12 @@ export default function SettingsScreen({ navigation }) {
   }, []);
 
   useEffect(() => {
-    // Load alarm prefs for this screen too so settings remain visible here
     loadAlarmPrefs().then((prefs) => {
       setAlarmEnabled(prefs.enabled);
       setAlarmSoundId(prefs.soundId);
       setAlarmVolume(prefs.volume);
-    }).catch(()=>{});
+    }).catch(() => {});
   }, []);
-
-  // Alarm settings
-  const [alarmEnabled, setAlarmEnabled] = useState(true);
-  const [alarmSoundId, setAlarmSoundId] = useState("chime");
-  const [alarmVolume, setAlarmVolume] = useState(0.8);
 
   const togglePush = async (value) => {
     setPushBusy(true);

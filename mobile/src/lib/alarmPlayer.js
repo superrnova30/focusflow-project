@@ -1,5 +1,12 @@
-import { createAudioPlayer, setAudioModeAsync } from "expo-audio";
 import { getAlarmSound } from "./alarmPrefs";
+
+function getAudio() {
+  try {
+    return require("expo-audio");
+  } catch (e) {
+    return null;
+  }
+}
 
 const MAX_ALARM_MS = 3 * 60 * 1000; // 3 minutes
 
@@ -16,15 +23,20 @@ export async function playAlarm(soundId, volume) {
   const sound = getAlarmSound(soundId);
   if (!sound) return;
 
+  const audio = getAudio();
+  if (!audio?.createAudioPlayer) return;
+
   try {
-    await setAudioModeAsync({
-      playsInSilentMode: true,
-      shouldPlayInBackground: true,
-      interruptionMode: "duckOthers",
-    });
+    if (audio.setAudioModeAsync) {
+      await audio.setAudioModeAsync({
+        playsInSilentMode: true,
+        shouldPlayInBackground: true,
+        interruptionMode: "duckOthers",
+      });
+    }
 
     // expo-audio's createAudioPlayer accepts a require()'d asset directly.
-    player = createAudioPlayer(sound.source, {
+    player = audio.createAudioPlayer(sound.source, {
       keepAudioSessionActive: true,
     });
     player.loop = true;
@@ -64,8 +76,11 @@ export async function previewAlarm(soundId, volume) {
   const sound = getAlarmSound(soundId);
   if (!sound) return;
 
+  const audio = getAudio();
+  if (!audio?.createAudioPlayer) return;
+
   try {
-    player = createAudioPlayer(sound.source, {
+    player = audio.createAudioPlayer(sound.source, {
       keepAudioSessionActive: true,
     });
     player.loop = false;

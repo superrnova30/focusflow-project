@@ -4,7 +4,7 @@ const prisma = require("../lib/prisma");
 const { hashPassword, verifyPassword, signToken, publicUser } = require("../lib/auth");
 const { requireAuth } = require("../middleware/auth");
 const { bumpStreak } = require("../lib/gamification");
-const transporter = require("../../config/email");
+const { isEmailConfigured, sendVerificationEmailMessage } = require("../lib/mailer");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 
@@ -27,57 +27,22 @@ function buildResetPayload(user, rawToken) {
 }
 
 async function sendPasswordResetEmail(email, code) {
-  try {
-    if (transporter && process.env.EMAIL_USER) {
-      const frontend = process.env.FRONTEND_URL || process.env.EXPO_PUBLIC_API_URL || "http://localhost:19006";
-      const resetLink = `${frontend.replace(/\/$/, "")}/reset-password?email=${encodeURIComponent(email)}&code=${encodeURIComponent(code)}`;
-      await transporter.sendMail({
-        from: process.env.EMAIL_USER,
-        to: email,
-        subject: "Reset your password",
-        html: `
-          <h2>Password reset requested</h2>
-          <p>Use the following code to reset your password:</p>
-          <pre>${code}</pre>
-          <p>Or click the link below:</p>
-          <a href="${resetLink}">Reset my password</a>
-        `,
-      });
-      return;
-    }
-  } catch (err) {
-    console.error('Failed to send reset email', err);
-  }
-  console.log(`[dev-reset-email] password reset requested for ${email} :: code=${code}`);
-}
-
-async function sendVerificationEmail(email, code) {
-  try {
-    if (transporter && process.env.EMAIL_USER) {
-      const backendBase = process.env.BACKEND_URL || process.env.API_BASE_URL || process.env.EXPO_PUBLIC_API_URL || `http://localhost:${process.env.PORT || 4000}`;
-      // Ensure we point at the auth verification endpoint on the API.
-      const verificationLink = `${String(backendBase).replace(/\/$/, "")}/api/auth/verify-email?token=${encodeURIComponent(code)}`;
-      await transporter.sendMail({
-        from: process.env.EMAIL_USER,
-        to: email,
-        subject: "Verify Your Email",
-        html: `
-          <h2>Welcome!</h2>
-          <p>Please verify your email address.</p>
-
-          <p>Your verification token:</p>
-          <pre>${code}</pre>
-
-          <p>Or click the link to verify:</p>
-          <a href="${verificationLink}">Verify My Email</a>
-        `,
-      });
-      return;
-    }
-  } catch (err) {
-    console.error('Failed to send verification email', err);
-  }
-  console.log(`[dev-verify-email] verification code for ${email} :: code=${code}`);
+  const { sendEmail } = require("../lib/mailer");
+  const frontend = process.env.FRONTEND_URL || "http://localhost:8081";
+  const resetLink = `${frontend.replace(/\/$/, "")}/reset-password?email=${encodeURIComponent(email)}&code=${encodeURIComponent(code)}`;
+  const html = `
+    <h2>Password reset requested</h2>
+    <p>Use this code to reset your password:</p>
+    <pre style="font-size:24px;font-weight:700">${code}</pre>
+    <p>Or open this link:</p>
+    <a href="${resetLink}">Reset my password</a>
+  `;
+  await sendEmail({
+    to: email,
+    subject: `${code} is your FocusFlow password reset code`,
+    html,
+    text: `Your password reset code is ${code}`,
+  });
 }
 
 function generateVerificationCode() {
@@ -171,11 +136,21 @@ router.post("/signup", async (req, res) => {
     });
 
     verificationTokens.set(`${user.email}:${verificationCode}`, { userId: user.id, expiresAt });
-    await sendVerificationEmail(user.email, verificationCode);
+    try {
+      await sendVerificationEmailMessage(user.email, verificationCode);
+    } catch (err) {
+      await prisma.user.delete({ where: { id: user.id } }).catch(() => {});
+      console.error("Failed to send signup verification email:", err.message || err);
+      return res.status(503).json({
+        error: isEmailConfigured()
+          ? "We couldn't send the verification email right now. Please try again in a moment."
+          : "Email delivery is not configured on this server yet.",
+      });
+    }
     await prisma.activityLog.create({ data: { userId: user.id, action: "account_created" } });
 
     res.status(201).json({
-      message: "Account created. Please verify your email to continue.",
+      message: "Account created. Check your email for a verification code.",
       email: user.email,
     });
   } catch (err) {
@@ -243,8 +218,12 @@ router.post("/forgot-password", async (req, res) => {
     const expiresAt = Date.now() + 60 * 60 * 1000;
     resetTokens.set(`${user.email.toLowerCase()}:${code}`, { userId: user.id, expiresAt, code });
 
-    await sendPasswordResetEmail(user.email, code);
-    return res.status(200).json({ message: "If an account exists, a reset code has been sent to that email.", code });
+    try {
+      await sendPasswordResetEmail(user.email, code);
+    } catch (err) {
+      console.error("Failed to send password reset email:", err.message || err);
+    }
+    return res.status(200).json({ message: "If an account exists, a reset code has been sent to that email." });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to start password reset" });
@@ -309,10 +288,21 @@ router.post("/send-verification", async (req, res) => {
     });
 
     verificationTokens.set(`${user.email}:${verificationCode}`, { userId: user.id, expiresAt });
-    await sendVerificationEmail(user.email, verificationCode);
+    try {
+      await sendVerificationEmailMessage(user.email, verificationCode);
+    } catch (err) {
+      console.error("Failed to send verification email:", err.message || err);
+      return res.status(503).json({
+        error: isEmailConfigured()
+          ? "We couldn't send the verification email right now. Please try again in a moment."
+          : "Email delivery is not configured on this server yet.",
+      });
+    }
     await prisma.activityLog.create({ data: { userId: user.id, action: "verification_code_sent" } });
 
-    return res.status(200).json({ message: "If an account exists with that email, a verification code has been sent." });
+    return res.status(200).json({
+      message: "A verification code has been sent to your email.",
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to send verification code" });
@@ -327,7 +317,7 @@ router.post("/verify-email", async (req, res) => {
     }
 
     const normalizedEmail = String(email).trim().toLowerCase();
-    const normalizedCode = String(code).trim().toUpperCase();
+    const normalizedCode = String(code).trim();
     const token = verificationTokens.get(`${normalizedEmail}:${normalizedCode}`);
 
     // If the in-memory token is not present (e.g. server restarted), fall back
@@ -336,7 +326,7 @@ router.post("/verify-email", async (req, res) => {
     let user = null;
     if (!token) {
       const dbUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
-        if (!dbUser || !dbUser.emailVerificationCode || dbUser.emailVerificationCode.toUpperCase() !== normalizedCode) {
+        if (!dbUser || !dbUser.emailVerificationCode || dbUser.emailVerificationCode !== normalizedCode) {
           return res.status(400).json({ error: "That verification code is invalid or expired" });
         }
         if (dbUser.emailVerificationExpires && Date.now() > new Date(dbUser.emailVerificationExpires).getTime()) {

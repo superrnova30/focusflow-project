@@ -8,121 +8,25 @@ import {
   ScrollView,
   Image,
   Pressable,
-  TextInput,
   ActivityIndicator,
   Animated,
   Easing,
-  useWindowDimensions,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { Screen } from "../components/Screen";
+import { AuthField } from "../components/AuthField";
 import { useTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
+import { useStableLayout } from "../hooks/useStableLayout";
 import { RADIUS, SPACING } from "../theme/theme";
+
+const IS_NATIVE = Platform.OS === "ios" || Platform.OS === "android";
 
 const ERROR_COLOR = "#EF4444";
 
-function LoginField({
-  label,
-  icon,
-  value,
-  onChangeText,
-  secureTextEntry,
-  inputRef,
-  onSubmitEditing,
-  ...props
-}) {
-  const { colors } = useTheme();
-  const [focused, setFocused] = useState(false);
-  const [hidden, setHidden] = useState(Boolean(secureTextEntry));
-
-  return (
-    <View style={fieldStyles.wrapper}>
-      <Text style={[fieldStyles.label, { color: colors.text }]}>{label}</Text>
-      <View
-        style={[
-          fieldStyles.row,
-          {
-            backgroundColor: colors.bg,
-            borderColor: focused ? colors.violet : colors.border,
-            shadowColor: focused ? colors.violet : "transparent",
-          },
-        ]}
-      >
-        <Ionicons
-          name={icon}
-          size={19}
-          color={focused ? colors.violet : colors.textMuted}
-        />
-        <TextInput
-          ref={inputRef}
-          value={value}
-          onChangeText={onChangeText}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          onSubmitEditing={onSubmitEditing}
-          secureTextEntry={hidden}
-          placeholderTextColor={colors.textMuted}
-          style={[fieldStyles.input, { color: colors.text, outlineStyle: "none" }]}
-          {...props}
-        />
-        {secureTextEntry && (
-          <Pressable
-            onPress={() => setHidden((current) => !current)}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel={hidden ? "Show password" : "Hide password"}
-            style={({ pressed }) => [fieldStyles.trailingButton, pressed && { opacity: 0.65 }]}
-          >
-            <Ionicons
-              name={hidden ? "eye-outline" : "eye-off-outline"}
-              size={20}
-              color={colors.textMuted}
-            />
-          </Pressable>
-        )}
-      </View>
-    </View>
-  );
-}
-
-const fieldStyles = StyleSheet.create({
-  wrapper: { width: "100%", marginBottom: SPACING.md },
-  label: { fontSize: 13, fontWeight: "700", marginBottom: 7 },
-  row: {
-    minHeight: 54,
-    width: "100%",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    borderWidth: 1,
-    borderRadius: RADIUS.md,
-    paddingLeft: 14,
-    shadowOpacity: 0.12,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-  },
-  input: {
-    flex: 1,
-    minWidth: 0,
-    minHeight: 52,
-    fontSize: 15,
-    paddingVertical: 13,
-    paddingRight: 8,
-  },
-  trailingButton: {
-    width: 46,
-    minHeight: 52,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-});
-
 export default function LoginScreen({ navigation }) {
   const { colors, isDark } = useTheme();
-  const { width, height } = useWindowDimensions();
-  const wide = width >= 820;
-  const compact = width < 370 || height < 650;
+  const { wide, compact } = useStableLayout(820);
   const styles = useMemo(
     () => createStyles(colors, isDark, wide, compact),
     [colors, isDark, wide, compact]
@@ -133,9 +37,10 @@ export default function LoginScreen({ navigation }) {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   const passwordRef = useRef(null);
-  const entrance = useRef(new Animated.Value(0)).current;
+  const entrance = useRef(new Animated.Value(IS_NATIVE ? 1 : 0)).current;
 
   useEffect(() => {
+    if (IS_NATIVE) return;
     Animated.timing(entrance, {
       toValue: 1,
       duration: 450,
@@ -148,6 +53,10 @@ export default function LoginScreen({ navigation }) {
     inputRange: [0, 1],
     outputRange: [16, 0],
   });
+  const Shell = IS_NATIVE ? View : Animated.View;
+  const shellProps = IS_NATIVE
+    ? { style: styles.shell }
+    : { style: [styles.shell, { transform: [{ translateY: entranceY }] }] };
 
   const submit = async () => {
     setError(null);
@@ -178,23 +87,8 @@ export default function LoginScreen({ navigation }) {
     }
   };
 
-  return (
-    <Screen>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-        style={styles.flex}
-      >
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scroll}
-          keyboardShouldPersistTaps="handled"
-        >
-          <Animated.View
-            style={[
-              styles.shell,
-              { opacity: entrance, transform: [{ translateY: entranceY }] },
-            ]}
-          >
+  const form = (
+    <Shell {...shellProps}>
             {wide && (
               <View style={styles.brandPanel}>
                 <View style={styles.brandOrbTop} />
@@ -263,39 +157,42 @@ export default function LoginScreen({ navigation }) {
                 </View>
 
                 <View style={styles.formFields}>
-                  <LoginField
+                  <AuthField
                     label="Email address"
                     icon="mail-outline"
+                    colors={colors}
                     value={email}
-                    onChangeText={(value) => {
-                      setEmail(value);
-                      if (error) setError(null);
-                    }}
+                    onChangeText={setEmail}
                     placeholder="you@example.com"
                     autoCapitalize="none"
-                    autoCorrect={false}
                     keyboardType="email-address"
-                    autoComplete="email"
-                    textContentType="emailAddress"
-                    returnKeyType="next"
-                    onSubmitEditing={() => passwordRef.current?.focus()}
+                    {...(!IS_NATIVE
+                      ? {
+                          autoComplete: "email",
+                          textContentType: "emailAddress",
+                          returnKeyType: "next",
+                          onSubmitEditing: () => passwordRef.current?.focus(),
+                        }
+                      : {})}
                   />
 
-                  <LoginField
+                  <AuthField
                     label="Password"
                     icon="lock-closed-outline"
+                    colors={colors}
                     value={password}
-                    onChangeText={(value) => {
-                      setPassword(value);
-                      if (error) setError(null);
-                    }}
+                    onChangeText={setPassword}
                     placeholder="Enter your password"
                     secureTextEntry
                     inputRef={passwordRef}
-                    autoComplete="current-password"
-                    textContentType="password"
-                    returnKeyType="done"
-                    onSubmitEditing={submit}
+                    {...(!IS_NATIVE
+                      ? {
+                          autoComplete: "current-password",
+                          textContentType: "password",
+                          returnKeyType: "done",
+                          onSubmitEditing: submit,
+                        }
+                      : {})}
                   />
 
                   <View style={styles.passwordActions}>
@@ -369,9 +266,33 @@ export default function LoginScreen({ navigation }) {
                 </Pressable>
               </View>
             </View>
-          </Animated.View>
+    </Shell>
+  );
+
+  return (
+    <Screen>
+      {IS_NATIVE ? (
+        <ScrollView
+          style={styles.flex}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scroll}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="none"
+          nestedScrollEnabled={false}
+        >
+          {form}
         </ScrollView>
-      </KeyboardAvoidingView>
+      ) : (
+        <KeyboardAvoidingView behavior="padding" style={styles.flex}>
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.scroll}
+            keyboardShouldPersistTaps="always"
+          >
+            {form}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      )}
     </Screen>
   );
 }
@@ -381,8 +302,9 @@ const createStyles = (colors, isDark, wide, compact) =>
     flex: { flex: 1 },
     scroll: {
       flexGrow: 1,
-      justifyContent: "center",
-      paddingVertical: compact ? SPACING.md : SPACING.xl,
+      justifyContent: "flex-start",
+      paddingTop: compact ? SPACING.md : SPACING.lg,
+      paddingBottom: 320,
     },
     shell: {
       width: "100%",
@@ -394,12 +316,16 @@ const createStyles = (colors, isDark, wide, compact) =>
       borderWidth: 1,
       borderColor: colors.border,
       borderRadius: wide ? 28 : RADIUS.xl,
-      overflow: "hidden",
-      shadowColor: "#000",
-      shadowOpacity: isDark ? 0.3 : 0.1,
-      shadowRadius: 24,
-      shadowOffset: { width: 0, height: 10 },
-      elevation: 8,
+      overflow: wide ? "hidden" : "visible",
+      ...(IS_NATIVE
+        ? {}
+        : {
+            shadowColor: "#000",
+            shadowOpacity: isDark ? 0.3 : 0.1,
+            shadowRadius: 24,
+            shadowOffset: { width: 0, height: 10 },
+            elevation: 8,
+          }),
     },
 
     brandPanel: {
@@ -500,10 +426,10 @@ const createStyles = (colors, isDark, wide, compact) =>
     },
 
     formPanel: {
-      flex: 1,
-      justifyContent: "center",
+      flex: wide ? 1 : undefined,
+      justifyContent: wide ? "center" : "flex-start",
       paddingHorizontal: wide ? 46 : compact ? SPACING.lg : SPACING.xl,
-      paddingVertical: wide ? 42 : compact ? SPACING.lg : 30,
+      paddingVertical: wide ? 42 : compact ? SPACING.lg : 24,
     },
     formInner: { width: "100%", maxWidth: 410, alignSelf: "center" },
     mobileBrand: {

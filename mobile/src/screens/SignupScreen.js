@@ -8,137 +8,26 @@ import {
   ScrollView,
   Image,
   Pressable,
-  TextInput,
   ActivityIndicator,
   Animated,
   Easing,
-  useWindowDimensions,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { Screen } from "../components/Screen";
+import { AuthField } from "../components/AuthField";
+import { PasswordHints } from "../components/PasswordHints";
 import { useTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
+import { useStableLayout } from "../hooks/useStableLayout";
 import { RADIUS, SPACING } from "../theme/theme";
+
+const IS_NATIVE = Platform.OS === "ios" || Platform.OS === "android";
 
 const ERROR_COLOR = "#EF4444";
 
-function SignupField({
-  label,
-  icon,
-  value,
-  onChangeText,
-  secureTextEntry,
-  inputRef,
-  onSubmitEditing,
-  trailingStatus,
-  ...props
-}) {
-  const { colors } = useTheme();
-  const [focused, setFocused] = useState(false);
-  const [hidden, setHidden] = useState(Boolean(secureTextEntry));
-
-  return (
-    <View style={fieldStyles.wrapper}>
-      <Text style={[fieldStyles.label, { color: colors.text }]}>{label}</Text>
-      <View
-        style={[
-          fieldStyles.row,
-          {
-            backgroundColor: colors.bg,
-            borderColor: focused ? colors.violet : colors.border,
-            shadowColor: focused ? colors.violet : "transparent",
-          },
-        ]}
-      >
-        <Ionicons
-          name={icon}
-          size={19}
-          color={focused ? colors.violet : colors.textMuted}
-        />
-        <TextInput
-          ref={inputRef}
-          value={value}
-          onChangeText={onChangeText}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          onSubmitEditing={onSubmitEditing}
-          secureTextEntry={hidden}
-          placeholderTextColor={colors.textMuted}
-          style={[fieldStyles.input, { color: colors.text, outlineStyle: "none" }]}
-          {...props}
-        />
-        {trailingStatus && !secureTextEntry ? trailingStatus : null}
-        {secureTextEntry && (
-          <Pressable
-            onPress={() => setHidden((current) => !current)}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel={hidden ? "Show password" : "Hide password"}
-            style={({ pressed }) => [fieldStyles.trailingButton, pressed && { opacity: 0.65 }]}
-          >
-            <Ionicons
-              name={hidden ? "eye-outline" : "eye-off-outline"}
-              size={20}
-              color={colors.textMuted}
-            />
-          </Pressable>
-        )}
-      </View>
-    </View>
-  );
-}
-
-const fieldStyles = StyleSheet.create({
-  wrapper: { width: "100%", marginBottom: 11 },
-  label: { fontSize: 12.5, fontWeight: "700", marginBottom: 6 },
-  row: {
-    minHeight: 52,
-    width: "100%",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    borderWidth: 1,
-    borderRadius: RADIUS.md,
-    paddingLeft: 14,
-    shadowOpacity: 0.12,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-  },
-  input: {
-    flex: 1,
-    minWidth: 0,
-    minHeight: 50,
-    fontSize: 15,
-    paddingVertical: 12,
-    paddingRight: 8,
-  },
-  trailingButton: {
-    width: 46,
-    minHeight: 50,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-});
-
-function getPasswordStrength(password) {
-  if (!password) return { score: 0, label: "", color: "#94A3B8" };
-  let score = 0;
-  if (password.length >= 8) score += 1;
-  if (password.length >= 12) score += 1;
-  if (/[a-z]/.test(password) && /[A-Z]/.test(password)) score += 1;
-  if (/\d/.test(password) || /[^A-Za-z0-9]/.test(password)) score += 1;
-
-  if (score <= 1) return { score: 1, label: "Weak", color: ERROR_COLOR };
-  if (score === 2) return { score: 2, label: "Fair", color: "#F59E0B" };
-  if (score === 3) return { score: 3, label: "Good", color: "#22C55E" };
-  return { score: 4, label: "Strong", color: "#16A34A" };
-}
-
 export default function SignupScreen({ navigation }) {
   const { colors, isDark } = useTheme();
-  const { width, height } = useWindowDimensions();
-  const wide = width >= 900;
-  const compact = width < 370 || height < 700;
+  const { wide, compact } = useStableLayout(900);
   const styles = useMemo(
     () => createStyles(colors, isDark, wide, compact),
     [colors, isDark, wide, compact]
@@ -153,11 +42,10 @@ export default function SignupScreen({ navigation }) {
   const emailRef = useRef(null);
   const passwordRef = useRef(null);
   const confirmRef = useRef(null);
-  const entrance = useRef(new Animated.Value(0)).current;
-  const strength = getPasswordStrength(password);
-  const passwordsMatch = Boolean(confirmPassword) && password === confirmPassword;
+  const entrance = useRef(new Animated.Value(IS_NATIVE ? 1 : 0)).current;
 
   useEffect(() => {
+    if (IS_NATIVE) return;
     Animated.timing(entrance, {
       toValue: 1,
       duration: 450,
@@ -170,6 +58,10 @@ export default function SignupScreen({ navigation }) {
     inputRange: [0, 1],
     outputRange: [16, 0],
   });
+  const Shell = IS_NATIVE ? View : Animated.View;
+  const shellProps = IS_NATIVE
+    ? { style: styles.shell }
+    : { style: [styles.shell, { transform: [{ translateY: entranceY }] }] };
 
   const submit = async () => {
     setError(null);
@@ -192,34 +84,20 @@ export default function SignupScreen({ navigation }) {
     }
     setLoading(true);
     try {
-      await signup(name.trim(), normalizedEmail, password);
-      // After successful signup, navigate to email verification and
-      // instruct the screen to show the resend message immediately.
-      navigation.navigate("VerifyEmail", { email: normalizedEmail, autoSend: true });
+      const result = await signup(name.trim(), normalizedEmail, password);
+      navigation.navigate("VerifyEmail", {
+        email: normalizedEmail,
+        initialMessage: result?.message || "Check your email for a verification code.",
+      });
     } catch (e) {
-      setError(e.message);
+      setError(e?.response?.data?.error || e.message);
     } finally {
       setLoading(false);
     }
   };
 
-  return (
-    <Screen>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-        style={styles.flex}
-      >
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scroll}
-          keyboardShouldPersistTaps="handled"
-        >
-          <Animated.View
-            style={[
-              styles.shell,
-              { opacity: entrance, transform: [{ translateY: entranceY }] },
-            ]}
-          >
+  const form = (
+    <Shell {...shellProps}>
             {wide && (
               <View style={styles.brandPanel}>
                 <View style={styles.brandOrbTop} />
@@ -313,115 +191,87 @@ export default function SignupScreen({ navigation }) {
                 </View>
 
                 <View style={styles.formFields}>
-                  <SignupField
+                  <AuthField
                     label="Full name"
                     icon="person-outline"
+                    colors={colors}
                     value={name}
-                    onChangeText={(value) => {
-                      setName(value);
-                      if (error) setError(null);
-                    }}
+                    onChangeText={setName}
                     placeholder="Your full name"
                     autoCapitalize="words"
-                    autoComplete="name"
-                    textContentType="name"
-                    returnKeyType="next"
-                    onSubmitEditing={() => emailRef.current?.focus()}
+                    {...(!IS_NATIVE
+                      ? {
+                          autoComplete: "name",
+                          textContentType: "name",
+                          returnKeyType: "next",
+                          onSubmitEditing: () => emailRef.current?.focus(),
+                        }
+                      : {})}
                   />
 
-                  <SignupField
+                  <AuthField
                     label="Email address"
                     icon="mail-outline"
+                    colors={colors}
                     value={email}
-                    onChangeText={(value) => {
-                      setEmail(value);
-                      if (error) setError(null);
-                    }}
+                    onChangeText={setEmail}
                     inputRef={emailRef}
                     placeholder="you@example.com"
                     autoCapitalize="none"
-                    autoCorrect={false}
                     keyboardType="email-address"
-                    autoComplete="email"
-                    textContentType="emailAddress"
-                    returnKeyType="next"
-                    onSubmitEditing={() => passwordRef.current?.focus()}
+                    {...(!IS_NATIVE
+                      ? {
+                          autoComplete: "email",
+                          textContentType: "emailAddress",
+                          returnKeyType: "next",
+                          onSubmitEditing: () => passwordRef.current?.focus(),
+                        }
+                      : {})}
                   />
 
-                  <SignupField
+                  <AuthField
                     label="Password"
                     icon="lock-closed-outline"
+                    colors={colors}
                     value={password}
-                    onChangeText={(value) => {
-                      setPassword(value);
-                      if (error) setError(null);
-                    }}
+                    onChangeText={setPassword}
                     inputRef={passwordRef}
                     placeholder="At least 8 characters"
                     secureTextEntry
-                    autoComplete="new-password"
-                    textContentType="newPassword"
-                    returnKeyType="next"
-                    onSubmitEditing={() => confirmRef.current?.focus()}
+                    {...(!IS_NATIVE
+                      ? {
+                          autoComplete: "new-password",
+                          textContentType: "newPassword",
+                          returnKeyType: "next",
+                          onSubmitEditing: () => confirmRef.current?.focus(),
+                        }
+                      : {})}
                   />
 
-                  {!!password && (
-                    <View style={styles.strengthWrap}>
-                      <View style={styles.strengthBars}>
-                        {[1, 2, 3, 4].map((level) => (
-                          <View
-                            key={level}
-                            style={[
-                              styles.strengthBar,
-                              {
-                                backgroundColor:
-                                  strength.score >= level ? strength.color : colors.border,
-                              },
-                            ]}
-                          />
-                        ))}
-                      </View>
-                      <Text style={[styles.strengthText, { color: strength.color }]}>
-                        {strength.label}
-                      </Text>
-                      <Text style={styles.strengthHint}>8+ characters</Text>
-                    </View>
-                  )}
-
-                  <SignupField
+                  <AuthField
                     label="Confirm password"
                     icon="shield-checkmark-outline"
+                    colors={colors}
                     value={confirmPassword}
-                    onChangeText={(value) => {
-                      setConfirmPassword(value);
-                      if (error) setError(null);
-                    }}
+                    onChangeText={setConfirmPassword}
                     inputRef={confirmRef}
                     placeholder="Enter your password again"
                     secureTextEntry
-                    autoComplete="new-password"
-                    textContentType="newPassword"
-                    returnKeyType="done"
-                    onSubmitEditing={submit}
+                    {...(!IS_NATIVE
+                      ? {
+                          autoComplete: "new-password",
+                          textContentType: "newPassword",
+                          returnKeyType: "done",
+                          onSubmitEditing: submit,
+                        }
+                      : {})}
                   />
 
-                  {!!confirmPassword && (
-                    <View style={styles.matchRow}>
-                      <Ionicons
-                        name={passwordsMatch ? "checkmark-circle" : "alert-circle"}
-                        size={14}
-                        color={passwordsMatch ? colors.mint : ERROR_COLOR}
-                      />
-                      <Text
-                        style={[
-                          styles.matchText,
-                          { color: passwordsMatch ? colors.mint : ERROR_COLOR },
-                        ]}
-                      >
-                        {passwordsMatch ? "Passwords match" : "Passwords do not match"}
-                      </Text>
-                    </View>
-                  )}
+                  <PasswordHints
+                    password={password}
+                    confirmPassword={confirmPassword}
+                    colors={colors}
+                  />
 
                   {error && (
                     <View
@@ -488,9 +338,33 @@ export default function SignupScreen({ navigation }) {
                 </Pressable>
               </View>
             </View>
-          </Animated.View>
+    </Shell>
+  );
+
+  return (
+    <Screen>
+      {IS_NATIVE ? (
+        <ScrollView
+          style={styles.flex}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scroll}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="none"
+          nestedScrollEnabled={false}
+        >
+          {form}
         </ScrollView>
-      </KeyboardAvoidingView>
+      ) : (
+        <KeyboardAvoidingView behavior="padding" style={styles.flex}>
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.scroll}
+            keyboardShouldPersistTaps="always"
+          >
+            {form}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      )}
     </Screen>
   );
 }
@@ -500,8 +374,9 @@ const createStyles = (colors, isDark, wide, compact) =>
     flex: { flex: 1 },
     scroll: {
       flexGrow: 1,
-      justifyContent: "center",
-      paddingVertical: compact ? SPACING.md : SPACING.xl,
+      justifyContent: "flex-start",
+      paddingTop: compact ? SPACING.md : SPACING.lg,
+      paddingBottom: 360,
     },
     shell: {
       width: "100%",
@@ -513,12 +388,16 @@ const createStyles = (colors, isDark, wide, compact) =>
       borderWidth: 1,
       borderColor: colors.border,
       borderRadius: wide ? 28 : RADIUS.xl,
-      overflow: "hidden",
-      shadowColor: "#000",
-      shadowOpacity: isDark ? 0.3 : 0.1,
-      shadowRadius: 24,
-      shadowOffset: { width: 0, height: 10 },
-      elevation: 8,
+      overflow: wide ? "hidden" : "visible",
+      ...(IS_NATIVE
+        ? {}
+        : {
+            shadowColor: "#000",
+            shadowOpacity: isDark ? 0.3 : 0.1,
+            shadowRadius: 24,
+            shadowOffset: { width: 0, height: 10 },
+            elevation: 8,
+          }),
     },
 
     brandPanel: {
@@ -642,10 +521,10 @@ const createStyles = (colors, isDark, wide, compact) =>
     trustMeta: { color: colors.textMuted, fontSize: 10.5, marginTop: 2 },
 
     formPanel: {
-      flex: 1,
-      justifyContent: "center",
+      flex: wide ? 1 : undefined,
+      justifyContent: wide ? "center" : "flex-start",
       paddingHorizontal: wide ? 46 : compact ? SPACING.lg : SPACING.xl,
-      paddingVertical: wide ? 34 : compact ? SPACING.lg : 30,
+      paddingVertical: wide ? 34 : compact ? SPACING.lg : 24,
     },
     formInner: { width: "100%", maxWidth: 430, alignSelf: "center" },
     mobileBrand: {
@@ -712,25 +591,6 @@ const createStyles = (colors, isDark, wide, compact) =>
       marginTop: 6,
     },
     formFields: { width: "100%" },
-    strengthWrap: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 7,
-      marginTop: -5,
-      marginBottom: 10,
-    },
-    strengthBars: { flex: 1, flexDirection: "row", gap: 4 },
-    strengthBar: { flex: 1, height: 3, borderRadius: 2 },
-    strengthText: { fontSize: 10.5, fontWeight: "800" },
-    strengthHint: { color: colors.textMuted, fontSize: 10.5 },
-    matchRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 5,
-      marginTop: -4,
-      marginBottom: 10,
-    },
-    matchText: { fontSize: 11, fontWeight: "700" },
     errorBanner: {
       flexDirection: "row",
       alignItems: "flex-start",
