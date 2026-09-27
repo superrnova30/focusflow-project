@@ -112,6 +112,15 @@ export default function StudyChatScreen({ navigation, route }) {
         <View style={[styles.statusPill, { backgroundColor: colors.tomatoSoft, borderColor: colors.border }]}>
           <Text style={[styles.statusText, { color: colors.tomato }]}>Online</Text>
         </View>
+
+        {/* Jump straight to the saved AI history from where the chat happens. */}
+        <TouchableOpacity
+          onPress={() => navigation.navigate('AIHistory')}
+          style={[styles.iconButton, styles.historyButton, { backgroundColor: colors.violetSoft, borderColor: colors.border }]}
+          hitSlop={8}
+        >
+          <Ionicons name="time-outline" size={19} color={colors.violet} />
+        </TouchableOpacity>
       </View>
 
       <ScrollView
@@ -129,7 +138,7 @@ export default function StudyChatScreen({ navigation, route }) {
         ))}
       </ScrollView>
 
-      <View style={[styles.composerWrap, { backgroundColor: colors.bg, borderTopColor: colors.border }]}> 
+      <View style={[styles.composerWrap, { backgroundColor: colors.bg, borderTopColor: colors.border }]}>
         <View style={[styles.composer, { backgroundColor: colors.surface, borderColor: colors.border }]}>
           <TextInput
             placeholder='Ask me about a topic, request summaries, quizzes, or flashcards.'
@@ -197,6 +206,10 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     borderRadius: 999,
     borderWidth: 1,
+  },
+  historyButton: {
+    borderWidth: 1,
+    borderRadius: 12,
   },
   statusText: {
     fontSize: 10,

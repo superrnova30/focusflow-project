@@ -49,6 +49,14 @@ model User {
   wrongAnswers          Int           @default(0)
   totalXpEarned         Int           @default(0)
 
+  // Go Unlimited subscription. `premiumUntil` is the authoritative expiry the
+  // server checks; null means the student has never subscribed. `isPremium` is
+  // a denormalized convenience flag kept in sync on every grant/revoke.
+  isPremium             Boolean       @default(false)
+  premiumPlan           String?       // "unlimited"
+  premiumSince          DateTime?
+  premiumUntil          DateTime?
+
   // Gamification polish — streaks, levels, challenges
   streakCount           Int           @default(0)
   longestStreak         Int           @default(0)
@@ -73,6 +81,9 @@ model User {
   challengeCompletions DailyChallengeCompletion[]
   coachInsights     CoachInsight[]   @relation("CoachInsightOwner")
   coachInsightsGenerated CoachInsight[] @relation("CoachInsightGeneratedBy")
+  chatConversations ChatConversation[]
+  payments          Payment[]
+  subscription      Subscription?
 }
 
 model Subject {
@@ -278,6 +289,82 @@ model CoachInsight {
   createdAt     DateTime @default(now())
 
   @@index([userId, createdAt])
+}
+
+// Persisted AI chat history. A conversation groups the messages exchanged
+// between a student and the AI assistant so it can be browsed, searched and
+// resumed later from the History screen. Title/intent are derived on the
+// server so the list stays readable even for long first messages.
+model ChatConversation {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title        String
+  intent       String   @default("other") // "casual" | "study" | "other"
+  messageCount Int      @default(0)
+  preview      String?  @db.Text
+  pinned       Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  messages ChatMessage[]
+
+  @@index([userId, updatedAt])
+  @@index([userId, pinned])
+}
+
+model ChatMessage {
+  id             String           @id @default(cuid())
+  conversationId String
+  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String // "user" | "assistant"
+  content        String           @db.Text
+  createdAt      DateTime         @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+// One row per Xendit checkout attempt. An account is only upgraded after the
+// server independently verifies the paid status with Xendit — never from a
+// client-reported success.
+model Payment {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider       String   @default("xendit")
+  plan           String   @default("unlimited")
+  amount         Int
+  currency       String   @default("PHP")
+  status         String   @default("PENDING") // PENDING | PAID | EXPIRED | FAILED
+  // Xendit identifiers + the hosted checkout URL the client opens.
+  externalId     String   @unique // our idempotency key, also sent to Xendit
+  xenditInvoiceId String? @unique
+  checkoutUrl    String?  @db.Text
+  paymentMethod  String?
+  paidAt         DateTime?
+  expiresAt      DateTime?
+  rawPayload     Json?
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  @@index([userId, createdAt])
+  @@index([status])
+}
+
+// The student's active/last subscription. Kept separate from User so the
+// premium lifecycle (renewals, cancellations, expiry) has its own audit trail.
+model Subscription {
+  id         String   @id @default(cuid())
+  userId     String   @unique
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan       String   @default("unlimited")
+  status     String   @default("ACTIVE") // ACTIVE | EXPIRED | CANCELLED
+  startedAt  DateTime @default(now())
+  expiresAt  DateTime?
+  autoRenew  Boolean  @default(false)
+  lastPaymentId String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  @@index([status])
 }
 
 model DailyChallenge {

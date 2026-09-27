@@ -3,6 +3,7 @@ const prisma = require("../lib/prisma");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { generateQuiz } = require("../lib/ai");
 const { bumpStreak, xpWithinLevel, xpForNextLevel, todayKey, computeCalendar, LEVEL_XP_STEP } = require("../lib/gamification");
+const { isPremiumActive, premiumState } = require("../lib/premium");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -24,7 +25,12 @@ router.get("/state", async (req, res) => {
     where: { id: req.user.id },
     select: { xp: true, hearts: true, correctAnswers: true, wrongAnswers: true, totalXpEarned: true },
   });
-  res.json({ state: user });
+  // Go Unlimited students keep a full heart bar at all times.
+  const premium = premiumState(req.user);
+  res.json({
+    state: user ? { ...user, hearts: premium.isPremium ? MAX_HEARTS : user.hearts } : user,
+    premium,
+  });
 });
 
 // Award XP to the current student (e.g. +200 for a correct quiz answer).
@@ -53,6 +59,19 @@ router.post("/xp", async (req, res) => {
 router.post("/hearts", async (req, res) => {
   const { delta, set } = req.body;
   const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+
+  // Unlimited Hearts: a premium student can never be drained. We still
+  // record the attempt so the quiz flow works identically, but the stored
+  // value stays pinned at the maximum.
+  if (isPremiumActive(user)) {
+    const pinned = await prisma.user.update({
+      where: { id: req.user.id },
+      data: { hearts: MAX_HEARTS },
+      select: { xp: true, hearts: true, totalXpEarned: true },
+    });
+    return res.json({ state: pinned, unlimitedHearts: true });
+  }
+
   let nextHearts = user.hearts;
 
   if (typeof set === "number" && Number.isFinite(set)) {

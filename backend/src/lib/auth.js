@@ -30,9 +30,23 @@ function verifyToken(token) {
   return jwt.verify(token, JWT_SECRET);
 }
 
-// Strip sensitive fields before sending a user object back to the client
+// Strip sensitive fields before sending a user object back to the client.
+// The derived `premium` block is attached here so every auth response (login,
+// signup, /auth/me) carries the student's current entitlement — that is what
+// keeps Go Unlimited active across logout/login and page refreshes.
 function publicUser(user) {
   const { passwordHash, emailVerificationCode, ...safe } = user;
+  try {
+    const { premiumState } = require("./premium");
+    safe.premium = premiumState(user);
+  } catch (e) {
+    // Never let entitlement derivation break authentication.
+    safe.premium = {
+      isPremium: Boolean(user && user.isPremium),
+      plan: user && user.premiumPlan ? user.premiumPlan : null,
+      planLabel: user && user.isPremium ? "Go Unlimited" : "Basic",
+    };
+  }
   return safe;
 }
 

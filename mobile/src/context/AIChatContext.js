@@ -9,6 +9,10 @@ export function AIChatProvider({ children }) {
     // system prompt based on intent. Avoid forcing a study template here.
     { id: 'system', role: 'system', content: 'You are a friendly conversational assistant. Respond naturally and match the user tone.' },
   ]);
+  // Server-side id of the thread these messages belong to. Echoing it back on
+  // each turn appends to one saved conversation instead of creating a new one
+  // per message, which is what makes History read like real threads.
+  const [conversationId, setConversationId] = useState(null);
   const messagesRef = useRef(messages);
    const sendingRef = useRef(false);
   const [sending, setSending] = useState(false);
@@ -25,6 +29,8 @@ export function AIChatProvider({ children }) {
     const initial = [{ id: 'system', role: 'system', content: messagesRef.current?.[0]?.content || '' }];
     messagesRef.current = initial;
     setMessages(initial);
+    // Starting a fresh chat should start a fresh saved thread.
+    setConversationId(null);
   }, []);
 
   const send = useCallback(async (text) => {
@@ -38,7 +44,11 @@ export function AIChatProvider({ children }) {
     setSending(true);
     try {
       const conversation = (messagesRef.current || []).concat([userMsg]).map(({ role, content }) => ({ role, content }));
-      const { data } = await client.post('/ai/chat', { messages: conversation }, { timeout: 30000 });
+      const payload = { messages: conversation };
+      if (conversationId) payload.conversationId = conversationId;
+      const { data } = await client.post('/ai/chat', payload, { timeout: 30000 });
+      // Remember the thread id the server assigned so the next turn appends.
+      if (data && data.conversationId) setConversationId(data.conversationId);
       let replyContent = 'Sorry, no response.';
       if (data) {
         if (data.reply && typeof data.reply === 'object' && data.reply.content) replyContent = data.reply.content;
@@ -76,10 +86,10 @@ export function AIChatProvider({ children }) {
        sendingRef.current = false;
       setSending(false);
     }
-  }, [appendMessage, messages]);
+  }, [appendMessage, messages, conversationId]);
 
   return (
-    <AIChatContext.Provider value={{ messages, appendMessage, send, sending, clear }}>
+    <AIChatContext.Provider value={{ messages, appendMessage, send, sending, clear, conversationId }}>
       {children}
     </AIChatContext.Provider>
   );

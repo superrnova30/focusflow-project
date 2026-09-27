@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from "react";
+import React, { useState, useCallback, useRef, useMemo } from "react";
 import {
   View,
   Text,
@@ -16,22 +16,31 @@ import {
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
-import { Screen, Card } from "../components/Screen";
+import { Screen } from "../components/Screen";
 import { useTheme } from "../context/ThemeContext";
-import { useAuth } from "../context/AuthContext";
 import BottomSheet from "../components/BottomSheet";
 import client from "../api/client";
 import { useAIChat } from '../context/AIChatContext';
+import { usePremium } from '../context/PremiumContext';
+import { RADIUS, SPACING } from "../theme/theme";
+
+const GOLD = '#FFC15E';
 
 const XP_PER_CORRECT = 200;
 const MAX_HEARTS = 5;
 
 export default function StudyHomeScreen({ navigation }) {
   const { colors } = useTheme();
-  const styles = useStyles(colors);
   const { width } = useWindowDimensions();
-  const isWide = width >= 700;
-  const { refreshUser } = useAuth();
+  const isWide = width >= 900;
+  const isNarrow = width < 760;
+  const compact = width < 380;
+  const styles = useMemo(
+    () => createStyles(colors, isWide, isNarrow, compact),
+    [colors, isWide, isNarrow, compact]
+  );
+
+  const { isPremium, premium } = usePremium();
 
   const [materials, setMaterials] = useState([]);
   const [quizzes, setQuizzes] = useState([]);
@@ -52,7 +61,7 @@ export default function StudyHomeScreen({ navigation }) {
   // Lightweight input that navigates to the dedicated AI conversation page
   const [studyTopic, setStudyTopic] = useState("");
   const [navigatingToChat, setNavigatingToChat] = useState(false);
-  const { messages: chatMessagesContext, appendMessage } = useAIChat();
+  const { messages: chatMessagesContext } = useAIChat();
 
   // Bottom-sheet state
   const [sheetVisible, setSheetVisible] = useState(false);
@@ -62,7 +71,6 @@ export default function StudyHomeScreen({ navigation }) {
   const heroOpacity = useRef(new Animated.Value(0)).current;
   const heroTranslate = useRef(new Animated.Value(20)).current;
   const fabScale = useRef(new Animated.Value(0)).current;
-  const xpPulse = useRef(new Animated.Value(1)).current;
 
   useFocusEffect(
     useCallback(() => {
@@ -185,13 +193,11 @@ useFocusEffect(
   // "I want to study..." → generate a study response in-page and stay on this screen.
   const generateStudy = async (source) => {
     if (source === "notes") {
-      setGenerating(false);
       navigation.navigate("NoteImport");
       return;
     }
 
     if (source === "pdf") {
-      setGenerating(false);
       navigation.navigate("CardImport");
       return;
     }
@@ -328,51 +334,43 @@ useFocusEffect(
 
   const totalCards = collections.reduce((sum, c) => sum + (c._count?.flashcards || 0), 0);
 
-  const renderStat = (emoji, value, label, soft) => (
+  const renderMaterial = ({ item }) => (
     <Pressable
-      style={({ pressed }) => [
-        styles.statCard,
-        { backgroundColor: colors.surface, borderColor: colors.border, opacity: pressed ? 0.85 : 1 },
-      ]}
+      onPress={() => navigation.navigate("Material", { material: item })}
+      style={({ pressed }) => [styles.contentCard, pressed && styles.pressed]}
     >
-      <View style={[styles.statIcon, { backgroundColor: soft }]}>
-        <Text style={styles.statEmoji}>{emoji}</Text>
+      <View style={[styles.contentIcon, { backgroundColor: colors.violetSoft }]}>
+        <Ionicons name="book-outline" size={20} color={colors.violet} />
       </View>
-      <Text style={styles.statValue}>{value}</Text>
-      <Text style={styles.statLabel}>{label}</Text>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={styles.contentTitle} numberOfLines={1}>{item.title}</Text>
+        <Text style={styles.contentMeta}>
+          {item.flashcards?.length || 0} cards · {item.quizzes?.length || 0} quizzes
+        </Text>
+      </View>
+      <Ionicons name="chevron-forward" size={17} color={colors.textMuted} />
     </Pressable>
   );
 
-  const renderMaterial = ({ item }) => (
-    <Card style={{ marginBottom: 8 }}>
-      <View style={styles.materialRow}>
-        <Pressable style={{ flex: 1 }} onPress={() => navigation.navigate("Material", { material: item })}>
-          <Text style={styles.materialTitle}>{item.title}</Text>
-          <Text style={styles.materialMeta}>
-            {item.flashcards?.length || 0} cards · {item.quizzes?.length || 0} quiz
-          </Text>
-        </Pressable>
-        <Pressable onPress={() => navigation.navigate("Material", { material: item })} style={{ marginLeft: 10 }}>
-          <Text style={styles.actionText}>View</Text>
-        </Pressable>
-      </View>
-    </Card>
-  );
-
   const renderNote = ({ item }) => (
-    <Pressable onPress={() => navigation.navigate("NoteView", { note: item })}>
-      <Card style={{ marginBottom: 8, flexDirection: "row", alignItems: "center" }}>
-        <View style={[styles.noteIcon, { backgroundColor: item.source === "ai" ? colors.violetSoft : colors.amberSoft }]}>
-          <Text style={styles.noteIconEmoji}>{item.source === "ai" ? "✨" : "📝"}</Text>
-        </View>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.materialTitle}>{item.title}</Text>
-          <Text style={styles.materialMeta}>
-            {item.source === "ai" ? "AI" : "Manual"} · {(item.contentJson || []).length} blocks
-          </Text>
-        </View>
-        <Text style={styles.actionText}>Open →</Text>
-      </Card>
+    <Pressable
+      onPress={() => navigation.navigate("NoteView", { note: item })}
+      style={({ pressed }) => [styles.contentCard, pressed && styles.pressed]}
+    >
+      <View style={[styles.contentIcon, { backgroundColor: item.source === "ai" ? colors.violetSoft : colors.amberSoft }]}>
+        <Ionicons
+          name={item.source === "ai" ? "sparkles-outline" : "document-text-outline"}
+          size={20}
+          color={item.source === "ai" ? colors.violet : colors.amber}
+        />
+      </View>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={styles.contentTitle} numberOfLines={1}>{item.title}</Text>
+        <Text style={styles.contentMeta}>
+          {item.source === "ai" ? "AI generated" : "Manual"} · {(item.contentJson || []).length} blocks
+        </Text>
+      </View>
+      <Ionicons name="chevron-forward" size={17} color={colors.textMuted} />
     </Pressable>
   );
 
@@ -383,45 +381,100 @@ useFocusEffect(
         keyExtractor={(m) => m.id}
         renderItem={renderMaterial}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 120 }}
+        contentContainerStyle={styles.page}
         ListHeaderComponent={
           <>
+            <View style={styles.hubHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.hubEyebrow}>STUDY HUB</Text>
+                <Text style={styles.hubTitle}>Learn your way</Text>
+                <Text style={styles.hubSubtitle}>
+                  Ask AI, create study materials, and keep everything you’re learning in one place.
+                </Text>
+              </View>
+              <Pressable
+                onPress={openSheet}
+                accessibilityRole="button"
+                accessibilityLabel="Create study content"
+                style={({ pressed }) => [styles.headerCreateBtn, pressed && styles.pressed]}
+              >
+                <Ionicons name="add" size={19} color="#FFFFFF" />
+                {!compact && <Text style={styles.headerCreateText}>Create</Text>}
+              </Pressable>
+            </View>
+
 {/* XP + Hearts status bar — tap to open the Progress dashboard */}
-<Pressable
+            <Pressable
               onPress={() => navigation.navigate("Progress")}
+              accessibilityRole="button"
+              accessibilityLabel={`${xp} XP, level ${level.current}, ${streak.current} day streak, ${hearts} of ${MAX_HEARTS} hearts. Open progress.`}
               style={({ pressed }) => [styles.gameBar, { opacity: pressed ? 0.85 : 1 }]}
             >
-              <View style={styles.gameBarLeft}>
-                <View style={[styles.xpPill, { backgroundColor: colors.amberSoft }]}>
-                  <Ionicons name="flash" size={17} color={colors.amber} />
-                  <Text style={[styles.xpText, { color: colors.amber }]}>{xp} XP</Text>
+              <View style={styles.gameBarContent}>
+                <View style={styles.progressStats}>
+                  <View style={styles.statusMetric}>
+                    <View style={[styles.statusIcon, { backgroundColor: colors.amberSoft }]}>
+                      <Ionicons name="flash" size={17} color={colors.amber} />
+                    </View>
+                    <View style={styles.statusCopy}>
+                      <Text style={styles.statusLabel}>TOTAL XP</Text>
+                      <Text style={[styles.statusValue, { color: colors.amber }]}>{xp}</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.metricDivider} />
+
+                  <View style={styles.statusMetric}>
+                    <View style={[styles.statusIcon, { backgroundColor: colors.violetSoft }]}>
+                      <Ionicons name="shield-checkmark" size={16} color={colors.violet} />
+                    </View>
+                    <View style={styles.statusCopy}>
+                      <Text style={styles.statusLabel}>LEVEL</Text>
+                      <Text style={[styles.statusValue, { color: colors.violet }]}>Lv {level.current}</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.metricDivider} />
+
+                  <View style={styles.statusMetric}>
+                    <View style={[styles.statusIcon, { backgroundColor: colors.tomatoSoft }]}>
+                      <Ionicons name="flame" size={16} color={colors.tomato} />
+                    </View>
+                    <View style={styles.statusCopy}>
+                      <Text style={styles.statusLabel}>STREAK</Text>
+                      <Text style={[styles.statusValue, { color: colors.tomato }]}>
+                        {streak.current} {streak.current === 1 ? "day" : "days"}
+                      </Text>
+                    </View>
+                  </View>
                 </View>
-                <View style={[styles.levelPill, { backgroundColor: colors.violetSoft }]}>
-                  <Ionicons name="shield-checkmark" size={15} color={colors.violet} />
-                  <Text style={[styles.levelText, { color: colors.violet }]}>Lv {level.current}</Text>
-                </View>
-                <View style={[styles.streakPill, { backgroundColor: colors.tomatoSoft }]}>
-                  <Ionicons name="flame" size={15} color={colors.tomato} />
-                  <Text style={[styles.streakText, { color: colors.tomato }]}>{streak.current}</Text>
+
+                <View style={styles.energySection}>
+                  <View style={styles.energyCopy}>
+                    <Text style={styles.energyLabel}>FOCUS ENERGY</Text>
+                    <Text style={styles.energyValue}>{hearts} of {MAX_HEARTS} hearts</Text>
+                  </View>
+                  <View style={styles.heartsRow}>
+                    {[0, 1, 2, 3, 4].map((i) => (
+                      <Ionicons
+                        key={i}
+                        name={i < hearts ? "heart" : "heart-outline"}
+                        size={compact ? 18 : 20}
+                        color={i < hearts ? "#FF5A76" : colors.border}
+                      />
+                    ))}
+                  </View>
                 </View>
               </View>
-              <View style={styles.gameBarRight}>
-                <View style={[styles.heartPill, { backgroundColor: colors.tomatoSoft }]}>
-                  {[0, 1, 2, 3, 4].map((i) => (
-                    <Ionicons
-                      key={i}
-                      name={i < hearts ? "heart" : "heart-outline"}
-                      size={19}
-                      color={i < hearts ? "#FF5A76" : colors.border}
-                    />
-                  ))}
-                </View>
-                <Ionicons name="chevron-forward" size={16} color={colors.textMuted} style={{ marginLeft: 2 }} />
+
+              <View style={styles.progressChevron}>
+                <Ionicons name="chevron-forward" size={17} color={colors.textMuted} />
               </View>
             </Pressable>
 
             {/* Daily Challenge + Leaderboard shortcut */}
-            {challenge && !challenge.completed && (
+            <View style={styles.engagementRow}>
+              {challenge && !challenge.completed && (
               <Pressable
                 onPress={completeChallenge}
                 disabled={completingChallenge}
@@ -466,7 +519,7 @@ useFocusEffect(
                   )}
                 </View>
               </Pressable>
-            )}
+              )}
 
             {/* Dedicated trophy button to open the Leaderboard */}
             <Pressable
@@ -485,17 +538,19 @@ useFocusEffect(
               </View>
               <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
             </Pressable>
+            </View>
 
             {/* Hero — greeting at top, above the input field */}
             <Animated.View style={[styles.hero, { opacity: heroOpacity, transform: [{ translateY: heroTranslate }] }]}>
               <View style={styles.heroTextWrap}>
                 <View style={[styles.heroIcon, { backgroundColor: colors.violetSoft }]}>
-                  <Text style={styles.heroEmoji}>📚</Text>
+                  <Ionicons name="sparkles" size={28} color={colors.violet} />
                 </View>
                 <View style={styles.heroTexts}>
-                  <Text style={styles.heroTitle}>What shall we study?</Text>
+                  <Text style={styles.heroEyebrow}>ASK FOCUSFLOW AI</Text>
+                  <Text style={styles.heroTitle}>What will you master today?</Text>
                   <Text style={styles.heroSubtitle}>
-                    Type a topic below and let AI craft a fun quiz — earn XP for every correct answer!
+                    Ask a question, explore a topic, or turn your materials into something easier to learn.
                   </Text>
                 </View>
               </View>
@@ -504,7 +559,16 @@ useFocusEffect(
 
             {/* Study chat area */}
             <View style={[styles.generatorCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-              <Text style={styles.generatorLabel}>WHAT DO YOU WANT TO LEARN?</Text>
+              <View style={styles.generatorHeader}>
+                <View>
+                  <Text style={styles.generatorLabel}>AI STUDY ASSISTANT</Text>
+                  <Text style={styles.generatorTitle}>Start with a question</Text>
+                </View>
+                <View style={[styles.onlineBadge, { backgroundColor: colors.mintSoft }]}>
+                  <View style={[styles.onlineDot, { backgroundColor: colors.mint }]} />
+                  <Text style={[styles.onlineText, { color: colors.mint }]}>READY</Text>
+                </View>
+              </View>
               <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ width: '100%' }} keyboardVerticalOffset={90}>
                 <View style={styles.chatContainer}>
                   {/* Preview: show last assistant response if available */}
@@ -517,11 +581,11 @@ useFocusEffect(
                             <Text style={[styles.chatText, { color: colors.text }]} numberOfLines={3} ellipsizeMode="tail">{last.content}</Text>
                           </View>
                         ) : (
-                          <Text style={{ color: colors.textMuted }}>Start a conversation with Gemini — tap Ask to open the AI chat page.</Text>
+                          <Text style={styles.chatPlaceholder}>Ask for an explanation, study plan, quiz help, or examples.</Text>
                         );
                       })()
                     ) : (
-                      <Text style={{ color: colors.textMuted }}>Start a conversation with Gemini — tap Ask to open the AI chat page.</Text>
+                      <Text style={styles.chatPlaceholder}>Ask for an explanation, study plan, quiz help, or examples.</Text>
                     )}
                   </View>
 
@@ -538,13 +602,20 @@ useFocusEffect(
                     />
                     <Pressable
                       onPress={() => generateStudy("topic")}
+                      disabled={navigatingToChat}
                       style={({ pressed }) => [
                         styles.generateBtn,
-                        { backgroundColor: colors.tomato, opacity: pressed ? 0.9 : 1 },
+                        { backgroundColor: colors.tomato, opacity: pressed || navigatingToChat ? 0.75 : 1 },
                       ]}
                     >
-                      <Ionicons name="sparkles" size={18} color="#fff" />
-                      <Text style={styles.generateBtnText}>Ask</Text>
+                      {navigatingToChat ? (
+                        <ActivityIndicator color="#FFFFFF" size="small" />
+                      ) : (
+                        <>
+                          <Ionicons name="arrow-up" size={18} color="#fff" />
+                          <Text style={styles.generateBtnText}>Ask</Text>
+                        </>
+                      )}
                     </Pressable>
                   </View>
                 </View>
@@ -570,27 +641,106 @@ useFocusEffect(
             </View>
 
             {/* Stats */}
-            <View style={[styles.statsRow, isWide && styles.statsRowWide]}>
-              {renderStat("🃏", totalCards, "Cards", colors.mintSoft)}
-              {renderStat("📝", notes.length, "Notes", colors.amberSoft)}
-              {renderStat("📚", materials.length, "Study packs", colors.violetSoft)}
-              {renderStat("📊", quizzes.length, "Quizzes", colors.tomatoSoft)}
+            <View style={styles.statsRow}>
+              {[
+                ["layers-outline", totalCards, "Cards", colors.mint, colors.mintSoft],
+                ["document-text-outline", notes.length, "Notes", colors.amber, colors.amberSoft],
+                ["book-outline", materials.length, "Study packs", colors.violet, colors.violetSoft],
+                ["help-circle-outline", quizzes.length, "Quizzes", colors.tomato, colors.tomatoSoft],
+              ].map(([icon, value, label, color, soft]) => (
+                <View key={label} style={styles.statCard}>
+                  <View style={[styles.statIcon, { backgroundColor: soft }]}>
+                    <Ionicons name={icon} size={18} color={color} />
+                  </View>
+                  <View>
+                    <Text style={styles.statValue}>{value}</Text>
+                    <Text style={styles.statLabel}>{label}</Text>
+                  </View>
+                </View>
+              ))}
             </View>
 
             {/* Quick access */}
             <View style={styles.quickRow}>
-              <Pressable style={styles.quickBtn} onPress={() => navigation.navigate("Flashcards")}>
-                <Ionicons name="layers" size={18} color={colors.mint} />
-                <Text style={styles.quickBtnText}>Cards</Text>
+              <Pressable style={({ pressed }) => [styles.quickBtn, pressed && styles.pressed]} onPress={() => navigation.navigate("Flashcards")}>
+                <View style={[styles.quickIcon, { backgroundColor: colors.mintSoft }]}>
+                  <Ionicons name="layers-outline" size={19} color={colors.mint} />
+                </View>
+                <Text style={styles.quickBtnText}>Flashcards</Text>
+                <Text style={styles.quickBtnMeta}>Review decks</Text>
               </Pressable>
-              <Pressable style={styles.quickBtn} onPress={() => navigation.navigate("Notes")}>
-                <Ionicons name="document-text" size={18} color={colors.amber} />
+              <Pressable style={({ pressed }) => [styles.quickBtn, pressed && styles.pressed]} onPress={() => navigation.navigate("Notes")}>
+                <View style={[styles.quickIcon, { backgroundColor: colors.amberSoft }]}>
+                  <Ionicons name="document-text-outline" size={19} color={colors.amber} />
+                </View>
                 <Text style={styles.quickBtnText}>Notes</Text>
+                <Text style={styles.quickBtnMeta}>Capture ideas</Text>
               </Pressable>
-              <Pressable style={styles.quickBtn} onPress={() => navigation.navigate("Coach")}>
-                <Ionicons name="sparkles" size={18} color={colors.violet} />
+              <Pressable style={({ pressed }) => [styles.quickBtn, pressed && styles.pressed]} onPress={() => navigation.navigate("Coach")}>
+                <View style={[styles.quickIcon, { backgroundColor: colors.violetSoft }]}>
+                  <Ionicons name="sparkles-outline" size={19} color={colors.violet} />
+                </View>
                 <Text style={styles.quickBtnText}>AI Coach</Text>
+                <Text style={styles.quickBtnMeta}>Get guidance</Text>
               </Pressable>
+            </View>
+
+            {/* Go Unlimited — the premium entry point, marked with a crown. */}
+            <View style={styles.promoGrid}>
+            <Pressable
+              onPress={() => navigation.navigate("Premium")}
+              style={({ pressed }) => [
+                styles.unlimitedBanner,
+                {
+                  backgroundColor: isPremium ? colors.mintSoft : colors.violetSoft,
+                  borderColor: isPremium ? colors.mint : GOLD + '66',
+                  opacity: pressed ? 0.88 : 1,
+                },
+              ]}
+            >
+              <View style={[styles.unlimitedIcon, { backgroundColor: colors.surface, borderColor: GOLD + '55' }]}>
+                <Text style={styles.unlimitedCrown}>👑</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <View style={styles.unlimitedTitleRow}>
+                  <Text style={styles.unlimitedTitle}>{isPremium ? 'Go Unlimited' : 'Go Unlimited'}</Text>
+                  {isPremium ? (
+                    <View style={[styles.unlimitedBadge, { backgroundColor: colors.mint, borderColor: colors.mint }]}>
+                      <Text style={styles.unlimitedBadgeText}>ACTIVE</Text>
+                    </View>
+                  ) : (
+                    <View style={[styles.unlimitedBadge, { backgroundColor: GOLD, borderColor: GOLD }]}>
+                      <Ionicons name="star" size={9} color="#1A1400" />
+                      <Text style={[styles.unlimitedBadgeText, { color: '#1A1400' }]}>PRO</Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={styles.unlimitedSubtitle}>
+                  {isPremium
+                    ? `${premium.daysRemaining} day${premium.daysRemaining === 1 ? '' : 's'} remaining · manage your plan`
+                    : 'Unlimited cards, hearts, AI tutor, hints & prompts'}
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={isPremium ? colors.mint : colors.violet} />
+            </Pressable>
+
+            {/* Saved AI conversations — one tap from the study hub. */}
+            <Pressable
+              onPress={() => navigation.navigate("AIHistory")}
+              style={({ pressed }) => [
+                styles.historyBanner,
+                { backgroundColor: colors.surface, borderColor: colors.border, opacity: pressed ? 0.88 : 1 },
+              ]}
+            >
+              <View style={[styles.historyBannerIcon, { backgroundColor: colors.violetSoft }]}>
+                <Ionicons name="time" size={20} color={colors.violet} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.historyBannerTitle}>AI History</Text>
+                <Text style={styles.historyBannerSubtitle}>Revisit every conversation with your AI tutor</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+            </Pressable>
             </View>
 
             {/* Notes section */}
@@ -623,30 +773,55 @@ useFocusEffect(
             )}
 
             <Text style={styles.sectionLabel}>YOUR STUDY PACKS ({materials.length})</Text>
-            {materials.length === 0 && (
-              <Text style={styles.mutedText}>
-                No study packs yet. Tap + to create flashcards or notes, or visit AI Coach for guidance.
-              </Text>
-            )}
+            {loading && materials.length === 0 ? (
+              <View style={styles.loadingState}>
+                <ActivityIndicator color={colors.violet} />
+                <Text style={styles.mutedText}>Loading your study space…</Text>
+              </View>
+            ) : materials.length === 0 ? (
+              <View style={styles.emptyState}>
+                <View style={[styles.emptyIcon, { backgroundColor: colors.violetSoft }]}>
+                  <Ionicons name="book-outline" size={23} color={colors.violet} />
+                </View>
+                <Text style={styles.emptyTitle}>No study packs yet</Text>
+                <Text style={styles.mutedText}>
+                  Import notes or a PDF to create your first study pack.
+                </Text>
+              </View>
+            ) : null}
           </>
         }
         ListFooterComponent={
           <>
             <Text style={styles.sectionLabel}>AVAILABLE QUIZZES ({quizzes.length})</Text>
-            {quizzes.length === 0 && <Text style={styles.mutedText}>No quizzes available.</Text>}
-            {quizzes.map((q) => (
-              <Pressable key={q.id} onPress={() => navigation.navigate("Quiz", { quizId: q.id, title: q.title })}>
-                <Card style={{ marginBottom: 8, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.materialTitle}>{q.title}</Text>
-                    <Text style={styles.materialMeta}>
-                      {q.questions?.length || 0} questions{q.isPublished ? " · Published" : " · Draft"}
-                    </Text>
-                  </View>
-                  <Text style={styles.actionText}>Take →</Text>
-                </Card>
-              </Pressable>
-            ))}
+            {quizzes.length === 0 ? (
+              <View style={styles.emptyStateCompact}>
+                <Text style={styles.mutedText}>No quizzes available yet.</Text>
+              </View>
+            ) : (
+              <View style={styles.quizGrid}>
+                {quizzes.map((quiz) => (
+                  <Pressable
+                    key={quiz.id}
+                    onPress={() => navigation.navigate("Quiz", { quizId: quiz.id, title: quiz.title })}
+                    style={({ pressed }) => [styles.quizCard, pressed && styles.pressed]}
+                  >
+                    <View style={[styles.contentIcon, { backgroundColor: colors.tomatoSoft }]}>
+                      <Ionicons name="help-circle-outline" size={20} color={colors.tomato} />
+                    </View>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.contentTitle} numberOfLines={1}>{quiz.title}</Text>
+                      <Text style={styles.contentMeta}>
+                        {quiz.questions?.length || 0} questions · {quiz.isPublished ? "Ready" : "Draft"}
+                      </Text>
+                    </View>
+                    <View style={[styles.quizCta, { backgroundColor: colors.tomatoSoft }]}>
+                      <Ionicons name="play" size={14} color={colors.tomato} />
+                    </View>
+                  </Pressable>
+                ))}
+              </View>
+            )}
           </>
         }
       />
@@ -691,60 +866,186 @@ useFocusEffect(
   );
 }
 
-const useStyles = (colors) =>
+const createStyles = (colors, isWide, isNarrow, compact) =>
   StyleSheet.create({
+    page: {
+      width: "100%",
+      maxWidth: 1120,
+      alignSelf: "center",
+      paddingTop: SPACING.md,
+      paddingBottom: 120,
+    },
+    pressed: { opacity: 0.76, transform: [{ scale: 0.99 }] },
+    hubHeader: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      justifyContent: "space-between",
+      gap: SPACING.md,
+      marginBottom: SPACING.md,
+    },
+    hubEyebrow: {
+      color: colors.violet,
+      fontSize: 9,
+      fontWeight: "900",
+      letterSpacing: 1.1,
+      marginBottom: 4,
+    },
+    hubTitle: {
+      color: colors.text,
+      fontSize: compact ? 25 : 29,
+      lineHeight: compact ? 31 : 35,
+      fontWeight: "900",
+      letterSpacing: -0.7,
+    },
+    hubSubtitle: {
+      color: colors.textMuted,
+      fontSize: 12.5,
+      lineHeight: 19,
+      maxWidth: 620,
+      marginTop: 5,
+    },
+    headerCreateBtn: {
+      minWidth: compact ? 45 : 105,
+      height: 45,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      borderRadius: RADIUS.md,
+      backgroundColor: colors.tomato,
+      shadowColor: colors.tomato,
+      shadowOpacity: 0.25,
+      shadowRadius: 10,
+      shadowOffset: { width: 0, height: 4 },
+      elevation: 4,
+    },
+    headerCreateText: { color: "#FFFFFF", fontSize: 12.5, fontWeight: "900" },
     // Game status bar
     gameBar: {
       flexDirection: "row",
       alignItems: "center",
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: RADIUS.xl,
+      padding: compact ? 11 : 13,
+      marginBottom: SPACING.md,
+      shadowColor: "#0F172A",
+      shadowOpacity: 0.05,
+      shadowRadius: 12,
+      shadowOffset: { width: 0, height: 5 },
+      elevation: 2,
+    },
+    gameBarContent: {
+      flex: 1,
+      flexDirection: isNarrow ? "column" : "row",
+      alignItems: "center",
+      gap: isNarrow ? 11 : 16,
+      minWidth: 0,
+    },
+    progressStats: {
+      flex: 1,
+      width: isNarrow ? "100%" : undefined,
+      flexDirection: "row",
+      alignItems: "center",
       justifyContent: "space-between",
-      marginTop: 12,
-      marginBottom: 12,
+      minWidth: 0,
     },
-    xpPill: {
+    statusMetric: {
+      flex: 1,
       flexDirection: "row",
       alignItems: "center",
-      borderRadius: 999,
-      paddingVertical: 8,
-      paddingHorizontal: 14,
-      gap: 6,
+      justifyContent: "center",
+      gap: compact ? 6 : 8,
+      minWidth: 0,
     },
-    xpText: { fontWeight: "800", fontSize: 13 },
-    levelPill: {
+    statusIcon: {
+      width: compact ? 31 : 35,
+      height: compact ? 31 : 35,
+      borderRadius: compact ? 10 : 11,
+      alignItems: "center",
+      justifyContent: "center",
+      flexShrink: 0,
+    },
+    statusCopy: {
+      minWidth: 0,
+    },
+    statusLabel: {
+      color: colors.textMuted,
+      fontSize: compact ? 7 : 8,
+      fontWeight: "800",
+      letterSpacing: 0.65,
+      marginBottom: 2,
+    },
+    statusValue: {
+      fontSize: compact ? 12 : 13.5,
+      lineHeight: compact ? 15 : 17,
+      fontWeight: "900",
+    },
+    metricDivider: {
+      width: 1,
+      height: 30,
+      backgroundColor: colors.border,
+      opacity: 0.75,
+      marginHorizontal: compact ? 3 : 6,
+    },
+    energySection: {
+      width: isNarrow ? "100%" : undefined,
+      minWidth: isNarrow ? undefined : 218,
       flexDirection: "row",
       alignItems: "center",
-      borderRadius: 999,
-      paddingVertical: 8,
-      paddingHorizontal: 11,
-      gap: 5,
+      justifyContent: "space-between",
+      gap: 10,
+      backgroundColor: colors.tomatoSoft,
+      borderRadius: RADIUS.md,
+      paddingVertical: compact ? 8 : 9,
+      paddingHorizontal: compact ? 10 : 12,
     },
-    levelText: { fontWeight: "800", fontSize: 13 },
-    streakPill: {
+    energyCopy: {
+      flexShrink: 1,
+    },
+    energyLabel: {
+      color: colors.tomato,
+      fontSize: 8,
+      fontWeight: "900",
+      letterSpacing: 0.65,
+      marginBottom: 2,
+    },
+    energyValue: {
+      color: colors.text,
+      fontSize: compact ? 10.5 : 11.5,
+      fontWeight: "700",
+    },
+    heartsRow: {
       flexDirection: "row",
       alignItems: "center",
-      borderRadius: 999,
-      paddingVertical: 8,
-      paddingHorizontal: 11,
-      gap: 4,
+      gap: compact ? 2 : 3,
+      flexShrink: 0,
     },
-    streakText: { fontWeight: "800", fontSize: 13 },
-    gameBarLeft: { flexDirection: "row", alignItems: "center", gap: 6 },
-    gameBarRight: { flexDirection: "row", alignItems: "center" },
-    heartPill: {
-      flexDirection: "row",
+    progressChevron: {
+      width: 30,
+      height: 30,
+      borderRadius: 10,
       alignItems: "center",
-      borderRadius: 999,
-      paddingVertical: 8,
-      paddingHorizontal: 12,
-      gap: 3,
+      justifyContent: "center",
+      backgroundColor: colors.background,
+      marginLeft: compact ? 7 : 10,
+      flexShrink: 0,
+    },
+    engagementRow: {
+      flexDirection: isWide ? "row" : "column",
+      alignItems: "stretch",
+      gap: 10,
+      marginBottom: 4,
     },
     // Daily challenge card
     challengeCard: {
+      flex: isWide ? 1.15 : undefined,
       flexDirection: "row",
       alignItems: "center",
       borderRadius: 16,
       padding: 14,
-      marginBottom: 10,
+      marginBottom: 0,
     },
     challengeIcon: { width: 44, height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center" },
     challengeBody: { flex: 1, marginLeft: 12 },
@@ -769,12 +1070,13 @@ const useStyles = (colors) =>
     },
     // Leaderboard shortcut
     leaderboardBtn: {
+      flex: isWide ? 0.85 : undefined,
       flexDirection: "row",
       alignItems: "center",
       borderWidth: 1,
       borderRadius: 16,
       padding: 13,
-      marginBottom: 4,
+      marginBottom: 0,
     },
     leaderboardIcon: {
       width: 40,
@@ -789,28 +1091,49 @@ const useStyles = (colors) =>
     // "I want to study..." generator
     generatorCard: {
       borderWidth: 1,
-      borderRadius: 18,
-      padding: 14,
-      marginBottom: 6,
+      borderRadius: RADIUS.xl,
+      padding: compact ? 12 : 16,
+      marginBottom: SPACING.md,
+      shadowColor: "#000",
+      shadowOpacity: 0.06,
+      shadowRadius: 12,
+      shadowOffset: { width: 0, height: 4 },
+      elevation: 2,
+    },
+    generatorHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 10,
+      marginBottom: 11,
     },
     generatorLabel: {
-      color: colors.textMuted,
-      fontSize: 11,
-      fontWeight: "700",
-      letterSpacing: 0.6,
-      marginBottom: 10,
+      color: colors.violet,
+      fontSize: 8.5,
+      fontWeight: "900",
+      letterSpacing: 0.9,
     },
+    generatorTitle: { color: colors.text, fontSize: 15, fontWeight: "900", marginTop: 2 },
+    onlineBadge: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 5,
+      paddingHorizontal: 8,
+      paddingVertical: 5,
+      borderRadius: RADIUS.pill,
+    },
+    onlineDot: { width: 6, height: 6, borderRadius: 3 },
+    onlineText: { fontSize: 8, fontWeight: "900", letterSpacing: 0.7 },
     chatContainer: {
       borderRadius: 16,
       overflow: "hidden",
       borderWidth: 1,
       borderColor: colors.border,
       backgroundColor: colors.bg,
-      marginBottom: 12,
+      marginBottom: 10,
       maxWidth: "100%",
-      // Responsive height: allow scrolling inside this container
-      minHeight: 120,
-      maxHeight: 440,
+      minHeight: 108,
+      maxHeight: 360,
     },
     chatMessages: {
       padding: 12,
@@ -837,6 +1160,7 @@ const useStyles = (colors) =>
       flexShrink: 1,
       flexWrap: "wrap",
     },
+    chatPlaceholder: { color: colors.textMuted, fontSize: 12, lineHeight: 18 },
     typingRow: {
       flexDirection: "row",
       alignItems: "center",
@@ -871,8 +1195,8 @@ const useStyles = (colors) =>
       borderRadius: 12,
       paddingVertical: 12,
       paddingHorizontal: 16,
-      minWidth: 90,
-      maxWidth: "30%",
+      minWidth: compact ? 48 : 82,
+      maxWidth: "32%",
     },
     generateBtnText: { color: "#fff", fontWeight: "800", fontSize: 14 },
     generatorShortcuts: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
@@ -887,44 +1211,245 @@ const useStyles = (colors) =>
       paddingVertical: 10,
     },
     shortcutText: { color: colors.text, fontSize: 12.5, fontWeight: "700" },
-    hero: { position: "relative", flexDirection: "row", alignItems: "center", marginTop: 20, marginBottom: 16 },
+    hero: {
+      position: "relative",
+      flexDirection: "row",
+      alignItems: "center",
+      padding: compact ? 13 : 16,
+      marginTop: SPACING.md,
+      marginBottom: 10,
+      backgroundColor: colors.violetSoft,
+      borderWidth: 1,
+      borderColor: colors.violet + "33",
+      borderRadius: RADIUS.xl,
+    },
     heroTextWrap: { flexDirection: "row", alignItems: "center", flex: 1 },
     heroTexts: { flex: 1, marginLeft: 14 },
-    heroIcon: { width: 64, height: 64, borderRadius: 20, alignItems: "center", justifyContent: "center" },
-    heroEmoji: { fontSize: 30 },
-    heroTitle: { color: colors.text, fontSize: 24, fontWeight: "800", marginBottom: 6 },
-    heroSubtitle: { color: colors.textMuted, fontSize: 13, lineHeight: 19, maxWidth: 280 },
-    statsRow: { flexDirection: "row", gap: 8, marginBottom: 14 },
-    statsRowWide: { flexWrap: "wrap" },
+    heroIcon: {
+      width: compact ? 50 : 58,
+      height: compact ? 50 : 58,
+      borderRadius: 18,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: colors.surface,
+    },
+    heroEyebrow: {
+      color: colors.violet,
+      fontSize: 8,
+      fontWeight: "900",
+      letterSpacing: 0.8,
+      marginBottom: 3,
+    },
+    heroTitle: {
+      color: colors.text,
+      fontSize: compact ? 18 : 22,
+      fontWeight: "900",
+      letterSpacing: -0.4,
+      marginBottom: 4,
+    },
+    heroSubtitle: {
+      color: colors.textMuted,
+      fontSize: 12,
+      lineHeight: 18,
+      maxWidth: isWide ? 600 : 360,
+    },
+    statsRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 8,
+      marginBottom: SPACING.md,
+    },
     statCard: {
-      flex: 1, borderWidth: 1, borderRadius: 14, paddingVertical: 12, paddingHorizontal: 6,
+      flex: 1,
+      minWidth: compact ? "47%" : isWide ? 180 : "47%",
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: RADIUS.lg,
+      paddingVertical: 11,
+      paddingHorizontal: 12,
+    },
+    statIcon: { width: 36, height: 36, borderRadius: 11, alignItems: "center", justifyContent: "center" },
+    statValue: { color: colors.text, fontSize: 16, fontWeight: "800" },
+    statLabel: { color: colors.textMuted, fontSize: 9.5, marginTop: 1 },
+    quickRow: { flexDirection: "row", gap: 8, marginBottom: SPACING.md },
+    quickBtn: {
+      flex: 1,
+      minWidth: 0,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: RADIUS.lg,
+      paddingVertical: 12,
+      paddingHorizontal: compact ? 7 : 10,
       alignItems: "center",
     },
-    statIcon: { width: 36, height: 36, borderRadius: 10, alignItems: "center", justifyContent: "center", marginBottom: 6 },
-    statEmoji: { fontSize: 18 },
-    statValue: { color: colors.text, fontSize: 16, fontWeight: "800" },
-    statLabel: { color: colors.textMuted, fontSize: 10.5, textAlign: "center", marginTop: 2 },
-    quickRow: { flexDirection: "row", gap: 8, marginBottom: 6 },
-    quickBtn: {
-      flex: 1, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
-      borderRadius: 14, paddingVertical: 14, alignItems: "center", flexDirection: "row",
-      justifyContent: "center", gap: 6,
+    quickIcon: {
+      width: 35,
+      height: 35,
+      borderRadius: 11,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: 7,
     },
-    quickBtnText: { color: colors.text, fontWeight: "700", fontSize: 12.5 },
-    sectionLabel: { color: colors.textMuted, fontSize: 12, fontWeight: "700", marginTop: 16, marginBottom: 8 },
-    mutedText: { color: colors.textMuted, fontSize: 13, textAlign: "center", marginTop: 8 },
+    quickBtnText: { color: colors.text, fontWeight: "800", fontSize: compact ? 10.5 : 12 },
+    quickBtnMeta: { color: colors.textMuted, fontSize: compact ? 8 : 9.5, marginTop: 2 },
+    promoGrid: { flexDirection: isWide ? "row" : "column", gap: 9 },
+    historyBanner: {
+      flex: isWide ? 1 : undefined,
+      flexDirection: "row",
+      alignItems: "center",
+      borderWidth: 1,
+      borderRadius: 16,
+      padding: 13,
+      marginTop: 0,
+      marginBottom: 0,
+    },
+    historyBannerIcon: {
+      width: 40,
+      height: 40,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+      marginRight: 12,
+    },
+    historyBannerTitle: { color: colors.text, fontSize: 14, fontWeight: "700" },
+    historyBannerSubtitle: { color: colors.textMuted, fontSize: 11.5, marginTop: 2 },
+    // Go Unlimited entry point
+    unlimitedBanner: {
+      flex: isWide ? 1 : undefined,
+      flexDirection: "row",
+      alignItems: "center",
+      borderWidth: 1,
+      borderRadius: 16,
+      padding: 13,
+      marginTop: 0,
+      marginBottom: 0,
+    },
+    unlimitedIcon: {
+      width: 44,
+      height: 44,
+      borderRadius: 14,
+      alignItems: "center",
+      justifyContent: "center",
+      marginRight: 12,
+      borderWidth: 1,
+    },
+    unlimitedCrown: { fontSize: 21 },
+    unlimitedTitleRow: { flexDirection: "row", alignItems: "center", gap: 7 },
+    unlimitedTitle: { color: colors.text, fontSize: 14.5, fontWeight: "800" },
+    unlimitedBadge: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 3,
+      borderWidth: 1,
+      borderRadius: 999,
+      paddingHorizontal: 7,
+      paddingVertical: 2.5,
+    },
+    unlimitedBadgeText: { color: "#fff", fontSize: 8.5, fontWeight: "900", letterSpacing: 0.5 },
+    unlimitedSubtitle: { color: colors.textMuted, fontSize: 11.5, marginTop: 2 },
+    sectionLabel: {
+      color: colors.textMuted,
+      fontSize: 9.5,
+      fontWeight: "900",
+      letterSpacing: 0.9,
+      marginTop: 22,
+      marginBottom: 9,
+    },
+    mutedText: { color: colors.textMuted, fontSize: 12, lineHeight: 18, textAlign: "center", marginTop: 5 },
     collectionRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
     collectionChip: {
-      borderRadius: 12, borderWidth: 1, paddingVertical: 10, paddingHorizontal: 14, marginBottom: 6,
+      minWidth: compact ? "47%" : 140,
+      borderRadius: 12,
+      borderWidth: 1,
+      paddingVertical: 10,
+      paddingHorizontal: 14,
+      marginBottom: 2,
     },
     collectionChipText: { color: colors.text, fontSize: 12.5, fontWeight: "700" },
     collectionChipMeta: { color: colors.textMuted, fontSize: 10.5, marginTop: 2 },
-    materialRow: { flexDirection: "row", alignItems: "center" },
-    materialTitle: { color: colors.text, fontSize: 14, fontWeight: "600" },
-    materialMeta: { color: colors.textMuted, fontSize: 11, marginTop: 2 },
-    actionText: { color: colors.tomato, fontSize: 12, fontWeight: "700" },
-    noteIcon: { width: 40, height: 40, borderRadius: 10, alignItems: "center", justifyContent: "center", marginRight: 12 },
-    noteIconEmoji: { fontSize: 20 },
+    contentCard: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 11,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: RADIUS.lg,
+      padding: 12,
+      marginBottom: 8,
+    },
+    contentIcon: {
+      width: 40,
+      height: 40,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    contentTitle: { color: colors.text, fontSize: 13, fontWeight: "800" },
+    contentMeta: { color: colors.textMuted, fontSize: 10.5, marginTop: 3 },
+    loadingState: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 9,
+      paddingVertical: 24,
+    },
+    emptyState: {
+      alignItems: "center",
+      paddingHorizontal: 20,
+      paddingVertical: 28,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderStyle: "dashed",
+      borderColor: colors.border,
+      borderRadius: RADIUS.lg,
+    },
+    emptyStateCompact: {
+      padding: 16,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderStyle: "dashed",
+      borderColor: colors.border,
+      borderRadius: RADIUS.lg,
+    },
+    emptyIcon: {
+      width: 48,
+      height: 48,
+      borderRadius: 15,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: 10,
+    },
+    emptyTitle: { color: colors.text, fontSize: 14, fontWeight: "800" },
+    quizGrid: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 8,
+    },
+    quizCard: {
+      flexBasis: isWide ? "48%" : "100%",
+      flexGrow: isWide ? 1 : 0,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 11,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: RADIUS.lg,
+      padding: 12,
+    },
+    quizCta: {
+      width: 31,
+      height: 31,
+      borderRadius: 10,
+      alignItems: "center",
+      justifyContent: "center",
+    },
     // FAB
     fabWrap: {
       position: "absolute",

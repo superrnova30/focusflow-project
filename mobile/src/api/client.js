@@ -35,6 +35,9 @@ function buildApiBaseUrlCandidates(envUrl) {
   const hostCandidates = getLocalNetworkHostCandidates();
   const urls = new Set();
 
+  // Web always runs on the development machine, so localhost is the most
+  // reliable first choice. A stale LAN override should not break the website.
+  if (Platform.OS === "web") urls.add("http://localhost:4000/api");
   if (explicitUrl) urls.add(explicitUrl);
 
   for (const host of hostCandidates) {
@@ -72,7 +75,9 @@ async function probeApiHealth(candidate) {
   const timeoutId = setTimeout(() => controller.abort(), 2000);
 
   try {
-    const response = await fetch(`${candidate}/health`, {
+    // API candidates end in /api, but the Express health endpoint is /health.
+    const serverOrigin = candidate.replace(/\/api\/?$/, "");
+    const response = await fetch(`${serverOrigin}/health`, {
       method: "GET",
       signal: controller.signal,
     });

@@ -2,6 +2,13 @@ const express = require("express");
 const prisma = require("../lib/prisma");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { hashPassword, publicUser } = require("../lib/auth");
+const { buildStudentStats } = require("../lib/student_stats");
+const {
+  premiumState,
+  grantPremium,
+  revokePremium,
+  expireLapsedSubscriptions,
+} = require("../lib/premium");
 
 const router = express.Router();
 router.use(requireAuth, requireRole("ADMIN"));
@@ -11,7 +18,17 @@ router.get("/users", async (req, res) => {
   const { search, role, status } = req.query;
   const users = await prisma.user.findMany({
     where: {
-      ...(search ? { name: { contains: search, mode: "insensitive" } } : {}),
+      // Admins look students up by name, email, student ID or course.
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search, mode: "insensitive" } },
+              { email: { contains: search, mode: "insensitive" } },
+              { studentId: { contains: search, mode: "insensitive" } },
+              { course: { contains: search, mode: "insensitive" } },
+            ],
+          }
+        : { }),
       ...(role ? { role } : {}),
       ...(status ? { status } : {}),
     },
@@ -19,6 +36,154 @@ router.get("/users", async (req, res) => {
   });
   res.json({ users: users.map(publicUser) });
 });
+
+// Full profile for a single user. Returns the real, already-stored profile
+// fields plus a few useful activity totals — and deliberately omits internal
+// fields (password hash, verification codes, raw JSON blobs) that an admin
+// reviewer has no reason to see.
+// Full profile for a single user. Returns the real, already-stored profile
+// fields plus useful activity totals. Internal fields (password hash,
+// verification codes, raw JSON blobs) are deliberately omitted.
+//
+// Note: query defaults are built with small helper objects rather than nested
+// inline literals, which keeps each line easy to read and review.
+router.get("/users/:id", async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.params.id } });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const userId = user.id;
+    const zero = { _sum: { minutes: 0 } };
+    const zeroQuiz = { _sum: { score: 0, total: 0 } };
+    const safe = (promise, fallback) => promise.catch(() => fallback);
+
+    const focusWhere = { userId, type: "focus" };
+    const focusAggQuery = prisma.pomodoroSession.aggregate({ where: focusWhere, _sum: { minutes: true } });
+    const focusCountQuery = prisma.pomodoroSession.count({ where: focusWhere });
+    const lastSessionQuery = prisma.pomodoroSession.findFirst({
+      where: { userId },
+      orderBy: { startedAt: "desc" },
+      select: { startedAt: true },
+    });
+
+    const taskWhere = { userId };
+    const doneWhere = { userId, completed: true };
+    const attemptWhere = { userId };
+    const attemptAggQuery = prisma.quizAttempt.aggregate({ where: attemptWhere, _sum: { score: true, total: true } });
+
+    const cardWhere = { collection: { userId } };
+    const msgWhere = { conversation: { userId } };
+
+    const results = await Promise.all([
+      safe(focusAggQuery, zero),
+      safe(focusCountQuery, 0),
+      safe(lastSessionQuery, null),
+      safe(prisma.task.count({ where: taskWhere }), 0),
+      safe(prisma.task.count({ where: doneWhere }), 0),
+      safe(prisma.quizAttempt.count({ where: attemptWhere }), 0),
+      safe(attemptAggQuery, zeroQuiz),
+      safe(prisma.flashcard.count({ where: cardWhere }), 0),
+      safe(prisma.studyNote.count({ where: taskWhere }), 0),
+      safe(prisma.chatConversation.count({ where: taskWhere }), 0),
+      safe(prisma.chatMessage.count({ where: msgWhere }), 0),
+      safe(prisma.subscription.findUnique({ where: { userId }}), null),
+      safe(
+        prisma.payment.findMany({
+          where: { userId, status: "PAID" },
+          orderBy: { paidAt: "desc" },
+          take: 5,
+        }),
+        []
+      ),
+      safe(buildStudentStats(userId), null),
+    ]);
+
+    const focusAgg = results[0];
+    const focusSessions = results[1];
+    const lastSession = results[2];
+    const taskTotal = results[3];
+    const taskDone = results[4];
+    const quizAttempts = results[5];
+    const quizAgg = results[6];
+    const cards = results[7];
+    const notesCount = results[8];
+    const conversations = results[9];
+    const messages = results[10];
+    const subscription = results[11];
+    const payments = results[12];
+    const statistics = results[13];
+
+    const quizTotal = (quizAgg && quizAgg._sum && quizAgg._sum.total) || 0;
+    const quizScored = (quizAgg && quizAgg._sum && quizAgg._sum.score) || 0;
+
+    res.json({
+      user: publicUser(user),
+      profile: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        profilePicture: user.profilePicture || null,
+        studentId: user.studentId || null,
+        course: user.course || null,
+        yearLevel: user.yearLevel || null,
+        section: user.section || null,
+        studyGoals: user.studyGoals || null,
+        preferredStudyDuration: user.preferredStudyDuration || null,
+        dailyGoalMinutes: user.dailyGoalMinutes,
+        remindersEnabled: user.remindersEnabled,
+        reminderTime: user.reminderTime,
+        createdAt: user.createdAt,
+        lastActiveAt: user.lastActiveAt,
+      },
+      activity: {
+        totalStudyMinutes: statistics?.totalStudyMinutes ?? ((focusAgg && focusAgg._sum && focusAgg._sum.minutes) || 0),
+        focusSessions: statistics?.totalFocusSessions ?? focusSessions,
+        lastSessionAt: statistics?.lastSessionAt ?? (lastSession ? lastSession.startedAt : null),
+        todayMinutes: statistics?.todayMinutes || 0,
+        last7Minutes: statistics?.last7Minutes || 0,
+        activeDaysLast7: statistics?.activeDaysLast7 || 0,
+        tasksTotal: statistics?.totalTasks ?? taskTotal,
+        tasksCompleted: statistics?.completedTasks ?? taskDone,
+        completionRate: statistics?.completionRate ?? (taskTotal ? Math.round((taskDone / taskTotal) * 100) : 0),
+        quizAttempts: statistics?.quizzesTaken ?? quizAttempts,
+        averageQuizScore: statistics?.averageQuizScore ?? (quizTotal ? Math.round((quizScored / quizTotal) * 100) : 0),
+        quizCompletionRate: statistics?.quizCompletionRate || 0,
+        flashcards: statistics?.flashcards ?? cards,
+        notes: statistics?.notes ?? notesCount,
+        aiConversations: statistics?.aiConversations ?? conversations,
+        aiMessages: statistics?.aiMessages ?? messages,
+        xp: statistics?.xp ?? user.xp,
+        level: statistics?.level ?? user.currentLevel,
+        streak: statistics?.streak ?? user.streakCount,
+        longestStreak: statistics?.longestStreak ?? user.longestStreak,
+      },
+      statistics,
+      premium: premiumState(user),
+      subscription: subscription
+        ? {
+            status: subscription.status,
+            plan: subscription.plan,
+            startedAt: subscription.startedAt,
+            expiresAt: subscription.expiresAt,
+          }
+        : null,
+      payments: payments.map((p) => ({
+        id: p.id,
+        amount: p.amount,
+        currency: p.currency,
+        status: p.status,
+        method: p.paymentMethod,
+        paidAt: p.paidAt,
+      })),
+    });
+  } catch (err) {
+    console.error("Admin user detail failed", err);
+    res.status(500).json({ error: "Could not load that user's profile" });
+  }
+});
+
 
 router.post("/users", async (req, res) => {
   const { name, email, password, role } = req.body;
@@ -68,6 +233,133 @@ router.post("/users/:id/reset-password", async (req, res) => {
 router.delete("/users/:id", async (req, res) => {
   await prisma.user.delete({ where: { id: req.params.id } });
   res.json({ ok: true });
+});
+
+// ---- Premium / Go Unlimited subscribers ----
+// Mirrors what the student sees, in the Student | Account | Plan | Status shape
+// requested for the admin dashboard.
+router.get("/premium/subscribers", async (req, res) => {
+  const { search, status } = req.query;
+
+  // Expire lapsed terms first so the admin never sees a stale "Active".
+  try {
+    await expireLapsedSubscriptions();
+  } catch (e) {
+    // non-fatal
+  }
+
+  const users = await prisma.user.findMany({
+    where: {
+      role: "STUDENT",
+      ...(search
+        ? {
+            OR: [
+              { email: { contains: search, mode: "insensitive" } },
+              { name: { contains: search, mode: "insensitive" } },
+              ],
+          }
+        : {}),
+      ...(status === "premium"
+        ? { isPremium: true }
+        : status === "basic"
+        ? { isPremium: false }
+        : {}),
+    },
+    orderBy: [{ isPremium: "desc" }, { premiumSince: "desc" }, { name: "asc" }],
+    take: 300,
+  });
+
+  const subscriptions = await prisma.subscription.findMany({
+    where: { userId: { in: users.map((u) => u.id) } },
+  });
+  const subsByUser = new Map(subscriptions.map((s) => [s.userId, s]));
+
+  const payments = await prisma.payment.findMany({
+    where: { userId: { in: users.map((u) => u.id) }, status: "PAID" },
+    orderBy: { paidAt: "desc" },
+  });
+  const lastPaymentByUser = new Map();
+  for (const p of payments) {
+    if (!lastPaymentByUser.has(p.userId)) lastPaymentByUser.set(p.userId, p);
+  }
+
+  const subscribers = users.map((u) => {
+    const state = premiumState(u);
+    const sub = subsByUser.get(u.id) || null;
+    const lastPayment = lastPaymentByUser.get(u.id) || null;
+    return {
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      role: u.role,
+      accountStatus: u.status,
+      plan: state.planLabel,
+      planId: state.plan,
+      status: state.isPremium ? "Active" : state.expired ? "Expired" : "Basic",
+      isPremium: state.isPremium,
+      premiumSince: u.premiumSince,
+      premiumUntil: u.premiumUntil,
+      daysRemaining: state.daysRemaining,
+      subscriptionStatus: sub ? sub.status : null,
+      lastPayment: lastPayment
+        ? {
+            id: lastPayment.id,
+            amount: lastPayment.amount,
+            currency: lastPayment.currency,
+            paidAt: lastPayment.paidAt,
+            method: lastPayment.paymentMethod,
+          }
+        : null,
+    };
+  });
+
+  const premiumCount = subscribers.filter((s) => s.isPremium).length;
+
+  res.json({
+    subscribers,
+    stats: {
+      totalStudents: subscribers.length,
+      premium: premiumCount,
+      basic: subscribers.length - premiumCount,
+      // Recurring revenue for the currently active term (simple flat-rate).
+      monthlyRevenue: subscribers
+        .filter((s) => s.isPremium && s.lastPayment)
+        .reduce((sum, s) => sum + (s.lastPayment.amount || 0), 0),
+    },
+  });
+});
+
+// Manual grant/revoke for support cases (refunds, comps, goodwill).
+router.post("/premium/subscribers/:userId", async (req, res) => {
+  const { action, days } = req.body || {};
+  const userId = req.params.userId;
+
+  const target = await prisma.user.findUnique({ where: { id: userId } });
+  if (!target) return res.status(404).json({ error: "Student not found" });
+
+  try {
+    if (action === "grant") {
+      await grantPremium({ userId, plan: "unlimited", durationDays: Number(days) || undefined });
+    } else if (action === "revoke") {
+      await revokePremium({ userId, status: "CANCELLED" });
+    } else {
+      return res.status(400).json({ error: "action must be grant or revoke" });
+    }
+
+    await prisma.activityLog.create({
+      data: {
+        userId: req.user.id,
+        action: action === "grant" ? "admin_grant_premium" : "admin_revoke_premium",
+        meta: { studentId: userId },
+      },
+    });
+
+    const fresh = await prisma.user.findUnique({ where: { id: userId } });
+    res.json({ user: publicUser(fresh), premium: premiumState(fresh) });
+  } catch (err) {
+    console.error("Admin premium update failed", err);
+    res.status(500).json({ error: "Could not update that subscription" });
+  }
 });
 
 // ---- Activity logs ----

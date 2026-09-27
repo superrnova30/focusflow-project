@@ -7,6 +7,7 @@ const cors = require("cors");
 const authRoutes = require("./routes/auth");
 const taskRoutes = require("./routes/tasks");
 const aiChatRoutes = require("./routes/ai_chat");
+const aiConversationRoutes = require("./routes/ai_conversations");
 const aiDebugRoutes = require("./routes/ai_debug");
 const subjectRoutes = require("./routes/subjects");
 const sessionRoutes = require("./routes/sessions");
@@ -18,6 +19,7 @@ const gameRoutes = require("./routes/game");
 const adminRoutes = require("./routes/admin");
 const pushRoutes = require("./routes/push");
 const aiRoutes = require("./routes/ai");
+const premiumRoutes = require("./routes/premium");
 const { sendDailyReminders } = require("./lib/reminders");
 
 const app = express();
@@ -69,6 +71,10 @@ if (String(process.env.ENABLE_AI_DEBUG).toLowerCase() === 'true') {
 }
 
 app.use("/api/ai", aiRoutes);
+app.use("/api/premium", premiumRoutes);
+// History endpoints are declared before the chat router so /ai/conversations
+// is never swallowed by a broader /ai handler.
+app.use("/api/ai", aiConversationRoutes);
 app.use("/api/ai", aiChatRoutes);
 
 // Serve uploaded PDFs so fileUrl links resolve to a real file.

@@ -10,6 +10,7 @@ const AI_MAX_OUTPUT_TOKENS = Number(process.env.AI_MAX_OUTPUT_TOKENS || 2200);
 const { generateContentWithRetry } = require('../lib/genai_helper');
 const { generateStudyPack } = require('../lib/ai');
 const { trimConversationHistory } = require('../lib/chat_history');
+const { recordExchange } = require('../lib/chat_store');
 
 function looksCutOff(text) {
   const value = String(text || '').trim();
@@ -194,9 +195,29 @@ function isGenericReply(content, lastUserText) {
 
 // POST /api/ai/chat
 // Body: { messages: [{ role: 'user'|'assistant'|'system', content: '...' }, ...] }
+// Persist the exchange so students can revisit it from the AI History screen.
+// Best-effort: history must never break or delay the AI response itself.
+async function saveHistory(userId, conversationId, userText, assistantContent, intent) {
+  try {
+    const conversation = await recordExchange({
+      userId,
+      conversationId,
+      userText,
+      assistantText: assistantContent,
+      intent,
+    });
+    return conversation ? conversation.id : null;
+  } catch (err) {
+    console.warn('saveHistory skipped:', err && err.message ? err.message : err);
+    return null;
+  }
+}
+
 router.post('/chat', requireAuth, async (req, res) => {
   try {
     const { messages } = req.body;
+    const userId = req.user && req.user.id;
+    const conversationId = req.body ? req.body.conversationId : undefined;
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: 'messages array is required' });
     }
@@ -239,7 +260,8 @@ router.post('/chat', requireAuth, async (req, res) => {
         }
         const choice = body.choices && body.choices[0];
         const assistantMessage = choice && choice.message ? choice.message : { role: 'assistant', content: 'AI service responded unexpectedly. Please try again later.' };
-        return res.json({ reply: assistantMessage, raw: { forcedOpenAI: true, openai: body } });
+        const savedForceId = await saveHistory(userId, conversationId, lastUserText, assistantMessage && assistantMessage.content, intent);
+        return res.json({ reply: assistantMessage, conversationId: savedForceId, raw: { forcedOpenAI: true, openai: body } });
       } catch (openaiErr) {
         console.error('Forced OpenAI fallback failed', openaiErr);
         return res.status(502).json({ error: 'Forced OpenAI fallback failed', message: openaiErr && (openaiErr.message || String(openaiErr)), raw: openaiErr });
@@ -320,7 +342,8 @@ router.post('/chat', requireAuth, async (req, res) => {
           if (expanded && expanded.length > content.length) content = expanded;
         }
 
-        return res.json({ reply: { role: 'assistant', content }, raw: response });
+        const savedId = await saveHistory(userId, conversationId, lastUserText, content, intent);
+        return res.json({ reply: { role: 'assistant', content }, conversationId: savedId, raw: response });
       } catch (gemErr) {
         const bodyText = gemErr && (gemErr.body ? (typeof gemErr.body === 'string' ? gemErr.body : JSON.stringify(gemErr.body)) : '');
         const isUnavailable = gemErr && (gemErr.status === 503 || /unavailable|currently experiencing high demand|503|RESOURCE_EXHAUSTED|quota|credit_balance_exhausted|insufficient_quota/i.test(bodyText || String(gemErr)));
@@ -437,7 +460,8 @@ router.post('/chat', requireAuth, async (req, res) => {
 
         const choice = body.choices && body.choices[0];
         const assistantMessage = choice && choice.message ? choice.message : { role: 'assistant', content: 'AI service responded unexpectedly. Please try again later.' };
-        return res.json({ reply: assistantMessage, raw: body });
+        const savedOpenAiId = await saveHistory(userId, conversationId, lastUserText, assistantMessage && assistantMessage.content, intent);
+        return res.json({ reply: assistantMessage, conversationId: savedOpenAiId, raw: body });
       } catch (openaiErr) {
         console.error('OpenAI fallback failed', openaiErr);
         return res.status(502).json({ error: 'OpenAI fallback failed', message: openaiErr && (openaiErr.message || String(openaiErr)), raw: openaiErr });

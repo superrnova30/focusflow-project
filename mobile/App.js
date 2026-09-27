@@ -41,6 +41,12 @@ import ProgressScreen from "./src/screens/ProgressScreen";
 import LeaderboardScreen from "./src/screens/LeaderboardScreen";
 import AdminHomeScreen from "./src/screens/AdminHomeScreen";
 import { AIChatProvider } from './src/context/AIChatContext';
+import { AIHistoryProvider } from './src/context/AIHistoryContext';
+import { PremiumProvider } from './src/context/PremiumContext';
+import PremiumScreen from './src/screens/PremiumScreen';
+import PremiumCheckoutScreen from './src/screens/PremiumCheckoutScreen';
+import AIHistoryScreen from './src/screens/AIHistoryScreen';
+import AIHistoryDetailScreen from './src/screens/AIHistoryDetailScreen';
 
 const AuthStack = createNativeStackNavigator();
 const StudentTabs = createBottomTabNavigator();
@@ -96,6 +102,10 @@ function StudyNavigator() {
       <StudyStack.Screen name="Coach" component={CoachScreen} options={{ title: "AI Study Coach" }} />
       <StudyStack.Screen name="StudyAI" component={StudyAIResultScreen} />
       <StudyStack.Screen name="StudyChat" component={StudyChatScreen} />
+      <StudyStack.Screen name="AIHistory" component={AIHistoryScreen} options={{ title: "AI History" }} />
+      <StudyStack.Screen name="AIHistoryDetail" component={AIHistoryDetailScreen} options={{ title: "Conversation" }} />
+      <StudyStack.Screen name="Premium" component={PremiumScreen} options={{ title: "Go Unlimited" }} />
+      <StudyStack.Screen name="PremiumCheckout" component={PremiumCheckoutScreen} options={{ title: "Checkout" }} />
       <StudyStack.Screen name="Subjects" component={SubjectsScreen} />
       <StudyStack.Screen name="Material" component={MaterialDetailScreen} />
       <StudyStack.Screen name="Quiz" component={QuizTakeScreen} />
@@ -146,6 +156,14 @@ function StudentNavigator() {
         name="Study"
         component={StudyNavigator}
         options={{ tabBarIcon: ({ color, size }) => <Ionicons name="book" color={color} size={size} /> }}
+      />
+      <StudentTabs.Screen
+        name="AIHistoryTab"
+        component={AIHistoryScreen}
+        options={{
+          title: "AI History",
+          tabBarIcon: ({ color, size }) => <Ionicons name="time" color={color} size={size} />,
+        }}
       />
       <StudentTabs.Screen
         name="Stats"
@@ -227,7 +245,11 @@ function RootNavigator() {
         <AdminHomeScreen />
       ) : (
         <AIChatProvider>
-          <StudentNavigator />
+          <AIHistoryProvider>
+            <PremiumProvider>
+              <StudentNavigator />
+            </PremiumProvider>
+          </AIHistoryProvider>
         </AIChatProvider>
       )}
     </NavigationContainer>
