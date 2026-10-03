@@ -7,6 +7,8 @@ const prisma = require("./prisma");
  */
 
 const LEVEL_XP_STEP = 500;
+const MAX_HEARTS = 5;
+const HEART_REFILL_MS = 24 * 60 * 60 * 1000;
 
 function levelForXp(xp) {
   return Math.floor(xp / LEVEL_XP_STEP) + 1;
@@ -136,6 +138,26 @@ async function computeCalendar(userId, anchorDate) {
   return Array.from(days.values());
 }
 
+/** Refill hearts after 24h when fully depleted. Returns updated user fields if changed. */
+async function syncHeartRefill(user) {
+  if (!user || user.hearts > 0 || !user.heartsDepletedAt) return user;
+  const elapsed = Date.now() - new Date(user.heartsDepletedAt).getTime();
+  if (elapsed < HEART_REFILL_MS) return user;
+  return prisma.user.update({
+    where: { id: user.id },
+    data: { hearts: MAX_HEARTS, heartsDepletedAt: null },
+  });
+}
+
+async function loadUserGamification(userId) {
+  let user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) return null;
+  const { syncDailyUsage } = require("./featureLimits");
+  user = await syncDailyUsage(user);
+  user = await syncHeartRefill(user);
+  return user;
+}
+
 module.exports = {
   bumpStreak,
   levelForXp,
@@ -143,6 +165,10 @@ module.exports = {
   xpForNextLevel,
   todayKey,
   computeCalendar,
+  syncHeartRefill,
+  loadUserGamification,
   LEVEL_XP_STEP,
+  MAX_HEARTS,
+  HEART_REFILL_MS,
 };
 

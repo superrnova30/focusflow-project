@@ -11,6 +11,7 @@ const { generateContentWithRetry } = require('../lib/genai_helper');
 const { generateStudyPack } = require('../lib/ai');
 const { trimConversationHistory } = require('../lib/chat_history');
 const { recordExchange } = require('../lib/chat_store');
+const { enforceChatLimit } = require('../lib/featureLimits');
 
 function looksCutOff(text) {
   const value = String(text || '').trim();
@@ -215,6 +216,8 @@ async function saveHistory(userId, conversationId, userText, assistantContent, i
 
 router.post('/chat', requireAuth, async (req, res) => {
   try {
+    if (!(await enforceChatLimit(req, res))) return;
+
     const { messages } = req.body;
     const userId = req.user && req.user.id;
     const conversationId = req.body ? req.body.conversationId : undefined;

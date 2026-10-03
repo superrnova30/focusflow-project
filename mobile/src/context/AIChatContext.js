@@ -59,6 +59,10 @@ export function AIChatProvider({ children }) {
       appendMessage(assistant);
       return assistant;
       } catch (err) {
+      if (err?.upgradeRequired) {
+        throw err;
+      }
+
       // Try to extract a helpful error from the server response
       let friendly = 'Sorry, something went wrong. Please try again.';
       try {
@@ -80,7 +84,6 @@ export function AIChatProvider({ children }) {
 
       const errMsg = { id: `error-${Date.now()}`, role: 'assistant', content: friendly };
       appendMessage(errMsg);
-      // rethrow so callers can handle programmatically
       throw err;
     } finally {
        sendingRef.current = false;

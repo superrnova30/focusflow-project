@@ -17,6 +17,7 @@ import {
 import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
 import { Screen } from "../components/Screen";
+import ConfirmDialog from "../components/ConfirmDialog";
 import { useTheme } from "../context/ThemeContext";
 import BottomSheet from "../components/BottomSheet";
 import client from "../api/client";
@@ -40,13 +41,15 @@ export default function StudyHomeScreen({ navigation }) {
     [colors, isWide, isNarrow, compact]
   );
 
-  const { isPremium, premium } = usePremium();
+  const { isPremium, premium, refreshLimits } = usePremium();
 
   const [materials, setMaterials] = useState([]);
   const [quizzes, setQuizzes] = useState([]);
   const [collections, setCollections] = useState([]);
   const [notes, setNotes] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [deletingMaterial, setDeletingMaterial] = useState(null);
+  const [deletingMaterialBusy, setDeletingMaterialBusy] = useState(false);
 
 // Gamification state (XP + Hearts)
   const [xp, setXp] = useState(0);
@@ -56,7 +59,6 @@ export default function StudyHomeScreen({ navigation }) {
   const [streak, setStreak] = useState({ current: 0, longest: 0 });
   const [level, setLevel] = useState({ current: 1, xpWithinLevel: 0, xpForNext: 500, step: 500 });
   const [challenge, setChallenge] = useState(null);
-  const [completingChallenge, setCompletingChallenge] = useState(false);
 
   // Lightweight input that navigates to the dedicated AI conversation page
   const [studyTopic, setStudyTopic] = useState("");
@@ -87,10 +89,11 @@ const fetchGameState = useCallback(async () => {
         setXp(data.state.xp || 0);
         setHearts(data.state.hearts ?? MAX_HEARTS);
       }
+      await refreshLimits();
     } catch (e) {
       // ignore
     }
-  }, []);
+  }, [refreshLimits]);
 
   // Fetch streak + level so the home screen always reflects the latest
   // gamification state (bumps streak, returns level progress).
@@ -108,7 +111,7 @@ const fetchGameState = useCallback(async () => {
     }
   }, []);
 
-  // Fetch today's daily challenge with the user's progress toward it.
+  // Fetch today's daily challenge; the server auto-claims XP when the goal is met.
   const fetchChallenge = useCallback(async () => {
     try {
       const { data } = await client.get("/game/challenges");
@@ -121,30 +124,17 @@ const fetchGameState = useCallback(async () => {
           completed: data.challenge.completed,
           progress: data.progress || 0,
           target: data.target || data.challenge.targetValue || 1,
+          justCompleted: Boolean(data.autoCompleted),
         });
+        if (data.autoCompleted && data.xpAwarded > 0) {
+          fetchGameState();
+          fetchStreakLevel();
+        }
       }
     } catch (e) {
       // ignore
     }
-  }, []);
-
-  // Mark today's challenge complete (server verifies the metric). On success
-  // refresh XP + streak so the home screen stays in sync immediately.
-  const completeChallenge = async () => {
-    if (!challenge || challenge.completed || completingChallenge) return;
-    setCompletingChallenge(true);
-    try {
-      await client.post(`/game/challenges/${challenge.id}/complete`);
-      setChallenge((c) => (c ? { ...c, completed: true, progress: c.target } : c));
-      Alert.alert("Challenge complete! 🎉", `+${challenge.xpReward} XP earned.`);
-      fetchGameState();
-      fetchStreakLevel();
-    } catch (e) {
-      Alert.alert("Not yet", e.message || "You haven't met this challenge's goal yet.");
-    } finally {
-      setCompletingChallenge(false);
-    }
-  };
+  }, [fetchGameState, fetchStreakLevel]);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -154,8 +144,19 @@ const fetchGameState = useCallback(async () => {
         client.get("/flashcards/collections"),
         client.get("/notes"),
       ]);
-      setMaterials(matRes.data.materials);
-      setQuizzes(quizRes.data.quizzes);
+      const nextMaterials = matRes.data.materials || [];
+      setMaterials(nextMaterials);
+      const materialIds = new Set(nextMaterials.map((m) => m.id));
+      const linkedQuizzes = nextMaterials.flatMap((m) => m.quizzes || []);
+      const linkedIds = new Set(linkedQuizzes.map((q) => q.id));
+      const extraQuizzes = (quizRes.data.quizzes || []).filter(
+        (q) => !q.materialId || materialIds.has(q.materialId) || linkedIds.has(q.id)
+      );
+      const merged = [...linkedQuizzes];
+      extraQuizzes.forEach((q) => {
+        if (!merged.some((existing) => existing.id === q.id)) merged.push(q);
+      });
+      setQuizzes(merged);
       setCollections(collRes.data.collections || []);
       setNotes(noteRes.data.notes || []);
     } catch (e) {
@@ -169,8 +170,10 @@ useFocusEffect(
     useCallback(() => {
       fetchAll();
       fetchGameState();
-      fetchStreakLevel();
-      fetchChallenge();
+      (async () => {
+        await fetchStreakLevel();
+        await fetchChallenge();
+      })();
     }, [fetchAll, fetchGameState, fetchStreakLevel, fetchChallenge])
   );
 
@@ -265,7 +268,7 @@ useFocusEffect(
             soft: colors.mintSoft,
             onPress: () => {
               setSheetVisible(false);
-              navigation.navigate("Flashcards");
+              navigation.navigate("FlashcardEdit", {});
             },
           })}
           <Pressable onPress={() => goStep("main")} style={styles.backLink}>
@@ -334,22 +337,45 @@ useFocusEffect(
 
   const totalCards = collections.reduce((sum, c) => sum + (c._count?.flashcards || 0), 0);
 
+  const confirmDeleteMaterial = async () => {
+    if (!deletingMaterial) return;
+    setDeletingMaterialBusy(true);
+    try {
+      await client.delete(`/materials/${deletingMaterial.id}`);
+      setDeletingMaterial(null);
+      await fetchAll();
+    } catch (e) {
+      Alert.alert("Error", e.message || "Could not delete study pack.");
+    } finally {
+      setDeletingMaterialBusy(false);
+    }
+  };
+
   const renderMaterial = ({ item }) => (
-    <Pressable
-      onPress={() => navigation.navigate("Material", { material: item })}
-      style={({ pressed }) => [styles.contentCard, pressed && styles.pressed]}
-    >
-      <View style={[styles.contentIcon, { backgroundColor: colors.violetSoft }]}>
-        <Ionicons name="book-outline" size={20} color={colors.violet} />
-      </View>
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={styles.contentTitle} numberOfLines={1}>{item.title}</Text>
-        <Text style={styles.contentMeta}>
-          {item.flashcards?.length || 0} cards · {item.quizzes?.length || 0} quizzes
-        </Text>
-      </View>
-      <Ionicons name="chevron-forward" size={17} color={colors.textMuted} />
-    </Pressable>
+    <View style={styles.contentCardWrap}>
+      <Pressable
+        onPress={() => navigation.navigate("Material", { material: item })}
+        style={({ pressed }) => [styles.contentCard, pressed && styles.pressed]}
+      >
+        <View style={[styles.contentIcon, { backgroundColor: colors.violetSoft }]}>
+          <Ionicons name="book-outline" size={20} color={colors.violet} />
+        </View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.contentTitle} numberOfLines={1}>{item.title}</Text>
+          <Text style={styles.contentMeta}>
+            {item.flashcards?.length || 0} cards · {item.quizzes?.length || 0} quizzes
+          </Text>
+        </View>
+        <Ionicons name="chevron-forward" size={17} color={colors.textMuted} />
+      </Pressable>
+      <Pressable
+        onPress={() => setDeletingMaterial(item)}
+        hitSlop={8}
+        style={({ pressed }) => [styles.contentDeleteBtn, pressed && styles.pressed]}
+      >
+        <Ionicons name="trash-outline" size={16} color={colors.tomato} />
+      </Pressable>
+    </View>
   );
 
   const renderNote = ({ item }) => (
@@ -475,50 +501,64 @@ useFocusEffect(
             {/* Daily Challenge + Leaderboard shortcut */}
             <View style={styles.engagementRow}>
               {challenge && !challenge.completed && (
-              <Pressable
-                onPress={completeChallenge}
-                disabled={completingChallenge}
-                style={({ pressed }) => [
-                  styles.challengeCard,
-                  {
-                    backgroundColor: colors.surface,
-                    borderColor: colors.violet,
-                    borderWidth: 1,
-                    opacity: pressed || completingChallenge ? 0.85 : 1,
-                  },
-                ]}
-              >
-                <View style={[styles.challengeIcon, { backgroundColor: colors.violetSoft }]}>
-                  <Ionicons name="trophy" size={20} color={colors.violet} />
-                </View>
-                <View style={styles.challengeBody}>
-                  <Text style={styles.challengeTitle}>Daily Challenge</Text>
-                  <Text style={styles.challengeDesc} numberOfLines={2}>
-                    {challenge.title}: {challenge.description}
-                  </Text>
-                  <View style={styles.challengeProgressTrack}>
-                    <View
-                      style={[
-                        styles.challengeProgressFill,
-                        {
-                          width: `${Math.min(100, (challenge.progress / Math.max(1, challenge.target)) * 100)}%`,
-                          backgroundColor: colors.violet,
-                        },
-                      ]}
-                    />
+                <View
+                  style={[
+                    styles.challengeCard,
+                    {
+                      backgroundColor: colors.surface,
+                      borderColor: colors.violet,
+                      borderWidth: 1,
+                    },
+                  ]}
+                >
+                  <View style={[styles.challengeIcon, { backgroundColor: colors.violetSoft }]}>
+                    <Ionicons name="trophy" size={20} color={colors.violet} />
                   </View>
-                  <Text style={styles.challengeMeta}>
-                    {Math.min(challenge.progress, challenge.target)}/{challenge.target} · +{challenge.xpReward} XP
-                  </Text>
+                  <View style={styles.challengeBody}>
+                    <Text style={styles.challengeTitle}>Daily Challenge</Text>
+                    <Text style={styles.challengeDesc} numberOfLines={2}>
+                      {challenge.title}: {challenge.description}
+                    </Text>
+                    <View style={styles.challengeProgressTrack}>
+                      <View
+                        style={[
+                          styles.challengeProgressFill,
+                          {
+                            width: `${Math.min(100, (challenge.progress / Math.max(1, challenge.target)) * 100)}%`,
+                            backgroundColor: colors.violet,
+                          },
+                        ]}
+                      />
+                    </View>
+                    <Text style={styles.challengeMeta}>
+                      {Math.min(challenge.progress, challenge.target)}/{challenge.target} · +{challenge.xpReward} XP auto-reward
+                    </Text>
+                  </View>
                 </View>
-                <View style={[styles.challengeCta, { backgroundColor: colors.violetSoft }]}>
-                  {completingChallenge ? (
-                    <ActivityIndicator color={colors.violet} size="small" />
-                  ) : (
-                    <Ionicons name="checkmark" size={20} color={colors.violet} />
-                  )}
+              )}
+
+              {challenge && challenge.completed && (
+                <View
+                  style={[
+                    styles.challengeCard,
+                    styles.challengeCardDone,
+                    {
+                      backgroundColor: colors.surface,
+                      borderColor: colors.success || "#22c55e",
+                    },
+                  ]}
+                >
+                  <View style={[styles.challengeIcon, { backgroundColor: "rgba(34,197,94,0.12)" }]}>
+                    <Ionicons name="checkmark-circle" size={22} color={colors.success || "#22c55e"} />
+                  </View>
+                  <View style={styles.challengeBody}>
+                    <Text style={styles.challengeTitle}>Daily Challenge complete</Text>
+                    <Text style={styles.challengeDesc} numberOfLines={2}>
+                      {challenge.title} · +{challenge.xpReward} XP earned
+                      {challenge.justCompleted ? " just now" : " today"}
+                    </Text>
+                  </View>
                 </View>
-              </Pressable>
               )}
 
             {/* Dedicated trophy button to open the Leaderboard */}
@@ -718,7 +758,7 @@ useFocusEffect(
                 <Text style={styles.unlimitedSubtitle}>
                   {isPremium
                     ? `${premium.daysRemaining} day${premium.daysRemaining === 1 ? '' : 's'} remaining · manage your plan`
-                    : 'Unlimited cards, hearts, AI tutor, hints & prompts'}
+                    : 'Unlimited tasks, hearts, hints, chat, tutor & AI tools'}
                 </Text>
               </View>
               <Ionicons name="chevron-forward" size={18} color={isPremium ? colors.mint : colors.violet} />
@@ -847,6 +887,17 @@ useFocusEffect(
       </Animated.View>
 
       {/* Bottom sheet */}
+      <ConfirmDialog
+        visible={Boolean(deletingMaterial)}
+        title="Delete study pack?"
+        message={`Remove "${deletingMaterial?.title || "this pack"}" and its flashcards and quizzes?`}
+        confirmText="Delete"
+        destructive
+        loading={deletingMaterialBusy}
+        onConfirm={confirmDeleteMaterial}
+        onCancel={() => !deletingMaterialBusy && setDeletingMaterial(null)}
+      />
+
       <BottomSheet
         visible={sheetVisible}
         onClose={() => setSheetVisible(false)}
@@ -1046,6 +1097,10 @@ const createStyles = (colors, isWide, isNarrow, compact) =>
       borderRadius: 16,
       padding: 14,
       marginBottom: 0,
+      borderWidth: 1,
+    },
+    challengeCardDone: {
+      flex: isWide ? 1.15 : undefined,
     },
     challengeIcon: { width: 44, height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center" },
     challengeBody: { flex: 1, marginLeft: 12 },
@@ -1372,7 +1427,14 @@ const createStyles = (colors, isWide, isNarrow, compact) =>
     },
     collectionChipText: { color: colors.text, fontSize: 12.5, fontWeight: "700" },
     collectionChipMeta: { color: colors.textMuted, fontSize: 10.5, marginTop: 2 },
+    contentCardWrap: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      marginBottom: 8,
+    },
     contentCard: {
+      flex: 1,
       flexDirection: "row",
       alignItems: "center",
       gap: 11,
@@ -1381,7 +1443,14 @@ const createStyles = (colors, isWide, isNarrow, compact) =>
       borderColor: colors.border,
       borderRadius: RADIUS.lg,
       padding: 12,
-      marginBottom: 8,
+    },
+    contentDeleteBtn: {
+      width: 36,
+      height: 36,
+      borderRadius: 10,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: colors.tomatoSoft,
     },
     contentIcon: {
       width: 40,

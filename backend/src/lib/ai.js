@@ -624,5 +624,45 @@ async function generateQuiz(topic, notes) {
   });
 }
 
-module.exports = { generateStudyPack, generateFlashcards, generateCoachInsight, generateStudyNotes, generateQuiz };
+function buildFallbackTutorLesson(collectionName, cards) {
+  const steps = cards.slice(0, 6).map((c, i) => ({
+    title: `Concept ${i + 1}: ${String(c.front).slice(0, 60)}`,
+    content: `Let's learn about "${c.front}". ${c.back}`,
+    tip: "Try explaining this in your own words before moving on.",
+  }));
+  return {
+    title: `Lesson: ${collectionName || "Flashcard deck"}`,
+    steps: steps.length
+      ? steps
+      : [{ title: "Getting started", content: "Add flashcards to this deck to generate a tutor lesson.", tip: "Use Magic Import to build a deck quickly." }],
+  };
+}
+
+async function generateDeckTutorLesson(collectionName, cards) {
+  const limited = (cards || []).slice(0, 40);
+  const cardLines = limited.map((c, i) => `${i + 1}. ${c.front} → ${c.back}`).join("\n");
+  const system =
+    "You are an expert study tutor. A student wants to learn a flashcard deck step by step. " +
+    "Respond with ONLY a raw JSON object (no markdown fences) with exactly this shape: " +
+    '{"title": string, "steps": array of 5-8 objects, each {"title": string, "content": string, "tip": string}}. ' +
+    "Each step should teach one or two related concepts from the cards in plain language. " +
+    "Build from foundations to harder ideas. Keep each content field 2-4 sentences. " +
+    "Tips should be short actionable study advice.";
+
+  return generateJSON({
+    system,
+    prompt: `Deck name: ${collectionName || "Study deck"}\n\nFlashcards:\n${cardLines || "(empty deck)"}`,
+    maxTokens: 2800,
+    fallback: () => buildFallbackTutorLesson(collectionName, limited),
+  });
+}
+
+module.exports = {
+  generateStudyPack,
+  generateFlashcards,
+  generateCoachInsight,
+  generateStudyNotes,
+  generateQuiz,
+  generateDeckTutorLesson,
+};
 

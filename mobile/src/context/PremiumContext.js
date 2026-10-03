@@ -22,6 +22,7 @@ export function PremiumProvider({ children }) {
   const [loadingPlan, setLoadingPlan] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState(null);
+  const [limits, setLimits] = useState(null);
 
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
@@ -36,6 +37,21 @@ export function PremiumProvider({ children }) {
   };
 
   const isPremium = Boolean(premium.isPremium);
+
+  const refreshLimits = useCallback(async () => {
+    if (!user?.id) {
+      setLimits(null);
+      return null;
+    }
+    try {
+      const { data } = await client.get('/game/state', { timeout: 15000 });
+      if (!mountedRef.current) return data?.limits || null;
+      setLimits(data?.limits || null);
+      return data?.limits || null;
+    } catch (e) {
+      return null;
+    }
+  }, [user?.id]);
 
   const loadPlan = useCallback(async () => {
     setLoadingPlan(true);
@@ -83,7 +99,8 @@ export function PremiumProvider({ children }) {
     }
     loadPlan();
     refreshStatus();
-  }, [user?.id, loadPlan, refreshStatus]);
+    refreshLimits();
+  }, [user?.id, loadPlan, refreshStatus, refreshLimits]);
 
   /**
    * Starts a real Xendit checkout and returns the hosted invoice URL.
@@ -116,6 +133,7 @@ export function PremiumProvider({ children }) {
         if (!user?.premium?.isPremium) {
           await refreshUser().catch(() => {});
         }
+        await refreshLimits();
         setPendingPayment(null);
       }
       return data;
@@ -123,7 +141,7 @@ export function PremiumProvider({ children }) {
       setError(e.message);
       throw e;
     }
-  }, [refreshUser, user?.premium?.isPremium]);
+  }, [refreshUser, refreshLimits, user?.premium?.isPremium]);
 
   /**
    * Polls verification for a short window after the student returns from
@@ -174,10 +192,12 @@ export function PremiumProvider({ children }) {
     sandbox,
     premium,
     isPremium,
+    limits,
     status,
     pendingPayment,
     loadPlan,
     refreshStatus,
+    refreshLimits,
     startCheckout,
     verifyPayment,
     pollForActivation,

@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const prisma = require("../lib/prisma");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { generateStudyPack, generateCoachInsight } = require("../lib/ai");
+const { enforcePromptLimit } = require("../lib/featureLimits");
 
 // Real PDF text extraction. Uses pdf-parse (already a dependency) to pull
 // text out of an uploaded PDF buffer so uploaded documents are actually
@@ -74,6 +75,36 @@ function ensureUploadDir() {
   if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
+function materialFilePath(fileUrl) {
+  if (!fileUrl) return null;
+  return path.join(UPLOAD_DIR, path.basename(fileUrl));
+}
+
+function removeMaterialFile(fileUrl) {
+  const filePath = materialFilePath(fileUrl);
+  if (!filePath) return;
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch (err) {
+    console.warn("Could not delete material file:", err.message);
+  }
+}
+
+async function deleteMaterialTree(material) {
+  const quizIds = (material.quizzes || []).map((q) => q.id);
+  await prisma.$transaction(async (tx) => {
+    if (quizIds.length) {
+      await tx.quizQuestion.deleteMany({ where: { quizId: { in: quizIds } } });
+      await tx.quizAttempt.deleteMany({ where: { quizId: { in: quizIds } } });
+      await tx.quizAssignment.deleteMany({ where: { quizId: { in: quizIds } } });
+      await tx.quiz.deleteMany({ where: { id: { in: quizIds } } });
+    }
+    await tx.flashcard.deleteMany({ where: { materialId: material.id } });
+    await tx.studyMaterial.delete({ where: { id: material.id } });
+  });
+  removeMaterialFile(material.fileUrl);
+}
+
 function saveUploadBuffer(base64Content, fileName) {
   ensureUploadDir();
   const safeName = fileName && fileName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-80) || "document.bin";
@@ -94,6 +125,43 @@ function extractStudyTips(material) {
   return tips.map((item) => item.replace(/^TIP:\s*/, ""));
 }
 
+// Extract plain text from an uploaded document without running AI or
+// creating a study material — used by Notes Magic Import.
+router.post("/extract-text", requireRole("STUDENT"), async (req, res) => {
+  try {
+    const { fileName, fileType, base64Content, rawText } = req.body;
+    if (!base64Content && !rawText?.trim()) {
+      return res.status(400).json({ error: "Please provide a document file or extracted text." });
+    }
+
+    const normalizedType = (fileType || "pdf").toLowerCase();
+    if (!SUPPORTED_FILE_TYPES.includes(normalizedType)) {
+      return res.status(400).json({
+        error: `Unsupported file type "${fileType}". Supported: ${SUPPORTED_FILE_TYPES.join(", ")}.`,
+      });
+    }
+
+    let extractedText = rawText?.trim() || "";
+    if (base64Content && !extractedText) {
+      const buffer = Buffer.from(base64Content, "base64");
+      extractedText = (await extractTextFromBuffer(normalizedType, buffer)).trim();
+    }
+
+    const baseTitle = (fileName || "").replace(/\.[^.]+$/, "").trim();
+    const title = baseTitle || `Uploaded ${normalizedType.toUpperCase()}`;
+
+    res.json({
+      title,
+      rawText: extractedText,
+      fileName: fileName || null,
+      fileType: normalizedType,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(502).json({ error: "Could not read that document. Try pasted notes instead." });
+  }
+});
+
 // List materials the current user uploaded (ownership is uploadedById
 // regardless of role)
 router.get("/", async (req, res) => {
@@ -104,7 +172,19 @@ router.get("/", async (req, res) => {
     orderBy: { createdAt: "desc" },
   });
 
-  const shaped = materials.map((material) => ({
+  const kept = [];
+  for (const material of materials) {
+    if (material.fileUrl) {
+      const filePath = materialFilePath(material.fileUrl);
+      if (!filePath || !fs.existsSync(filePath)) {
+        await deleteMaterialTree(material);
+        continue;
+      }
+    }
+    kept.push(material);
+  }
+
+  const shaped = kept.map((material) => ({
     ...material,
     studyTips: extractStudyTips(material),
   }));
@@ -126,6 +206,8 @@ router.get("/:id", async (req, res) => {
 // to study from (quiz assign/publish remains an Admin capability).
 router.post("/generate", requireRole("STUDENT"), async (req, res) => {
   try {
+    if (!(await enforcePromptLimit(req, res))) return;
+
     const { title, subjectId, subjectName, fileType, rawText, topic } = req.body;
     // Topic-based generation: a student can type any topic/question and get
     // a full study pack, even without pasted notes.
@@ -190,6 +272,8 @@ router.post("/generate", requireRole("STUDENT"), async (req, res) => {
 // `/upload-document`.
 async function handleUpload(req, res) {
   try {
+    if (!(await enforcePromptLimit(req, res))) return;
+
     const { title, subjectId, subjectName, fileName, fileType, base64Content, rawText } = req.body;
     if (!base64Content && !rawText?.trim()) {
       return res.status(400).json({ error: "Please provide a document file or extracted text before uploading." });
@@ -361,14 +445,21 @@ router.post("/:id/restore", async (req, res) => {
 });
 
 router.delete("/:id", async (req, res) => {
-  const result = await prisma.studyMaterial.deleteMany({ where: { id: req.params.id, uploadedById: req.user.id } });
-  if (result.count === 0) return res.status(404).json({ error: "Material not found" });
+  const material = await prisma.studyMaterial.findFirst({
+    where: { id: req.params.id, uploadedById: req.user.id },
+    include: { quizzes: { select: { id: true } } },
+  });
+  if (!material) return res.status(404).json({ error: "Material not found" });
+
+  await deleteMaterialTree(material);
   res.json({ ok: true });
 });
 
 // AI study coach — analyzes the student's own recent activity
 router.post("/coach", requireRole("STUDENT"), async (req, res) => {
   try {
+    if (!(await enforcePromptLimit(req, res))) return;
+
     const insight = await generateCoachInsight(req.body);
     // Persist the insight (best-effort) so it stays available and the admin
     // side can review what students are being advised.

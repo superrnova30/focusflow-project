@@ -45,6 +45,13 @@ model User {
   // Gamification (XP + Hearts)
   xp                    Int           @default(0)
   hearts                Int           @default(5)
+  hints                 Int           @default(3)
+  heartsDepletedAt      DateTime?
+  memorizeSettings      Json?
+  dailyUsageDate        String?
+  dailyPromptsUsed      Int           @default(0)
+  dailyChatUsed         Int           @default(0)
+  dailyTutorUsed        Int           @default(0)
   correctAnswers        Int           @default(0)
   wrongAnswers          Int           @default(0)
   totalXpEarned         Int           @default(0)
@@ -76,6 +83,7 @@ model User {
   quizAssignments   QuizAssignment[]
   activityLogs      ActivityLog[]
   flashcardCollections FlashcardCollection[]
+  deckStudyProgress    DeckStudyProgress[]
   notes             StudyNote[]
   deviceTokens      DeviceToken[]
   challengeCompletions DailyChallengeCompletion[]
@@ -109,6 +117,7 @@ model Task {
   subjectId      String?
   subject        Subject? @relation(fields: [subjectId], references: [id])
   title          String
+  descriptionJson Json?
   estMinutes     Int      @default(25)
   completed      Boolean  @default(false)
   archived       Boolean  @default(false)
@@ -164,10 +173,30 @@ model FlashcardCollection {
   userId    String
   user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   name      String
+  color     String      @default("violet")
+  isPublic  Boolean     @default(false)
   createdAt DateTime    @default(now())
 
-  flashcards Flashcard[]
+  flashcards    Flashcard[]
+  studyProgress DeckStudyProgress[]
 
+  @@index([userId])
+  @@index([userId, isPublic])
+}
+
+model DeckStudyProgress {
+  id               String              @id @default(cuid())
+  userId           String
+  user             User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  collectionId     String
+  collection       FlashcardCollection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  practiceAnswered Int                 @default(0)
+  practiceUnlocked Boolean             @default(false)
+  memorizeSessions Int                 @default(0)
+  tutorCompleted   Boolean             @default(false)
+  updatedAt        DateTime            @updatedAt
+
+  @@unique([userId, collectionId])
   @@index([userId])
 }
 
@@ -187,7 +216,7 @@ model Flashcard {
 model Quiz {
   id            String   @id @default(cuid())
   materialId    String?
-  material      StudyMaterial? @relation(fields: [materialId], references: [id])
+  material      StudyMaterial? @relation(fields: [materialId], references: [id], onDelete: Cascade)
   createdById   String
   createdBy     User     @relation("QuizCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
   title         String
@@ -229,6 +258,7 @@ model StudyNote {
   title       String
   contentJson Json     // rich text blocks
   source      String   @default("manual") // "ai" | "manual"
+  isPublic    Boolean  @default(false)
   aiSummary       String?  @db.Text
   aiKeyConcepts   Json?
   aiImportantTerms Json?
@@ -238,6 +268,7 @@ model StudyNote {
   updatedAt   DateTime @updatedAt
 
   @@index([userId])
+  @@index([userId, isPublic])
 }
 
 model QuizAttempt {

@@ -12,10 +12,13 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { useTheme } from '../context/ThemeContext';
+import { useAuth } from '../context/AuthContext';
 import { useAIChat } from '../context/AIChatContext';
+import { AiAssistantAvatar, ChatParticipantAvatar } from '../components/ChatAvatars';
+import { handleLimitError } from '../lib/upgradePrompt';
 import { Ionicons } from '@expo/vector-icons';
 
-function MessageBubble({ item, isMine, colors, isWide }) {
+function MessageBubble({ item, isMine, colors, isWide, user }) {
   const bubbleStyle = isMine
     ? { backgroundColor: colors.tomato, borderColor: colors.tomato }
     : { backgroundColor: colors.surface, borderColor: colors.border };
@@ -23,8 +26,8 @@ function MessageBubble({ item, isMine, colors, isWide }) {
   return (
     <View style={[styles.messageRow, isMine && styles.userRow]}>
       {!isMine && (
-        <View style={[styles.avatar, { backgroundColor: colors.tomatoSoft, borderColor: colors.border }]}>
-          <Text style={[styles.avatarText, { color: colors.tomato }]}>AI</Text>
+        <View style={styles.avatarSlot}>
+          <AiAssistantAvatar size={32} />
         </View>
       )}
 
@@ -36,8 +39,8 @@ function MessageBubble({ item, isMine, colors, isWide }) {
       </View>
 
       {isMine && (
-        <View style={[styles.avatar, { backgroundColor: colors.surfaceRaised, borderColor: colors.border }]}>
-          <Text style={[styles.avatarText, { color: colors.text }]}>You</Text>
+        <View style={[styles.avatarSlot, styles.avatarSlotUser]}>
+          <ChatParticipantAvatar role="user" user={user} size={32} />
         </View>
       )}
     </View>
@@ -46,9 +49,11 @@ function MessageBubble({ item, isMine, colors, isWide }) {
 
 export default function StudyChatScreen({ navigation, route }) {
   const { colors } = useTheme();
+  const { user } = useAuth();
   const { width } = useWindowDimensions();
   const isWide = width >= 700;
   const { messages, send, sending } = useAIChat();
+  const visibleMessages = messages.filter((m) => m.role !== 'system');
   const [text, setText] = useState('');
   const listRef = useRef();
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -63,7 +68,9 @@ export default function StudyChatScreen({ navigation, route }) {
         setTimeout(() => listRef.current && listRef.current.scrollToEnd({ animated: true }), 120);
       }
     } catch (e) {
-      // send handles appending an error assistant message
+      if (!handleLimitError(navigation, e)) {
+        // send handles appending an error assistant message
+      }
     }
   };
 
@@ -73,7 +80,9 @@ export default function StudyChatScreen({ navigation, route }) {
     if (initial && initial.trim() && !sentInitialRef.current) {
       sentInitialRef.current = true;
       setTimeout(() => {
-        send(initial).catch(() => {});
+        send(initial).catch((e) => {
+          handleLimitError(navigation, e);
+        });
       }, 120);
     }
   }, [route?.params?.initialTopic]);
@@ -105,8 +114,10 @@ export default function StudyChatScreen({ navigation, route }) {
         </TouchableOpacity>
 
         <View style={styles.headerTitleWrap}>
-          <Text style={[styles.headerTitle, { color: colors.text }]}>AI Conversation</Text>
-          <Text style={[styles.headerSubtitle, { color: colors.textMuted }]}>Study assistant</Text>
+          <Text style={[styles.headerTitle, { color: colors.text }]}>Study Chat</Text>
+          <Text style={[styles.headerSubtitle, { color: colors.textMuted }]}>
+            {user?.name ? `${user.name.split(' ')[0]} · FocusFlow AI` : 'Study assistant'}
+          </Text>
         </View>
 
         <View style={[styles.statusPill, { backgroundColor: colors.tomatoSoft, borderColor: colors.border }]}>
@@ -133,8 +144,24 @@ export default function StudyChatScreen({ navigation, route }) {
         keyboardShouldPersistTaps='handled'
         showsVerticalScrollIndicator={false}
       >
-        {messages.filter((m) => m.role !== 'system').map((item, i) => (
-          <MessageBubble key={String(i)} item={item} isMine={item.role === 'user'} colors={colors} isWide={isWide} />
+        {visibleMessages.length === 0 ? (
+          <View style={styles.emptyState}>
+            <View style={styles.emptyAvatars}>
+              <ChatParticipantAvatar role="user" user={user} size={44} />
+              <View style={[styles.emptyConnector, { backgroundColor: colors.violetSoft }]}>
+                <Ionicons name="chatbubbles-outline" size={18} color={colors.violet} />
+              </View>
+              <AiAssistantAvatar size={44} />
+            </View>
+            <Text style={[styles.emptyTitle, { color: colors.text }]}>Start your study conversation</Text>
+            <Text style={[styles.emptySubtitle, { color: colors.textMuted }]}>
+              Ask about a topic, request summaries, or get help with flashcards and quizzes.
+            </Text>
+          </View>
+        ) : null}
+
+        {visibleMessages.map((item, i) => (
+          <MessageBubble key={String(i)} item={item} isMine={item.role === 'user'} colors={colors} isWide={isWide} user={user} />
         ))}
       </ScrollView>
 
@@ -233,19 +260,44 @@ const styles = StyleSheet.create({
   userRow: {
     justifyContent: 'flex-end',
   },
-  avatar: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+  avatarSlot: {
     marginRight: 8,
+    flexShrink: 0,
+  },
+  avatarSlotUser: {
+    marginRight: 0,
+    marginLeft: 8,
+  },
+  emptyState: {
+    alignItems: 'center',
+    paddingTop: 28,
+    paddingBottom: 12,
+    paddingHorizontal: 20,
+  },
+  emptyAvatars: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 16,
+  },
+  emptyConnector: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
   },
-  avatarText: {
-    fontSize: 9,
+  emptyTitle: {
+    fontSize: 16,
     fontWeight: '800',
-    textTransform: 'uppercase',
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+  emptySubtitle: {
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+    maxWidth: 320,
   },
   bubbleWrap: {
     flexShrink: 1,

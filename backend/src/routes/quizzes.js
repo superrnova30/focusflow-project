@@ -13,18 +13,31 @@ const QUIZ_XP_PER_CORRECT = 100;
 //  - Admins see quizzes they created
 router.get("/", async (req, res) => {
   const mine = req.query.mine === "true";
-  const where =
-    req.user.role === "STUDENT"
-      ? {
-          OR: [
-            { createdById: req.user.id },
-            { isPublished: true, assignments: { some: { studentId: req.user.id } } },
-            { isPublished: true },
-          ],
-        }
-      : { createdById: req.user.id };
+  let where;
 
-  if (mine) delete where.OR;
+  if (req.user.role === "STUDENT") {
+    if (mine) {
+      where = {
+        createdById: req.user.id,
+        material: { uploadedById: req.user.id, archived: false },
+      };
+    } else {
+      where = {
+        OR: [
+          {
+            createdById: req.user.id,
+            material: { uploadedById: req.user.id, archived: false },
+          },
+          {
+            isPublished: true,
+            assignments: { some: { studentId: req.user.id } },
+          },
+        ],
+      };
+    }
+  } else {
+    where = { createdById: req.user.id };
+  }
 
   const quizzes = await prisma.quiz.findMany({
     where,
@@ -171,6 +184,11 @@ router.post("/:id/attempt", async (req, res) => {
   }
 
   await prisma.activityLog.create({ data: { userId: req.user.id, action: "quiz_attempt" } });
+
+  if (req.user.role === "STUDENT") {
+    const { scheduleDailyChallengeCheck } = require("../lib/dailyChallenge");
+    scheduleDailyChallengeCheck(req.user.id);
+  }
 
   res.status(201).json({ attempt, score, total: quiz.questions.length, xpEarned: req.user.role === "STUDENT" ? score * QUIZ_XP_PER_CORRECT : 0 });
 });

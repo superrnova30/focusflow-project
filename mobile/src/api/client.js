@@ -253,7 +253,15 @@ client.interceptors.response.use(
     if (!err?.response && err?.config && SAFE_TO_QUEUE(err.config.method, err.config.url)) {
       enqueueOfflineRequest(err.config);
     }
-    return Promise.reject(new Error(formatApiError(err)));
+    const message = formatApiError(err);
+    const enriched = new Error(message);
+    const data = err?.response?.data;
+    enriched.status = err?.response?.status;
+    enriched.code = data?.code;
+    enriched.upgradeRequired = Boolean(data?.upgradeRequired);
+    enriched.limits = data?.limits;
+    enriched.response = err?.response;
+    return Promise.reject(enriched);
   }
 );
 

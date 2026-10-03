@@ -14,12 +14,34 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { useFocusEffect } from "@react-navigation/native";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Screen } from "../components/Screen";
 import { Input } from "../components/Inputs";
+import TaskDescriptionEditor from "../components/TaskDescriptionEditor";
+import NoteContentPreview from "../components/NoteContentPreview";
 import { useTheme } from "../context/ThemeContext";
+import { usePremium } from "../context/PremiumContext";
 import client from "../api/client";
+import { handleLimitError, navigateToPremium } from "../lib/upgradePrompt";
 import { RADIUS, SPACING } from "../theme/theme";
+
+function parseDescriptionJson(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function blocksPlainText(blocks) {
+  return (blocks || []).map((b) => b?.text || "").join(" ").toLowerCase();
+}
 
 const STATUS_FILTERS = [
   { key: "all", label: "All" },
@@ -28,10 +50,17 @@ const STATUS_FILTERS = [
 ];
 
 export default function TasksScreen() {
+  const navigation = useNavigation();
   const { colors, isDark } = useTheme();
-  const { width } = useWindowDimensions();
+  const { isPremium, refreshLimits } = usePremium();
+  const { width, height: windowHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const wide = width >= 900;
   const compact = width < 380;
+  const modalMaxHeight = useMemo(
+    () => Math.max(300, windowHeight - insets.top - insets.bottom - (compact ? 12 : 20)),
+    [windowHeight, insets.top, insets.bottom, compact]
+  );
   const styles = useMemo(
     () => createStyles(colors, isDark, wide, compact),
     [colors, isDark, wide, compact]
@@ -53,18 +82,23 @@ export default function TasksScreen() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [subjectFilter, setSubjectFilter] = useState(null);
+  const [descriptionBlocks, setDescriptionBlocks] = useState([]);
+  const [editDescriptionBlocks, setEditDescriptionBlocks] = useState([]);
+  const [taskLimits, setTaskLimits] = useState(null);
 
   const fetchTasks = useCallback(async (archived = showArchived, silent = false) => {
     if (!silent) setRefreshing(true);
     try {
       const { data } = await client.get(`/tasks?archived=${archived}`);
       setTasks(data.tasks || []);
+      if (data.limits) setTaskLimits(data.limits);
+      await refreshLimits();
     } catch (error) {
       if (!silent) Alert.alert("Could not load tasks", error.message);
     } finally {
       if (!silent) setRefreshing(false);
     }
-  }, [showArchived]);
+  }, [showArchived, refreshLimits]);
 
   const fetchSubjects = useCallback(async () => {
     try {
@@ -86,6 +120,7 @@ export default function TasksScreen() {
     setTitle("");
     setSubjectName("");
     setEstMinutes("25");
+    setDescriptionBlocks([]);
   };
 
   const resetEditTaskForm = () => {
@@ -93,6 +128,7 @@ export default function TasksScreen() {
     setEditTitle("");
     setEditSubjectName("");
     setEditEstMinutes("25");
+    setEditDescriptionBlocks([]);
   };
 
   const closeTaskModal = () => {
@@ -101,7 +137,23 @@ export default function TasksScreen() {
     resetEditTaskForm();
   };
 
+  const activeTaskLimitReached =
+    !isPremium &&
+    taskLimits?.tasks?.max != null &&
+    (taskLimits.tasks.used ?? 0) >= taskLimits.tasks.max;
+
   const openNewTaskModal = () => {
+    if (activeTaskLimitReached) {
+      Alert.alert(
+        "Task limit reached",
+        `Basic includes up to ${taskLimits.tasks.max} active tasks. Archive one or upgrade to Go Unlimited for unlimited tasks.`,
+        [
+          { text: "Not now", style: "cancel" },
+          { text: "View plans", onPress: () => navigateToPremium(navigation) },
+        ]
+      );
+      return;
+    }
     resetEditTaskForm();
     resetNewTaskForm();
     setShowAddModal(true);
@@ -112,6 +164,7 @@ export default function TasksScreen() {
     setEditTitle(task.title || "");
     setEditSubjectName(task.subject?.archived ? "" : task.subject?.name || "");
     setEditEstMinutes(String(task.estMinutes || 25));
+    setEditDescriptionBlocks(parseDescriptionJson(task.descriptionJson));
     setShowAddModal(true);
   };
 
@@ -142,11 +195,14 @@ export default function TasksScreen() {
         title: title.trim(),
         subjectId,
         estMinutes: Math.max(1, Number(estMinutes) || 25),
+        descriptionJson: descriptionBlocks.length ? descriptionBlocks : null,
       });
       setTasks((current) => [data.task, ...current]);
+      if (data.limits) setTaskLimits(data.limits);
       closeTaskModal();
       await fetchTasks(false, true);
     } catch (error) {
+      if (handleLimitError(navigation, error, { title: "Unlimited tasks" })) return;
       Alert.alert("Could not add task", error.message);
     } finally {
       setLoading(false);
@@ -169,6 +225,7 @@ export default function TasksScreen() {
         title: editTitle.trim(),
         subjectId,
         estMinutes: Math.max(1, Number(editEstMinutes) || 25),
+        descriptionJson: editDescriptionBlocks.length ? editDescriptionBlocks : null,
       });
       setTasks((current) =>
         current.map((task) =>
@@ -206,8 +263,9 @@ export default function TasksScreen() {
 
   const archiveTask = async (task) => {
     try {
-      await client.post(`/tasks/${task.id}/archive`);
+      const { data } = await client.post(`/tasks/${task.id}/archive`);
       setTasks((current) => current.filter((item) => item.id !== task.id));
+      if (data.limits) setTaskLimits(data.limits);
     } catch (error) {
       Alert.alert("Could not archive task", error.message);
     }
@@ -215,9 +273,11 @@ export default function TasksScreen() {
 
   const restoreTask = async (task) => {
     try {
-      await client.post(`/tasks/${task.id}/restore`);
+      const { data } = await client.post(`/tasks/${task.id}/restore`);
       setTasks((current) => current.filter((item) => item.id !== task.id));
+      if (data.limits) setTaskLimits(data.limits);
     } catch (error) {
+      if (handleLimitError(navigation, error, { title: "Unlimited tasks" })) return;
       Alert.alert("Could not restore task", error.message);
     }
   };
@@ -233,8 +293,9 @@ export default function TasksScreen() {
           style: "destructive",
           onPress: async () => {
             try {
-              await client.delete(`/tasks/${task.id}`);
+              const { data } = await client.delete(`/tasks/${task.id}`);
               setTasks((current) => current.filter((item) => item.id !== task.id));
+              if (data.limits) setTaskLimits(data.limits);
             } catch (error) {
               Alert.alert("Could not delete task", error.message);
             }
@@ -260,14 +321,15 @@ export default function TasksScreen() {
       if (statusFilter === "todo" && task.completed) return false;
       if (statusFilter === "done" && !task.completed) return false;
       if (subjectFilter && task.subjectId !== subjectFilter) return false;
-      if (
-        query &&
-        !task.title.toLowerCase().includes(query) &&
-        !(task.subject && !task.subject.archived
-          ? task.subject.name.toLowerCase().includes(query)
-          : false)
-      ) {
-        return false;
+      if (query) {
+        const haystack = [
+          task.title,
+          task.subject && !task.subject.archived ? task.subject.name : "",
+          blocksPlainText(parseDescriptionJson(task.descriptionJson)),
+        ]
+          .join(" ")
+          .toLowerCase();
+        if (!haystack.includes(query)) return false;
       }
       return true;
     });
@@ -296,6 +358,14 @@ export default function TasksScreen() {
                 ? "Restore past tasks or permanently remove what you no longer need."
                 : "Plan what matters, focus on one thing, and keep moving forward."}
             </Text>
+            {!showArchived && !isPremium && taskLimits?.tasks?.max != null && (
+              <View style={[styles.limitPill, { backgroundColor: colors.violetSoft, borderColor: colors.violet + "44" }]}>
+                <Ionicons name="layers-outline" size={13} color={colors.violet} />
+                <Text style={[styles.limitPillText, { color: colors.violet }]}>
+                  {taskLimits.tasks.used ?? 0}/{taskLimits.tasks.max} active tasks on Basic
+                </Text>
+              </View>
+            )}
           </View>
           {!showArchived && (
             <Pressable
@@ -304,6 +374,7 @@ export default function TasksScreen() {
               accessibilityLabel="Add a task"
               style={({ pressed }) => [
                 styles.addTaskButton,
+                activeTaskLimitReached && styles.addTaskButtonMuted,
                 pressed && styles.pressed,
               ]}
             >
@@ -651,6 +722,19 @@ export default function TasksScreen() {
                   </View>
                 </View>
 
+                {parseDescriptionJson(task.descriptionJson).length > 0 ? (
+                  <View style={[styles.taskDetailsPanel, { backgroundColor: colors.bg, borderColor: colors.border }]}>
+                    <View style={styles.taskDetailsHeader}>
+                      <Ionicons name="document-text-outline" size={14} color={colors.mint} />
+                      <Text style={[styles.taskDetailsLabel, { color: colors.textMuted }]}>Details</Text>
+                    </View>
+                    <NoteContentPreview
+                      blocks={parseDescriptionJson(task.descriptionJson)}
+                      compact
+                    />
+                  </View>
+                ) : null}
+
                 <View style={styles.taskCardFooter}>
                   <View style={styles.sessionInfo}>
                     <View style={[styles.sessionIcon, { backgroundColor: colors.amberSoft }]}>
@@ -723,45 +807,59 @@ export default function TasksScreen() {
         transparent
         animationType="fade"
         onRequestClose={closeTaskModal}
+        statusBarTranslucent
       >
-        <Pressable style={styles.modalOverlay} onPress={closeTaskModal}>
+        <View style={styles.modalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={closeTaskModal} accessibilityLabel="Close modal" />
           <KeyboardAvoidingView
-            behavior={Platform.OS === "ios" ? "padding" : undefined}
-            style={styles.modalContainer}
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+            style={[styles.modalContainer, { maxHeight: modalMaxHeight }]}
+            keyboardVerticalOffset={Platform.OS === "ios" ? insets.top : 0}
           >
-            <Pressable style={styles.modalCard} onPress={() => {}}>
-              <ScrollView
-                showsVerticalScrollIndicator={false}
-                keyboardShouldPersistTaps="handled"
-                contentContainerStyle={styles.modalContent}
-              >
-                <View style={styles.modalHeader}>
-                  <View style={styles.modalHeaderCopy}>
-                    <View style={[styles.modalIcon, { backgroundColor: colors.violetSoft }]}>
-                      <Ionicons
-                        name={editingTask ? "create-outline" : "add"}
-                        size={22}
-                        color={colors.violet}
-                      />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.modalEyebrow}>
-                        {editingTask ? "UPDATE YOUR PLAN" : "PLAN YOUR NEXT WIN"}
-                      </Text>
-                      <Text style={styles.modalTitle}>
-                        {editingTask ? "Edit task" : "Add a task"}
-                      </Text>
-                    </View>
+            <View
+              style={[
+                styles.modalCard,
+                { maxHeight: modalMaxHeight, borderColor: colors.border, backgroundColor: colors.surface },
+              ]}
+            >
+              <View style={[styles.modalHeader, styles.modalContentHorizontal]}>
+                <View style={styles.modalHeaderCopy}>
+                  <View style={[styles.modalIcon, { backgroundColor: colors.violetSoft }]}>
+                    <Ionicons
+                      name={editingTask ? "create-outline" : "add"}
+                      size={22}
+                      color={colors.violet}
+                    />
                   </View>
-                  <Pressable
-                    onPress={closeTaskModal}
-                    style={styles.closeButton}
-                    accessibilityLabel="Close task modal"
-                  >
-                    <Ionicons name="close" size={21} color={colors.text} />
-                  </Pressable>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.modalEyebrow}>
+                      {editingTask ? "UPDATE YOUR PLAN" : "PLAN YOUR NEXT WIN"}
+                    </Text>
+                    <Text style={styles.modalTitle} numberOfLines={1}>
+                      {editingTask ? "Edit task" : "Add a task"}
+                    </Text>
+                  </View>
                 </View>
+                <Pressable
+                  onPress={closeTaskModal}
+                  style={styles.closeButton}
+                  accessibilityLabel="Close task modal"
+                >
+                  <Ionicons name="close" size={21} color={colors.text} />
+                </Pressable>
+              </View>
 
+              <ScrollView
+                style={styles.modalScroll}
+                showsVerticalScrollIndicator
+                keyboardShouldPersistTaps="handled"
+                keyboardDismissMode="on-drag"
+                nestedScrollEnabled
+                contentContainerStyle={[
+                  styles.modalContent,
+                  { paddingBottom: SPACING.sm },
+                ]}
+              >
                 <Text style={styles.modalIntro}>
                   {editingTask
                     ? "Update the details so this task fits your current plan."
@@ -820,6 +918,15 @@ export default function TasksScreen() {
                   </ScrollView>
                 )}
 
+                <View style={styles.descriptionSection}>
+                  <TaskDescriptionEditor
+                    compact={compact}
+                    inModal
+                    value={editingTask ? editDescriptionBlocks : descriptionBlocks}
+                    onChange={editingTask ? setEditDescriptionBlocks : setDescriptionBlocks}
+                  />
+                </View>
+
                 <View style={styles.estimateSection}>
                   <View style={styles.estimateCopy}>
                     <View style={[styles.estimateIcon, { backgroundColor: colors.amberSoft }]}>
@@ -843,7 +950,9 @@ export default function TasksScreen() {
                     <Text style={styles.estimateUnit}>min</Text>
                   </View>
                 </View>
+              </ScrollView>
 
+              <View style={[styles.modalFooter, { borderTopColor: colors.border }]}>
                 <View style={styles.modalActions}>
                   <Pressable
                     onPress={closeTaskModal}
@@ -881,10 +990,10 @@ export default function TasksScreen() {
                     )}
                   </Pressable>
                 </View>
-              </ScrollView>
-            </Pressable>
+              </View>
+            </View>
           </KeyboardAvoidingView>
-        </Pressable>
+        </View>
       </Modal>
     </Screen>
   );
@@ -943,6 +1052,40 @@ const createStyles = (colors, isDark, wide, compact) =>
       elevation: 4,
     },
     addTaskButtonText: { color: "#FFFFFF", fontSize: 13, fontWeight: "900" },
+    addTaskButtonMuted: { opacity: 0.55 },
+    limitPill: {
+      flexDirection: "row",
+      alignItems: "center",
+      alignSelf: "flex-start",
+      gap: 6,
+      marginTop: 10,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: RADIUS.pill,
+      borderWidth: 1,
+    },
+    limitPillText: { fontSize: 11, fontWeight: "800" },
+    descriptionSection: { marginTop: SPACING.md, marginBottom: SPACING.md },
+    taskDetailsPanel: {
+      marginTop: 12,
+      padding: 12,
+      borderRadius: RADIUS.md,
+      borderWidth: 1,
+      maxHeight: compact ? 110 : 130,
+      overflow: "hidden",
+    },
+    taskDetailsHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      marginBottom: 8,
+    },
+    taskDetailsLabel: {
+      fontSize: 9,
+      fontWeight: "900",
+      letterSpacing: 0.7,
+      textTransform: "uppercase",
+    },
     pressed: { opacity: 0.74, transform: [{ scale: 0.98 }] },
 
     statsGrid: {
@@ -1244,17 +1387,20 @@ const createStyles = (colors, isDark, wide, compact) =>
       backgroundColor: "rgba(3, 6, 18, 0.76)",
       justifyContent: "center",
       alignItems: "center",
-      paddingHorizontal: compact ? SPACING.md : 24,
-      paddingVertical: 24,
+      paddingHorizontal: compact ? SPACING.sm : SPACING.lg,
     },
-    modalContainer: { width: "100%", maxWidth: 560, alignItems: "center" },
+    modalContainer: {
+      width: "100%",
+      maxWidth: 560,
+      alignSelf: "center",
+      flexShrink: 1,
+      zIndex: 1,
+    },
     modalCard: {
       width: "100%",
-      maxHeight: "94%",
-      backgroundColor: colors.surface,
+      flexDirection: "column",
       borderRadius: RADIUS.xl,
       borderWidth: 1,
-      borderColor: colors.border,
       overflow: "hidden",
       shadowColor: "#000",
       shadowOpacity: 0.26,
@@ -1262,13 +1408,33 @@ const createStyles = (colors, isDark, wide, compact) =>
       shadowOffset: { width: 0, height: 10 },
       elevation: 12,
     },
-    modalContent: { padding: compact ? SPACING.lg : 22 },
+    modalScroll: {
+      flexGrow: 0,
+      flexShrink: 1,
+      ...(Platform.OS === "web" ? { minHeight: 0 } : null),
+    },
+    modalContent: {
+      paddingHorizontal: compact ? SPACING.lg : 22,
+      paddingTop: 0,
+      paddingBottom: SPACING.md,
+    },
+    modalContentHorizontal: {
+      paddingHorizontal: compact ? SPACING.lg : 22,
+      paddingTop: compact ? SPACING.lg : 22,
+      paddingBottom: SPACING.sm,
+    },
     modalHeader: {
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "space-between",
       gap: 12,
-      marginBottom: 13,
+    },
+    modalFooter: {
+      paddingHorizontal: compact ? SPACING.lg : 22,
+      paddingTop: SPACING.sm,
+      paddingBottom: compact ? SPACING.md : SPACING.lg,
+      borderTopWidth: 1,
+      backgroundColor: colors.surface,
     },
     modalHeaderCopy: { flex: 1, flexDirection: "row", alignItems: "center", gap: 11 },
     modalIcon: {
@@ -1312,8 +1478,8 @@ const createStyles = (colors, isDark, wide, compact) =>
     },
     modalSubjectText: { color: colors.textMuted, fontSize: 10.5, fontWeight: "700" },
     estimateSection: {
-      flexDirection: "row",
-      alignItems: "center",
+      flexDirection: compact ? "column" : "row",
+      alignItems: compact ? "stretch" : "center",
       justifyContent: "space-between",
       gap: 12,
       padding: 12,
@@ -1352,7 +1518,7 @@ const createStyles = (colors, isDark, wide, compact) =>
       paddingVertical: 8,
     },
     estimateUnit: { color: colors.textMuted, fontSize: 10, fontWeight: "700" },
-    modalActions: { flexDirection: "row", gap: 9, marginTop: SPACING.lg },
+    modalActions: { flexDirection: "row", gap: 9 },
     cancelButton: {
       flex: 1,
       minHeight: 48,

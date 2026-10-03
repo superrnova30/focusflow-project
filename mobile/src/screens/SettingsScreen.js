@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { View, Text, StyleSheet, ScrollView, Switch, Alert, Image, Pressable, useWindowDimensions, Platform } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import Constants from "expo-constants";
@@ -9,18 +9,27 @@ import { useTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { usePremium } from "../context/PremiumContext";
 import { RADIUS, SPACING } from "../theme/theme";
-
-const GOLD = "#FFC15E";
 import { registerForPushNotifications, unregisterPushNotifications, sendTestPush, getSavedPushToken } from "../lib/push";
 import { ALARM_SOUNDS, loadAlarmPrefs, saveAlarmPrefs } from "../lib/alarmPrefs";
 import { previewAlarm } from "../lib/alarmPlayer";
 import client from "../api/client";
+
+const GOLD = "#FFC15E";
 
 const THEME_OPTIONS = [
   { key: "light", label: "Light" },
   { key: "dark", label: "Dark" },
   { key: "system", label: "System" },
 ];
+
+function InstantBadge({ colors, styles }) {
+  return (
+    <View style={[styles.instantBadge, { backgroundColor: colors.mintSoft }]}>
+      <Ionicons name="flash-outline" size={10} color={colors.mint} />
+      <Text style={[styles.instantBadgeText, { color: colors.mint }]}>Instant</Text>
+    </View>
+  );
+}
 
 export default function SettingsScreen({ navigation }) {
   const { colors, scheme, setScheme } = useTheme();
@@ -30,6 +39,7 @@ export default function SettingsScreen({ navigation }) {
   const styles = useMemo(() => createStyles(colors, isWide, compact), [colors, isWide, compact]);
   const { user, logout, refreshUser } = useAuth();
   const { isPremium, premium } = usePremium();
+
   const [name, setName] = useState(user?.name || "");
   const [studentId, setStudentId] = useState(user?.studentId || "");
   const [course, setCourse] = useState(user?.course || "");
@@ -42,23 +52,23 @@ export default function SettingsScreen({ navigation }) {
   const [longBreak, setLongBreak] = useState(String(user?.longBreakMinutes ?? 15));
   const [sessionsBeforeLong, setSessionsBeforeLong] = useState(String(user?.sessionsBeforeLongBreak ?? 4));
   const [pomodoroExpanded, setPomodoroExpanded] = useState(false);
-  
   const [reminderTime, setReminderTime] = useState(user?.reminderTime || "18:00");
   const [reminders, setReminders] = useState(user?.remindersEnabled ?? true);
   const [saving, setSaving] = useState(false);
-  // Change password UI state
+
   const [changeOpen, setChangeOpen] = useState(false);
-  const [newPassword, setNewPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [changing, setChanging] = useState(false);
 
-  // Push notification settings
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   const isExpoGo = Constants.appOwnership === "expo";
+
   const [alarmEnabled, setAlarmEnabled] = useState(true);
   const [alarmSoundId, setAlarmSoundId] = useState("chime");
   const [alarmVolume, setAlarmVolume] = useState(0.8);
+  const alarmPrefsReady = useRef(false);
 
   useEffect(() => {
     getSavedPushToken()
@@ -67,12 +77,93 @@ export default function SettingsScreen({ navigation }) {
   }, []);
 
   useEffect(() => {
-    loadAlarmPrefs().then((prefs) => {
-      setAlarmEnabled(prefs.enabled);
-      setAlarmSoundId(prefs.soundId);
-      setAlarmVolume(prefs.volume);
-    }).catch(() => {});
+    loadAlarmPrefs()
+      .then((prefs) => {
+        setAlarmEnabled(prefs.enabled);
+        setAlarmSoundId(prefs.soundId);
+        setAlarmVolume(prefs.volume);
+        alarmPrefsReady.current = true;
+      })
+      .catch(() => {
+        alarmPrefsReady.current = true;
+      });
   }, []);
+
+  useEffect(() => {
+    if (!alarmPrefsReady.current) return undefined;
+    const timer = setTimeout(() => {
+      saveAlarmPrefs({ enabled: alarmEnabled, soundId: alarmSoundId, volume: alarmVolume }).catch(() => {});
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [alarmEnabled, alarmSoundId, alarmVolume]);
+
+  useEffect(() => {
+    setName(user?.name || "");
+    setStudentId(user?.studentId || "");
+    setCourse(user?.course || "");
+    setYearLevel(user?.yearLevel || "");
+    setSection(user?.section || "");
+    setProfilePicture(user?.profilePicture || "");
+    setDailyGoal(String(user?.dailyGoalMinutes ?? 120));
+    setFocusMinutes(String(user?.focusMinutes ?? 25));
+    setShortBreak(String(user?.shortBreakMinutes ?? 5));
+    setLongBreak(String(user?.longBreakMinutes ?? 15));
+    setSessionsBeforeLong(String(user?.sessionsBeforeLongBreak ?? 4));
+    setReminderTime(user?.reminderTime || "18:00");
+    setReminders(user?.remindersEnabled ?? true);
+  }, [user]);
+
+  const savedProfile = useMemo(
+    () => ({
+      name: (user?.name || "").trim(),
+      studentId: (user?.studentId || "").trim(),
+      course: (user?.course || "").trim(),
+      yearLevel: (user?.yearLevel || "").trim(),
+      section: (user?.section || "").trim(),
+      profilePicture: user?.profilePicture || "",
+      dailyGoal: String(user?.dailyGoalMinutes ?? 120),
+      focusMinutes: String(user?.focusMinutes ?? 25),
+      shortBreak: String(user?.shortBreakMinutes ?? 5),
+      longBreak: String(user?.longBreakMinutes ?? 15),
+      sessionsBeforeLong: String(user?.sessionsBeforeLongBreak ?? 4),
+      reminderTime: user?.reminderTime || "18:00",
+      reminders: user?.remindersEnabled ?? true,
+    }),
+    [user]
+  );
+
+  const hasUnsavedChanges = useMemo(
+    () =>
+      name.trim() !== savedProfile.name ||
+      studentId.trim() !== savedProfile.studentId ||
+      course.trim() !== savedProfile.course ||
+      yearLevel.trim() !== savedProfile.yearLevel ||
+      section.trim() !== savedProfile.section ||
+      profilePicture !== savedProfile.profilePicture ||
+      dailyGoal !== savedProfile.dailyGoal ||
+      focusMinutes !== savedProfile.focusMinutes ||
+      shortBreak !== savedProfile.shortBreak ||
+      longBreak !== savedProfile.longBreak ||
+      sessionsBeforeLong !== savedProfile.sessionsBeforeLong ||
+      reminderTime.trim() !== savedProfile.reminderTime ||
+      reminders !== savedProfile.reminders,
+    [
+      name,
+      studentId,
+      course,
+      yearLevel,
+      section,
+      profilePicture,
+      dailyGoal,
+      focusMinutes,
+      shortBreak,
+      longBreak,
+      sessionsBeforeLong,
+      reminderTime,
+      reminders,
+      savedProfile,
+    ]
+  );
 
   const togglePush = async (value) => {
     setPushBusy(true);
@@ -129,7 +220,7 @@ export default function SettingsScreen({ navigation }) {
     }
   };
 
-  const save = async () => {
+  const saveProfile = async () => {
     const numberValue = (value, min, max) => {
       const parsed = Number(value);
       return Number.isFinite(parsed) && parsed >= min && parsed <= max ? parsed : null;
@@ -170,15 +261,30 @@ export default function SettingsScreen({ navigation }) {
         reminderTime: reminderTime.trim(),
         remindersEnabled: reminders,
       });
-      await saveAlarmPrefs({ enabled: alarmEnabled, soundId: alarmSoundId, volume: alarmVolume });
       await refreshUser();
-      Alert.alert("Saved", "Your settings have been updated.");
+      Alert.alert("Saved", "Your profile and study preferences were updated.");
     } catch (e) {
       Alert.alert("Error", e.message);
     } finally {
       setSaving(false);
     }
   };
+
+  const discardChanges = useCallback(() => {
+    setName(savedProfile.name);
+    setStudentId(savedProfile.studentId);
+    setCourse(savedProfile.course);
+    setYearLevel(savedProfile.yearLevel);
+    setSection(savedProfile.section);
+    setProfilePicture(savedProfile.profilePicture);
+    setDailyGoal(savedProfile.dailyGoal);
+    setFocusMinutes(savedProfile.focusMinutes);
+    setShortBreak(savedProfile.shortBreak);
+    setLongBreak(savedProfile.longBreak);
+    setSessionsBeforeLong(savedProfile.sessionsBeforeLong);
+    setReminderTime(savedProfile.reminderTime);
+    setReminders(savedProfile.reminders);
+  }, [savedProfile]);
 
   const changePassword = async () => {
     if (newPassword.length < 8) {
@@ -193,7 +299,7 @@ export default function SettingsScreen({ navigation }) {
     try {
       await client.patch("/auth/me/password", { newPassword });
       await refreshUser();
-      Alert.alert("Password changed", "Your password was updated successfully.");
+      Alert.alert("Password updated", "Your password was changed successfully.");
       setNewPassword("");
       setConfirmPassword("");
       setChangeOpen(false);
@@ -206,37 +312,43 @@ export default function SettingsScreen({ navigation }) {
 
   const confirmLogout = () => {
     if (Platform.OS === "web") {
-      const confirmed = typeof window !== "undefined" && window.confirm
-        ? window.confirm("Log out of FocusFlow?")
-        : true;
+      const confirmed = typeof window !== "undefined" && window.confirm ? window.confirm("Log out of FocusFlow?") : true;
       if (confirmed) logout();
       return;
     }
-    Alert.alert("Log out?", "You’ll need to sign in again to access your study space.", [
+    Alert.alert("Log out?", "You'll need to sign in again to access your study space.", [
       { text: "Cancel", style: "cancel" },
       { text: "Log out", style: "destructive", onPress: logout },
     ]);
   };
 
+  const renderCardHeading = (icon, iconBg, iconColor, title, subtitle, instant = false) => (
+    <View style={styles.cardHeading}>
+      <View style={[styles.cardIcon, { backgroundColor: iconBg }]}>
+        <Ionicons name={icon} size={19} color={iconColor} />
+      </View>
+      <View style={styles.cardHeadingCopy}>
+        <View style={styles.cardTitleRow}>
+          <Text style={styles.cardTitle}>{title}</Text>
+          {instant ? <InstantBadge colors={colors} styles={styles} /> : null}
+        </View>
+        <Text style={styles.cardSubtitle}>{subtitle}</Text>
+      </View>
+    </View>
+  );
+
   return (
     <Screen>
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.page}>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={[styles.page, hasUnsavedChanges && styles.pageWithStickyBar]}
+      >
         <View style={styles.header}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.eyebrow}>PERSONALIZE FOCUSFLOW</Text>
-            <Text style={styles.headerTitle}>Settings</Text>
-            <Text style={styles.headerSubtitle}>Manage your profile, study routine, notifications, and account.</Text>
-          </View>
-          {!compact && (
-            <Pressable
-              onPress={save}
-              disabled={saving}
-              style={({ pressed }) => [styles.headerSaveBtn, (pressed || saving) && styles.pressed]}
-            >
-              <Ionicons name="checkmark" size={18} color="#fff" />
-              <Text style={styles.headerSaveText}>{saving ? "Saving…" : "Save"}</Text>
-            </Pressable>
-          )}
+          <Text style={styles.eyebrow}>ACCOUNT</Text>
+          <Text style={styles.headerTitle}>Settings</Text>
+          <Text style={styles.headerSubtitle}>
+            Profile and study preferences save together. Theme, push, and alarm settings apply instantly.
+          </Text>
         </View>
 
         <Card style={styles.accountHero}>
@@ -278,11 +390,7 @@ export default function SettingsScreen({ navigation }) {
 
         <Pressable
           onPress={() => navigation.navigate("Study", { screen: "Premium" })}
-          style={({ pressed }) => [
-            styles.subscriptionRow,
-            isPremium && styles.subscriptionActive,
-            pressed && styles.pressed,
-          ]}
+          style={({ pressed }) => [styles.subscriptionRow, isPremium && styles.subscriptionActive, pressed && styles.pressed]}
         >
           <View style={styles.subscriptionIcon}>
             <Ionicons name={isPremium ? "star" : "sparkles"} size={22} color={isPremium ? colors.mint : GOLD} />
@@ -308,15 +416,13 @@ export default function SettingsScreen({ navigation }) {
         <View style={styles.settingsGrid}>
           <View style={styles.settingsColumn}>
             <Card style={styles.settingsCard}>
-              <View style={styles.cardHeading}>
-                <View style={[styles.cardIcon, { backgroundColor: colors.violetSoft }]}>
-                  <Ionicons name="person-outline" size={19} color={colors.violet} />
-                </View>
-                <View style={styles.cardHeadingCopy}>
-                  <Text style={styles.cardTitle}>Student profile</Text>
-                  <Text style={styles.cardSubtitle}>Keep your academic details up to date.</Text>
-                </View>
-              </View>
+              {renderCardHeading(
+                "person-outline",
+                colors.violetSoft,
+                colors.violet,
+                "Profile",
+                "Your name and academic details."
+              )}
               <View style={styles.formRow}>
                 <Input label="Full name" value={name} onChangeText={setName} placeholder="Your full name" />
                 <Input label="Student ID" value={studentId} onChangeText={setStudentId} placeholder="Student ID" autoCapitalize="characters" />
@@ -326,19 +432,17 @@ export default function SettingsScreen({ navigation }) {
                 <Input label="Year level" value={yearLevel} onChangeText={setYearLevel} placeholder="e.g. 2nd Year" />
                 <Input label="Section" value={section} onChangeText={setSection} placeholder="Optional" />
               </View>
-              <Input label="Daily study goal (minutes)" value={dailyGoal} onChangeText={setDailyGoal} placeholder="120" keyboardType="number-pad" />
             </Card>
 
             <Card style={styles.settingsCard}>
-              <View style={styles.cardHeading}>
-                <View style={[styles.cardIcon, { backgroundColor: colors.amberSoft }]}>
-                  <Ionicons name="timer-outline" size={19} color={colors.amber} />
-                </View>
-                <View style={styles.cardHeadingCopy}>
-                  <Text style={styles.cardTitle}>Focus routine</Text>
-                  <Text style={styles.cardSubtitle}>Fine-tune your Pomodoro timing.</Text>
-                </View>
-              </View>
+              {renderCardHeading(
+                "timer-outline",
+                colors.amberSoft,
+                colors.amber,
+                "Study setup",
+                "Daily goal and Pomodoro timer defaults."
+              )}
+              <Input label="Daily study goal (minutes)" value={dailyGoal} onChangeText={setDailyGoal} placeholder="120" keyboardType="number-pad" />
               <Pressable
                 style={({ pressed }) => [styles.dropdownHeader, pressed && styles.pressed]}
                 onPress={() => setPomodoroExpanded((value) => !value)}
@@ -346,7 +450,7 @@ export default function SettingsScreen({ navigation }) {
                 accessibilityState={{ expanded: pomodoroExpanded }}
               >
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.dropdownTitle}>Timer schedule</Text>
+                  <Text style={styles.dropdownTitle}>Pomodoro schedule</Text>
                   <Text style={styles.dropdownSummary}>{`${focusMinutes}m focus · ${shortBreak}m short · ${longBreak}m long`}</Text>
                 </View>
                 <View style={styles.dropdownChevron}>
@@ -368,15 +472,33 @@ export default function SettingsScreen({ navigation }) {
             </Card>
 
             <Card style={styles.settingsCard}>
-              <View style={styles.cardHeading}>
-                <View style={[styles.cardIcon, { backgroundColor: colors.tomatoSoft }]}>
-                  <Ionicons name="shield-checkmark-outline" size={19} color={colors.tomato} />
+              {renderCardHeading(
+                "calendar-outline",
+                colors.mintSoft,
+                colors.mint,
+                "Study reminders",
+                "Saved with your profile when you tap Save changes."
+              )}
+              <View style={styles.preferenceRow}>
+                <View style={styles.preferenceCopy}>
+                  <Text style={styles.preferenceTitle}>Daily reminder</Text>
+                  <Text style={styles.preferenceSubtitle}>Get a nudge at your chosen time.</Text>
                 </View>
-                <View style={styles.cardHeadingCopy}>
-                  <Text style={styles.cardTitle}>Security</Text>
-                  <Text style={styles.cardSubtitle}>Protect access to your account.</Text>
-                </View>
+                <Switch value={reminders} onValueChange={setReminders} trackColor={{ false: colors.border, true: colors.tomato }} />
               </View>
+              {reminders && (
+                <Input label="Reminder time (24-hour)" value={reminderTime} onChangeText={setReminderTime} placeholder="18:00" />
+              )}
+            </Card>
+
+            <Card style={styles.settingsCard}>
+              {renderCardHeading(
+                "shield-checkmark-outline",
+                colors.tomatoSoft,
+                colors.tomato,
+                "Security",
+                "Password changes are separate from profile settings."
+              )}
               {!changeOpen ? (
                 <Pressable onPress={() => setChangeOpen(true)} style={({ pressed }) => [styles.actionRow, pressed && styles.pressed]}>
                   <View style={styles.actionIcon}><Ionicons name="key-outline" size={18} color={colors.violet} /></View>
@@ -391,7 +513,7 @@ export default function SettingsScreen({ navigation }) {
                   <Input label="New password" value={newPassword} onChangeText={setNewPassword} placeholder="At least 8 characters" secureTextEntry />
                   <Input label="Confirm password" value={confirmPassword} onChangeText={setConfirmPassword} placeholder="Repeat new password" secureTextEntry />
                   <View style={styles.passwordActions}>
-                    <Button title="Save password" onPress={changePassword} loading={changing} style={styles.passwordSaveBtn} />
+                    <Button title="Update password" onPress={changePassword} loading={changing} style={styles.passwordSaveBtn} />
                     <Button
                       title="Cancel"
                       onPress={() => { setChangeOpen(false); setNewPassword(""); setConfirmPassword(""); }}
@@ -406,15 +528,14 @@ export default function SettingsScreen({ navigation }) {
 
           <View style={styles.settingsColumn}>
             <Card style={styles.settingsCard}>
-              <View style={styles.cardHeading}>
-                <View style={[styles.cardIcon, { backgroundColor: colors.violetSoft }]}>
-                  <Ionicons name="color-palette-outline" size={19} color={colors.violet} />
-                </View>
-                <View style={styles.cardHeadingCopy}>
-                  <Text style={styles.cardTitle}>Appearance</Text>
-                  <Text style={styles.cardSubtitle}>Choose how FocusFlow looks.</Text>
-                </View>
-              </View>
+              {renderCardHeading(
+                "color-palette-outline",
+                colors.violetSoft,
+                colors.violet,
+                "Appearance",
+                "Theme updates apply right away.",
+                true
+              )}
               <View style={styles.themeRow}>
                 {THEME_OPTIONS.map((option) => {
                   const selected = scheme === option.key;
@@ -437,26 +558,14 @@ export default function SettingsScreen({ navigation }) {
             </Card>
 
             <Card style={styles.settingsCard}>
-              <View style={styles.cardHeading}>
-                <View style={[styles.cardIcon, { backgroundColor: colors.mintSoft }]}>
-                  <Ionicons name="notifications-outline" size={19} color={colors.mint} />
-                </View>
-                <View style={styles.cardHeadingCopy}>
-                  <Text style={styles.cardTitle}>Reminders</Text>
-                  <Text style={styles.cardSubtitle}>Stay consistent without distractions.</Text>
-                </View>
-              </View>
-              <View style={styles.preferenceRow}>
-                <View style={styles.preferenceCopy}>
-                  <Text style={styles.preferenceTitle}>Daily reminder</Text>
-                  <Text style={styles.preferenceSubtitle}>A gentle prompt at your chosen time.</Text>
-                </View>
-                <Switch value={reminders} onValueChange={setReminders} trackColor={{ false: colors.border, true: colors.tomato }} />
-              </View>
-              {reminders && (
-                <Input label="Reminder time (24-hour)" value={reminderTime} onChangeText={setReminderTime} placeholder="18:00" />
+              {renderCardHeading(
+                "notifications-outline",
+                colors.mintSoft,
+                colors.mint,
+                "Push notifications",
+                "Device permission and delivery settings.",
+                true
               )}
-              <View style={styles.preferenceDivider} />
               <View style={styles.preferenceRow}>
                 <View style={styles.preferenceCopy}>
                   <Text style={styles.preferenceTitle}>Push notifications</Text>
@@ -472,7 +581,7 @@ export default function SettingsScreen({ navigation }) {
               <Text style={styles.hint}>
                 {isExpoGo
                   ? "Push notifications require a custom development build."
-                  : "You can disable device reminders at any time."}
+                  : "Turning this on or off takes effect immediately."}
               </Text>
               {!isExpoGo && pushEnabled && (
                 <Button title="Send test notification" onPress={handleTestPush} loading={pushBusy} variant="secondary" style={{ marginTop: 12 }} />
@@ -480,15 +589,14 @@ export default function SettingsScreen({ navigation }) {
             </Card>
 
             <Card style={styles.settingsCard}>
-              <View style={styles.cardHeading}>
-                <View style={[styles.cardIcon, { backgroundColor: colors.tomatoSoft }]}>
-                  <Ionicons name="musical-notes-outline" size={19} color={colors.tomato} />
-                </View>
-                <View style={styles.cardHeadingCopy}>
-                  <Text style={styles.cardTitle}>Focus alarm</Text>
-                  <Text style={styles.cardSubtitle}>Choose what plays when a session ends.</Text>
-                </View>
-              </View>
+              {renderCardHeading(
+                "musical-notes-outline",
+                colors.tomatoSoft,
+                colors.tomato,
+                "Focus alarm",
+                "Sound and volume save automatically.",
+                true
+              )}
               <View style={styles.preferenceRow}>
                 <View style={styles.preferenceCopy}>
                   <Text style={styles.preferenceTitle}>Play completion alarm</Text>
@@ -538,15 +646,28 @@ export default function SettingsScreen({ navigation }) {
             </Card>
           </View>
         </View>
-
-        <View style={styles.saveFooter}>
-          <View style={styles.saveFooterCopy}>
-            <Ionicons name="information-circle-outline" size={17} color={colors.textMuted} />
-            <Text style={styles.saveFooterText}>Remember to save after changing your profile or study routine.</Text>
-          </View>
-          <Button title={saving ? "Saving…" : "Save all changes"} onPress={save} loading={saving} style={styles.saveBtn} />
-        </View>
       </ScrollView>
+
+      {hasUnsavedChanges && (
+        <View style={[styles.stickyBar, { backgroundColor: colors.surface, borderTopColor: colors.border }]}>
+          <View style={styles.stickyCopy}>
+            <View style={[styles.unsavedDot, { backgroundColor: colors.amber }]} />
+            <Text style={styles.stickyText}>Unsaved profile & study changes</Text>
+          </View>
+          <View style={styles.stickyActions}>
+            <Pressable onPress={discardChanges} disabled={saving} style={({ pressed }) => [styles.discardBtn, pressed && styles.pressed]}>
+              <Text style={styles.discardText}>Discard</Text>
+            </Pressable>
+            <Pressable
+              onPress={saveProfile}
+              disabled={saving}
+              style={({ pressed }) => [styles.saveChangesBtn, { backgroundColor: colors.tomato }, (pressed || saving) && styles.pressed]}
+            >
+              <Text style={styles.saveChangesText}>{saving ? "Saving…" : "Save changes"}</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
     </Screen>
   );
 }
@@ -558,10 +679,13 @@ const createStyles = (colors, isWide, compact) =>
       maxWidth: 1120,
       alignSelf: "center",
       paddingTop: SPACING.md,
-      paddingBottom: 110,
+      paddingBottom: 40,
+    },
+    pageWithStickyBar: {
+      paddingBottom: 96,
     },
     pressed: { opacity: 0.72, transform: [{ scale: 0.985 }] },
-    header: { flexDirection: "row", alignItems: "flex-start", gap: 12, marginBottom: SPACING.lg },
+    header: { marginBottom: SPACING.lg },
     eyebrow: { color: colors.violet, fontSize: 8, fontWeight: "900", letterSpacing: 1, marginBottom: 3 },
     headerTitle: {
       color: colors.text,
@@ -570,19 +694,7 @@ const createStyles = (colors, isWide, compact) =>
       fontWeight: "900",
       letterSpacing: -0.7,
     },
-    headerSubtitle: { color: colors.textMuted, fontSize: 12.5, lineHeight: 18, marginTop: 4, maxWidth: 590 },
-    headerSaveBtn: {
-      height: 43,
-      minWidth: 102,
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "center",
-      gap: 6,
-      backgroundColor: colors.tomato,
-      borderRadius: RADIUS.md,
-      paddingHorizontal: 15,
-    },
-    headerSaveText: { color: "#fff", fontSize: 12.5, fontWeight: "900" },
+    headerSubtitle: { color: colors.textMuted, fontSize: 12.5, lineHeight: 18, marginTop: 4, maxWidth: 620 },
     accountHero: {
       flexDirection: "row",
       alignItems: "center",
@@ -683,8 +795,18 @@ const createStyles = (colors, isWide, compact) =>
     cardHeading: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 15 },
     cardIcon: { width: 39, height: 39, borderRadius: 12, alignItems: "center", justifyContent: "center", flexShrink: 0 },
     cardHeadingCopy: { flex: 1, minWidth: 0 },
+    cardTitleRow: { flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" },
     cardTitle: { color: colors.text, fontSize: 14.5, fontWeight: "900" },
     cardSubtitle: { color: colors.textMuted, fontSize: 10.5, lineHeight: 15, marginTop: 2 },
+    instantBadge: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 3,
+      borderRadius: RADIUS.pill,
+      paddingHorizontal: 7,
+      paddingVertical: 3,
+    },
+    instantBadgeText: { fontSize: 8.5, fontWeight: "900", letterSpacing: 0.3 },
     formRow: { flexDirection: compact ? "column" : "row", gap: compact ? 0 : 9, alignItems: "flex-start" },
     dropdownHeader: {
       flexDirection: "row",
@@ -695,6 +817,7 @@ const createStyles = (colors, isWide, compact) =>
       borderWidth: 1,
       borderColor: colors.border,
       backgroundColor: colors.bg,
+      marginTop: 4,
     },
     dropdownTitle: { color: colors.text, fontSize: 12.5, fontWeight: "800" },
     dropdownSummary: { color: colors.textMuted, fontSize: 10.5, marginTop: 3 },
@@ -737,7 +860,6 @@ const createStyles = (colors, isWide, compact) =>
     preferenceCopy: { flex: 1, minWidth: 0 },
     preferenceTitle: { color: colors.text, fontSize: 12.5, fontWeight: "800" },
     preferenceSubtitle: { color: colors.textMuted, fontSize: 10.5, lineHeight: 15, marginTop: 2 },
-    preferenceDivider: { height: 1, backgroundColor: colors.border, marginVertical: 11 },
     hint: { color: colors.textMuted, fontSize: 10.5, lineHeight: 16, marginTop: 7 },
     subLabel: { color: colors.textMuted, fontSize: 9, fontWeight: "900", letterSpacing: 0.7, marginTop: 15, marginBottom: 8 },
     soundRow: { flexDirection: "row", flexWrap: "wrap", gap: 7 },
@@ -775,18 +897,42 @@ const createStyles = (colors, isWide, compact) =>
     },
     volumeFill: { height: "100%", borderRadius: 4, backgroundColor: colors.tomato },
     volumePct: { color: colors.textMuted, fontSize: 12, fontWeight: "700", width: 40, textAlign: "right" },
-    saveFooter: {
-      flexDirection: isWide ? "row" : "column",
-      alignItems: isWide ? "center" : "stretch",
-      gap: 12,
-      backgroundColor: colors.surface,
+    stickyBar: {
+      position: "absolute",
+      left: 0,
+      right: 0,
+      bottom: 0,
+      borderTopWidth: 1,
+      paddingHorizontal: SPACING.md,
+      paddingTop: 12,
+      paddingBottom: Platform.OS === "ios" ? 28 : 16,
+      flexDirection: compact ? "column" : "row",
+      alignItems: compact ? "stretch" : "center",
+      gap: 10,
+    },
+    stickyCopy: { flex: 1, flexDirection: "row", alignItems: "center", gap: 8 },
+    unsavedDot: { width: 8, height: 8, borderRadius: 4 },
+    stickyText: { color: colors.text, fontSize: 12.5, fontWeight: "800" },
+    stickyActions: { flexDirection: "row", alignItems: "center", gap: 8, justifyContent: compact ? "stretch" : "flex-end" },
+    discardBtn: {
+      minHeight: 42,
+      paddingHorizontal: 14,
+      borderRadius: RADIUS.md,
       borderWidth: 1,
       borderColor: colors.border,
-      borderRadius: RADIUS.lg,
-      padding: 14,
-      marginTop: 12,
+      alignItems: "center",
+      justifyContent: "center",
+      flex: compact ? 1 : undefined,
     },
-    saveFooterCopy: { flex: 1, flexDirection: "row", alignItems: "center", gap: 7 },
-    saveFooterText: { flex: 1, color: colors.textMuted, fontSize: 10.5, lineHeight: 15 },
-    saveBtn: { minWidth: isWide ? 180 : undefined, paddingHorizontal: 20 },
+    discardText: { color: colors.textMuted, fontSize: 12.5, fontWeight: "800" },
+    saveChangesBtn: {
+      minHeight: 42,
+      minWidth: compact ? undefined : 132,
+      paddingHorizontal: 18,
+      borderRadius: RADIUS.md,
+      alignItems: "center",
+      justifyContent: "center",
+      flex: compact ? 1 : undefined,
+    },
+    saveChangesText: { color: "#fff", fontSize: 12.5, fontWeight: "900" },
   });

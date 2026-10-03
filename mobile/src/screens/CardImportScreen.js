@@ -6,6 +6,7 @@ import { Screen, Card } from "../components/Screen";
 import { Input, Button } from "../components/Inputs";
 import { useTheme } from "../context/ThemeContext";
 import client from "../api/client";
+import { handleLimitError } from "../lib/upgradePrompt";
 
 const SOURCES = [
   { key: "topic", emoji: "💡", label: "Type a topic" },
@@ -127,7 +128,9 @@ if (source === "notes" && !notes.trim()) {
       }
       setGeneratedCards(cards);
     } catch (e) {
-      Alert.alert("Import failed", e.message);
+      if (!handleLimitError(navigation, e)) {
+        Alert.alert("Import failed", e.message);
+      }
     } finally {
       setGenerating(false);
     }

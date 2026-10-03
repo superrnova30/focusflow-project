@@ -1,7 +1,10 @@
 import React, { useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, Alert } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { Screen, Card } from "../components/Screen";
+import ConfirmDialog from "../components/ConfirmDialog";
 import { useTheme } from "../context/ThemeContext";
+import client from "../api/client";
 
 export default function MaterialDetailScreen({ route, navigation }) {
   const { colors } = useTheme();
@@ -9,6 +12,8 @@ export default function MaterialDetailScreen({ route, navigation }) {
   const { material } = route.params;
   const [cardIndex, setCardIndex] = useState(0);
   const [flipped, setFlipped] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   const flashcards = material.flashcards || [];
   const current = flashcards[cardIndex];
@@ -20,10 +25,32 @@ export default function MaterialDetailScreen({ route, navigation }) {
     setCardIndex((i) => (i + 1) % flashcards.length);
   };
 
+  const confirmDelete = async () => {
+    setDeleteBusy(true);
+    try {
+      await client.delete(`/materials/${material.id}`);
+      setDeleting(false);
+      navigation.goBack();
+    } catch (e) {
+      Alert.alert("Error", e.message || "Could not delete study pack.");
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
   return (
     <Screen>
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingTop: 16, paddingBottom: 40 }}>
-        <Text style={styles.header}>{material.title}</Text>
+        <View style={styles.titleRow}>
+          <Text style={[styles.header, { flex: 1 }]}>{material.title}</Text>
+          <Pressable
+            onPress={() => setDeleting(true)}
+            hitSlop={8}
+            style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.7 }]}
+          >
+            <Ionicons name="trash-outline" size={20} color={colors.tomato} />
+          </Pressable>
+        </View>
 
 {material.aiSummary ? (
           <Card style={{ marginBottom: 14 }}>
@@ -119,13 +146,33 @@ export default function MaterialDetailScreen({ route, navigation }) {
           </>
         )}
       </ScrollView>
+
+      <ConfirmDialog
+        visible={deleting}
+        title="Delete study pack?"
+        message="This removes the flashcards, quizzes, and any uploaded source file. This cannot be undone."
+        confirmText="Delete"
+        destructive
+        loading={deleteBusy}
+        onConfirm={confirmDelete}
+        onCancel={() => !deleteBusy && setDeleting(false)}
+      />
     </Screen>
   );
 }
 
 const useStyles = (colors) =>
   StyleSheet.create({
-    header: { color: colors.text, fontSize: 20, fontWeight: "700", marginBottom: 14 },
+    titleRow: { flexDirection: "row", alignItems: "flex-start", gap: 10, marginBottom: 14 },
+    header: { color: colors.text, fontSize: 20, fontWeight: "700" },
+    deleteBtn: {
+      width: 36,
+      height: 36,
+      borderRadius: 10,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: colors.tomatoSoft,
+    },
     sectionLabel: { color: colors.textMuted, fontSize: 12, fontWeight: "700", marginBottom: 8 },
     mutedText: { color: colors.textMuted, fontSize: 13 },
 summary: { color: colors.text, fontSize: 13.5, lineHeight: 20 },

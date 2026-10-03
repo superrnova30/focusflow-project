@@ -4,6 +4,7 @@ import {
   Text,
   StyleSheet,
   KeyboardAvoidingView,
+  Keyboard,
   Platform,
   ScrollView,
   Image,
@@ -12,6 +13,7 @@ import {
   Animated,
   Easing,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { Screen } from "../components/Screen";
 import { AuthField } from "../components/AuthField";
@@ -33,6 +35,8 @@ export default function SignupScreen({ navigation }) {
     [colors, isDark, wide, compact]
   );
   const { signup } = useAuth();
+  const insets = useSafeAreaInsets();
+  const [keyboardInset, setKeyboardInset] = useState(0);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -53,6 +57,19 @@ export default function SignupScreen({ navigation }) {
       useNativeDriver: true,
     }).start();
   }, [entrance]);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const onShow = (event) => setKeyboardInset(event.endCoordinates?.height ?? 0);
+    const onHide = () => setKeyboardInset(0);
+    const showSub = Keyboard.addListener(showEvent, onShow);
+    const hideSub = Keyboard.addListener(hideEvent, onHide);
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   const entranceY = entrance.interpolate({
     inputRange: [0, 1],
@@ -341,30 +358,30 @@ export default function SignupScreen({ navigation }) {
     </Shell>
   );
 
+  const scrollContentStyle = [
+    styles.scroll,
+    {
+      paddingBottom: Math.max(insets.bottom, SPACING.lg) + SPACING.xl + keyboardInset,
+    },
+  ];
+
   return (
     <Screen>
-      {IS_NATIVE ? (
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : IS_NATIVE ? "height" : "padding"}
+        style={styles.flex}
+      >
         <ScrollView
           style={styles.flex}
           showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scroll}
+          contentContainerStyle={scrollContentStyle}
           keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="none"
+          keyboardDismissMode="on-drag"
           nestedScrollEnabled={false}
         >
           {form}
         </ScrollView>
-      ) : (
-        <KeyboardAvoidingView behavior="padding" style={styles.flex}>
-          <ScrollView
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={styles.scroll}
-            keyboardShouldPersistTaps="always"
-          >
-            {form}
-          </ScrollView>
-        </KeyboardAvoidingView>
-      )}
+      </KeyboardAvoidingView>
     </Screen>
   );
 }
@@ -374,16 +391,16 @@ const createStyles = (colors, isDark, wide, compact) =>
     flex: { flex: 1 },
     scroll: {
       flexGrow: 1,
-      justifyContent: "flex-start",
+      alignItems: "center",
+      justifyContent: wide ? "center" : "flex-start",
       paddingTop: compact ? SPACING.md : SPACING.lg,
-      paddingBottom: 360,
     },
     shell: {
       width: "100%",
       maxWidth: wide ? 1040 : 500,
-      minHeight: wide ? 700 : undefined,
       alignSelf: "center",
       flexDirection: wide ? "row" : "column",
+      alignItems: wide ? "stretch" : "center",
       backgroundColor: colors.surface,
       borderWidth: 1,
       borderColor: colors.border,
@@ -401,8 +418,9 @@ const createStyles = (colors, isDark, wide, compact) =>
     },
 
     brandPanel: {
-      width: "45%",
-      padding: 44,
+      flex: wide ? 0.45 : undefined,
+      width: wide ? undefined : "100%",
+      padding: wide ? 44 : 0,
       justifyContent: "center",
       backgroundColor: colors.violetSoft,
       overflow: "hidden",
@@ -522,9 +540,10 @@ const createStyles = (colors, isDark, wide, compact) =>
 
     formPanel: {
       flex: wide ? 1 : undefined,
+      width: wide ? undefined : "100%",
       justifyContent: wide ? "center" : "flex-start",
-      paddingHorizontal: wide ? 46 : compact ? SPACING.lg : SPACING.xl,
-      paddingVertical: wide ? 34 : compact ? SPACING.lg : 24,
+      paddingHorizontal: wide ? 46 : compact ? SPACING.md : SPACING.lg,
+      paddingVertical: wide ? 34 : compact ? SPACING.lg : SPACING.xl,
     },
     formInner: { width: "100%", maxWidth: 430, alignSelf: "center" },
     mobileBrand: {

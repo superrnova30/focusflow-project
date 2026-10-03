@@ -2,6 +2,7 @@ const express = require("express");
 const { generateStudyPack, generateStudyNotes, generateFlashcards, generateQuiz } = require("../lib/ai");
 const router = express.Router();
 const { requireAuth } = require("../middleware/auth");
+const { enforcePromptLimit } = require("../lib/featureLimits");
 
 router.use(requireAuth);
 
@@ -10,6 +11,7 @@ router.use(requireAuth);
 router.post("/study", async (req, res) => {
   const { topic, notes, mode } = req.body || {};
   try {
+    if (!(await enforcePromptLimit(req, res))) return;
     if (mode === "notes") {
       const notesPack = await generateStudyNotes(topic || "", notes || "");
       return res.json({ pack: notesPack });

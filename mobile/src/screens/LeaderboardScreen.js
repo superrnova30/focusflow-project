@@ -77,15 +77,22 @@ export default function LeaderboardScreen({ navigation }) {
     return <Text style={styles.rankNumber}>{rank}</Text>;
   };
 
+  const openProfile = (item) => {
+    if (!item?.id) return;
+    navigation.navigate("StudentProfile", { userId: item.id, name: item.name });
+  };
+
   const renderItem = ({ item }) => {
     const isMe = item.isMe;
     return (
-      <View
+      <Pressable
+        onPress={() => openProfile(item)}
         accessible
         accessibilityLabel={`Rank ${item.rank}, ${item.name}, ${formatXp(item.xp)} XP, ${item.streakCount || 0} day streak${isMe ? ", you" : ""}`}
-        style={[
+        style={({ pressed }) => [
           styles.row,
           isMe && styles.myRow,
+          pressed && styles.pressed,
         ]}
       >
         <View style={styles.rankCell}>{renderRankIcon(item.rank)}</View>
@@ -108,7 +115,7 @@ export default function LeaderboardScreen({ navigation }) {
           <Text style={styles.xpText}>{formatXp(item.xp)}</Text>
           <Text style={styles.xpLabel}>XP</Text>
         </View>
-      </View>
+      </Pressable>
     );
   };
 

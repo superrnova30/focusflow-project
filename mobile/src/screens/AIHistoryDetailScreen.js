@@ -14,7 +14,9 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Screen } from '../components/Screen';
+import { AiAssistantAvatar, ChatParticipantAvatar } from '../components/ChatAvatars';
 import { useTheme } from '../context/ThemeContext';
+import { useAuth } from '../context/AuthContext';
 import { useAIHistory, relativeTime } from '../context/AIHistoryContext';
 
 const INTENT_STYLE = {
@@ -23,7 +25,7 @@ const INTENT_STYLE = {
   other: { label: 'Conversation', icon: 'sparkles' },
 };
 
-function MessageBubble({ message, colors, isWide, index }) {
+function MessageBubble({ message, colors, isWide, index, user }) {
   const isUser = message.role === 'user';
   const fade = useRef(new Animated.Value(0)).current;
   const rise = useRef(new Animated.Value(14)).current;
@@ -44,8 +46,8 @@ function MessageBubble({ message, colors, isWide, index }) {
       ]}
     >
       {!isUser && (
-        <View style={[styles.avatar, { backgroundColor: colors.violetSoft, borderColor: colors.border }]}>
-          <Ionicons name="sparkles" size={15} color={colors.violet} />
+        <View style={styles.avatarSlot}>
+          <AiAssistantAvatar size={32} />
         </View>
       )}
 
@@ -74,8 +76,8 @@ function MessageBubble({ message, colors, isWide, index }) {
       </View>
 
       {isUser && (
-        <View style={[styles.avatar, { backgroundColor: colors.surfaceRaised, borderColor: colors.border, marginRight: 0, marginLeft: 9 }]}>
-          <Ionicons name="person" size={14} color={colors.text} />
+        <View style={[styles.avatarSlot, styles.avatarSlotUser]}>
+          <ChatParticipantAvatar role="user" user={user} size={32} />
         </View>
       )}
     </Animated.View>
@@ -84,6 +86,7 @@ function MessageBubble({ message, colors, isWide, index }) {
 
 export default function AIHistoryDetailScreen({ navigation, route }) {
   const { colors } = useTheme();
+  const { user } = useAuth();
   const { width } = useWindowDimensions();
   const isWide = width >= 700;
   const s = useStyles(colors);
@@ -304,6 +307,7 @@ export default function AIHistoryDetailScreen({ navigation, route }) {
             colors={colors}
             isWide={isWide}
             index={index}
+            user={user}
           />
         ))}
 
@@ -324,14 +328,13 @@ const styles = StyleSheet.create({
   messageRow: { flexDirection: 'row', alignItems: 'flex-end', marginBottom: 14 },
   messageRowUser: { justifyContent: 'flex-end' },
   messageRowAssistant: { justifyContent: 'flex-start' },
-  avatar: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
+  avatarSlot: {
     marginRight: 9,
+    flexShrink: 0,
+  },
+  avatarSlotUser: {
+    marginRight: 0,
+    marginLeft: 9,
   },
   bubbleWrap: { flexShrink: 1 },
   bubble: { borderWidth: 1, borderRadius: 18, paddingHorizontal: 14, paddingVertical: 11 },

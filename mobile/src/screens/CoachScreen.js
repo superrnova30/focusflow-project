@@ -1,63 +1,98 @@
-import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Alert, useWindowDimensions } from "react-native";
+import React, { useEffect, useState, useMemo, useLayoutEffect, useCallback } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  Pressable,
+  ActivityIndicator,
+  useWindowDimensions,
+  RefreshControl,
+} from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Screen, Card } from "../components/Screen";
+import { Screen } from "../components/Screen";
 import { useTheme } from "../context/ThemeContext";
 import client from "../api/client";
+import { handleLimitError } from "../lib/upgradePrompt";
+import { RADIUS, SPACING } from "../theme/theme";
+
+function BulletList({ items, colors, styles }) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return <Text style={styles.emptySection}>No items yet.</Text>;
+  }
+  return items.map((item, i) => (
+    <View key={`${item}-${i}`} style={styles.bulletRow}>
+      <View style={[styles.bulletDot, { backgroundColor: colors.violet }]} />
+      <Text style={styles.bodyText}>{item}</Text>
+    </View>
+  ));
+}
+
+function InsightSection({ icon, title, accentColor, accentSoft, colors, styles, children, wide }) {
+  return (
+    <View style={[styles.sectionCard, wide && styles.sectionCardWide, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+      <View style={styles.sectionHeader}>
+        <View style={[styles.sectionIcon, { backgroundColor: accentSoft }]}>
+          <Ionicons name={icon} size={18} color={accentColor} />
+        </View>
+        <Text style={styles.sectionTitle}>{title}</Text>
+      </View>
+      {children}
+    </View>
+  );
+}
+
+function StatTile({ label, value, suffix, icon, color, soft, colors, styles }) {
+  return (
+    <View style={[styles.statCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+      <View style={[styles.statIcon, { backgroundColor: soft }]}>
+        <Ionicons name={icon} size={16} color={color} />
+      </View>
+      <Text style={[styles.statValue, { color }]}>
+        {value}
+        {suffix ? <Text style={styles.statSuffix}>{suffix}</Text> : null}
+      </Text>
+      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  );
+}
 
 export default function CoachScreen({ navigation }) {
   const { colors } = useTheme();
-  const styles = useStyles(colors);
   const { width } = useWindowDimensions();
-  const isWide = width >= 700;
+  const isWide = width >= 768;
+  const compact = width < 390;
+  const styles = useMemo(() => createStyles(colors, isWide, compact), [colors, isWide, compact]);
+
   const [insight, setInsight] = useState(null);
+  const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [statsLoading, setStatsLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [savingNote, setSavingNote] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Turn the generated insight into a study note the student can keep/review.
-  const saveInsightToNotes = async () => {
-    if (!insight || savingNote) return;
-    setSavingNote(true);
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerShown: true,
+      title: "Study Coach",
+      headerTitleStyle: { fontWeight: "800", fontSize: 17 },
+      headerBackTitle: "Back",
+      headerTintColor: colors.text,
+      headerStyle: { backgroundColor: colors.bg },
+    });
+  }, [navigation, colors.text, colors.bg]);
+
+  const loadStats = useCallback(async () => {
     try {
-      const blocks = [];
-      const push = (level, text) => blocks.push({ type: "heading", level, text });
-      const para = (text) => text && blocks.push({ type: "text", text: String(text), marks: [] });
-      const bulletList = (label, arr) => {
-        if (!Array.isArray(arr) || !arr.length) return;
-        push(2, label);
-        arr.forEach((item) => blocks.push({ type: "bullet", text: String(item) }));
-      };
-
-      push(2, "Coach Summary");
-      para(insight.summary);
-      bulletList("Strengths", insight.strengths);
-      bulletList("Areas to Improve", insight.improvementAreas);
-      if (insight.focusTrend) { push(2, "Focus Trend"); para(insight.focusTrend); }
-      bulletList("Recommendations", insight.recommendations);
-      bulletList("Study Tips", insight.studyTips);
-      if (insight.bestStudyTime) { push(2, "Best Study Time"); para(insight.bestStudyTime); }
-      bulletList("Subject Focus", insight.subjectFocus);
-      if (insight.weeklySummary) { push(2, "Weekly Summary"); para(insight.weeklySummary); }
-
-      const { data } = await client.post("/notes", {
-        title: `AI Coach Insight — ${new Date().toLocaleDateString()}`,
-        contentJson: blocks,
-        source: "ai",
-        aiSummary: insight.summary || "",
-      });
-      Alert.alert("Saved to Notes", "Your coach insight was saved as a note.", [
-        { text: "View Notes", onPress: () => navigation.navigate("Notes") },
-        { text: "OK", style: "cancel" },
-      ]);
-      return data;
+      const { data } = await client.get("/sessions/stats");
+      setStats(data);
     } catch (e) {
-      Alert.alert("Error", e.message || "Could not save the insight to notes.");
+      // Stats preview is optional — coach can still run without it.
     } finally {
-      setSavingNote(false);
+      setStatsLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     const loadCachedInsight = async () => {
@@ -69,26 +104,30 @@ export default function CoachScreen({ navigation }) {
       }
     };
     loadCachedInsight();
-  }, []);
+    loadStats();
+  }, [loadStats]);
 
   const getInsight = async () => {
     setLoading(true);
     setError(null);
     try {
-const { data: stats } = await client.get("/sessions/stats");
-      // Give the LLM-backed coach call a long timeout — generating a
-      // personalized analysis can take a while.
+      let statsPayload = stats;
+      if (!statsPayload) {
+        const { data } = await client.get("/sessions/stats");
+        statsPayload = data;
+        setStats(data);
+      }
       const { data } = await client.post(
         "/materials/coach",
         {
-          todayMinutes: stats.todayMinutes,
-          last7Days: stats.last7Days,
-          totalFocusSessions: stats.totalFocusSessions,
-          totalStudyMinutes: stats.totalStudyMinutes,
-          subjectTotals: stats.subjectTotals,
-          totalTasks: stats.totalTasks,
-          completedTasks: stats.completedTasks,
-          completionRate: stats.completionRate,
+          todayMinutes: statsPayload.todayMinutes,
+          last7Days: statsPayload.last7Days,
+          totalFocusSessions: statsPayload.totalFocusSessions,
+          totalStudyMinutes: statsPayload.totalStudyMinutes,
+          subjectTotals: statsPayload.subjectTotals,
+          totalTasks: statsPayload.totalTasks,
+          completedTasks: statsPayload.completedTasks,
+          completionRate: statsPayload.completionRate,
         },
         { timeout: 120000 }
       );
@@ -96,150 +135,539 @@ const { data: stats } = await client.get("/sessions/stats");
       setInsight(nextInsight);
       await AsyncStorage.setItem("focusflow_coach_insight", JSON.stringify(nextInsight));
     } catch (e) {
-      setError(e.message);
+      if (handleLimitError(navigation, e)) return;
+      setError(e?.response?.data?.error || e.message || "Could not generate your coach insight.");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await loadStats();
+    if (insight) {
+      await getInsight();
+    } else {
+      setRefreshing(false);
+    }
+  };
+
+  const todayMinutes = stats?.todayMinutes ?? 0;
+  const completionRate = stats?.completionRate ?? 0;
+  const streak = stats?.streak ?? 0;
+  const weekMinutes = Array.isArray(stats?.last7Days)
+    ? stats.last7Days.reduce((sum, d) => sum + (d.minutes || 0), 0)
+    : 0;
 
   return (
     <Screen>
       <ScrollView
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{
-          paddingTop: 16,
-          paddingBottom: 40,
-          maxWidth: isWide ? 760 : undefined,
-          width: "100%",
-          alignSelf: "center",
-        }}
+        contentContainerStyle={styles.scroll}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.violet} colors={[colors.violet]} />
+        }
       >
-        <Text style={styles.header}>AI Study Coach</Text>
-        <Text style={styles.subtitle}>Get personalized feedback on your recent study habits and weekly progress.</Text>
-
-        {!insight && !error && !loading && (
-          <Card style={{ alignItems: "center", paddingVertical: 24 }}>
-            <View style={[styles.emptyIcon, { backgroundColor: colors.violetSoft }]}>
-              <Ionicons name="sparkles" size={26} color={colors.violet} />
+        <View style={styles.page}>
+          <View style={styles.hero}>
+            <View style={[styles.heroIcon, { backgroundColor: colors.violetSoft }]}>
+              <Ionicons name="fitness-outline" size={26} color={colors.violet} />
             </View>
-            <Text style={[styles.emptyTitle, { color: colors.text }]}>Your personal study coach</Text>
-            <Text style={[styles.muted, { textAlign: "center", marginTop: 6 }]}>Tap the button below and your coach will analyze your focus sessions, tasks, and study trends.</Text>
-          </Card>
-        )}
+            <Text style={styles.title}>AI Study Coach</Text>
+            <Text style={styles.subtitle}>
+              Personalized feedback on your focus sessions, tasks, and weekly study trends.
+            </Text>
+          </View>
 
-        {loading && (
-          <Card style={{ alignItems: "center", paddingVertical: 24 }}>
-            <ActivityIndicator color={colors.violet} />
-            <Text style={[styles.muted, { marginTop: 12 }]}>Analyzing your study habits…</Text>
-          </Card>
-        )}
+          <View style={[styles.statsRow, isWide && styles.statsRowWide]}>
+            <StatTile
+              label="Today"
+              value={todayMinutes}
+              suffix="m"
+              icon="today-outline"
+              color={colors.violet}
+              soft={colors.violetSoft}
+              colors={colors}
+              styles={styles}
+            />
+            <StatTile
+              label="This week"
+              value={weekMinutes}
+              suffix="m"
+              icon="calendar-outline"
+              color={colors.mint}
+              soft={colors.mintSoft}
+              colors={colors}
+              styles={styles}
+            />
+            <StatTile
+              label="Task rate"
+              value={completionRate}
+              suffix="%"
+              icon="checkmark-done-outline"
+              color={colors.amber}
+              soft={colors.amberSoft}
+              colors={colors}
+              styles={styles}
+            />
+            <StatTile
+              label="Streak"
+              value={streak}
+              suffix="d"
+              icon="flame-outline"
+              color={colors.tomato}
+              soft={colors.tomatoSoft}
+              colors={colors}
+              styles={styles}
+            />
+          </View>
 
-        {error ? (
-          <Card style={{ borderColor: colors.tomato, marginBottom: 12 }}>
-            <Text style={[styles.error, { marginBottom: 0 }]}>{error}</Text>
-          </Card>
-        ) : null}
+          {statsLoading && !stats && (
+            <View style={styles.statsLoading}>
+              <ActivityIndicator color={colors.textMuted} size="small" />
+              <Text style={styles.statsLoadingText}>Loading your activity…</Text>
+            </View>
+          )}
 
-        {insight && (
-          <>
-            <Card style={{ marginBottom: 12 }}>
-              <Text style={styles.sectionLabel}>SUMMARY</Text>
-              <Text style={styles.body}>{insight.summary}</Text>
-            </Card>
-            <Card style={{ marginBottom: 12 }}>
-              <Text style={styles.sectionLabel}>STRENGTHS</Text>
-              {Array.isArray(insight.strengths) && insight.strengths.map((item, i) => <Text key={`strength-${i}`} style={styles.body}>• {item}</Text>)}
-            </Card>
-            <Card style={{ marginBottom: 12 }}>
-              <Text style={styles.sectionLabel}>AREAS TO IMPROVE</Text>
-              {Array.isArray(insight.improvementAreas) && insight.improvementAreas.map((item, i) => <Text key={`improve-${i}`} style={styles.body}>• {item}</Text>)}
-            </Card>
-            <Card style={{ marginBottom: 12 }}>
-              <Text style={styles.sectionLabel}>FOCUS TREND</Text>
-              <Text style={styles.body}>{insight.focusTrend}</Text>
-            </Card>
-            <Card style={{ marginBottom: 12 }}>
-              <Text style={styles.sectionLabel}>SUBJECT FOCUS</Text>
-              {Array.isArray(insight.subjectFocus) && insight.subjectFocus.map((item, i) => <Text key={`subject-${i}`} style={styles.body}>• {item}</Text>)}
-            </Card>
-            <Card style={{ marginBottom: 12 }}>
-              <Text style={styles.sectionLabel}>WEEKLY SUMMARY</Text>
-              <Text style={styles.body}>{insight.weeklySummary}</Text>
-            </Card>
-            <Card style={{ marginBottom: 12 }}>
-              <Text style={styles.sectionLabel}>BEST STUDY TIME</Text>
-              <Text style={styles.body}>{insight.bestStudyTime}</Text>
-            </Card>
-            <Card style={{ marginBottom: 12 }}>
-              <Text style={styles.sectionLabel}>RECOMMENDATIONS</Text>
-              {Array.isArray(insight.recommendations) && insight.recommendations.map((r, i) => <Text key={`rec-${i}`} style={styles.body}>• {r}</Text>)}
-            </Card>
-            <Card style={{ marginBottom: 12 }}>
-              <Text style={styles.sectionLabel}>STUDY TIPS</Text>
-              {Array.isArray(insight.studyTips) && insight.studyTips.map((tip, i) => <Text key={`tip-${i}`} style={styles.body}>• {tip}</Text>)}
-            </Card>
-            {insight.motivation && (
-              <Card style={{ backgroundColor: colors.mintSoft, borderColor: colors.mint }}>
-                <Text style={[styles.body, { color: colors.mint, textAlign: "center", fontWeight: "700" }]}>
-                  {insight.motivation}
-                </Text>
-              </Card>
-            )}
-          </>
-        )}
-
-        {insight && (
           <Pressable
-            onPress={saveInsightToNotes}
-            disabled={savingNote}
+            onPress={getInsight}
+            disabled={loading}
             style={({ pressed }) => [
-              styles.secondaryBtn,
-              { borderColor: colors.border, backgroundColor: colors.surface, opacity: pressed || savingNote ? 0.8 : 1 },
+              styles.primaryBtn,
+              { backgroundColor: colors.tomato, opacity: loading ? 0.65 : pressed ? 0.88 : 1 },
             ]}
           >
-            {savingNote ? (
-              <ActivityIndicator color={colors.text} />
+            {loading ? (
+              <>
+                <ActivityIndicator color="#fff" />
+                <Text style={styles.primaryBtnText}>Analyzing your habits…</Text>
+              </>
             ) : (
               <>
-                <Ionicons name="bookmark-outline" size={17} color={colors.text} />
-                <Text style={[styles.secondaryBtnText, { color: colors.text }]}>Save to Notes</Text>
+                <Ionicons name={insight ? "refresh" : "sparkles"} size={18} color="#fff" />
+                <Text style={styles.primaryBtnText}>{insight ? "Refresh insight" : "Analyze my study habits"}</Text>
               </>
             )}
           </Pressable>
-        )}
 
-        <Pressable onPress={getInsight} disabled={loading} style={[styles.button, loading && { opacity: 0.6 }]}>
-          {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>{insight ? "Refresh insight" : "Analyze my study habits"}</Text>}
-        </Pressable>
+          {!insight && !loading && !error && (
+            <View style={[styles.emptyCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+              <View style={[styles.emptyIcon, { backgroundColor: colors.mintSoft }]}>
+                <Ionicons name="analytics-outline" size={28} color={colors.mint} />
+              </View>
+              <Text style={styles.emptyTitle}>Ready when you are</Text>
+              <Text style={styles.emptyText}>
+                Your coach reviews focus time, task completion, and subject balance to suggest what to do next.
+              </Text>
+            </View>
+          )}
+
+          {loading && (
+            <View style={[styles.loadingCard, { backgroundColor: colors.violetSoft, borderColor: colors.violet }]}>
+              <ActivityIndicator color={colors.violet} size="large" />
+              <Text style={[styles.loadingTitle, { color: colors.violet }]}>Building your insight</Text>
+              <Text style={styles.loadingText}>
+                Reviewing sessions, tasks, and trends — this usually takes a few seconds.
+              </Text>
+            </View>
+          )}
+
+          {!!error && (
+            <View style={[styles.errorCard, { backgroundColor: colors.tomatoSoft, borderColor: colors.tomato }]}>
+              <View style={styles.errorHeader}>
+                <Ionicons name="alert-circle-outline" size={20} color={colors.tomato} />
+                <Text style={[styles.errorTitle, { color: colors.tomato }]}>Could not generate insight</Text>
+              </View>
+              <Text style={styles.errorText}>{error}</Text>
+              <Pressable
+                onPress={getInsight}
+                style={({ pressed }) => [styles.retryBtn, { borderColor: colors.tomato }, pressed && styles.pressed]}
+              >
+                <Text style={[styles.retryBtnText, { color: colors.tomato }]}>Try again</Text>
+              </Pressable>
+            </View>
+          )}
+
+          {insight && !loading && (
+            <>
+              {!!insight.motivation && (
+                <View style={[styles.motivationBanner, { backgroundColor: colors.mintSoft, borderColor: colors.mint }]}>
+                  <Ionicons name="heart" size={18} color={colors.mint} />
+                  <Text style={[styles.motivationText, { color: colors.text }]}>{insight.motivation}</Text>
+                </View>
+              )}
+
+              <InsightSection
+                icon="document-text-outline"
+                title="Summary"
+                accentColor={colors.violet}
+                accentSoft={colors.violetSoft}
+                colors={colors}
+                styles={styles}
+              >
+                <Text style={styles.bodyText}>{insight.summary}</Text>
+              </InsightSection>
+
+              <View style={[styles.sectionGrid, isWide && styles.sectionGridWide]}>
+                <InsightSection
+                  icon="trophy-outline"
+                  title="Strengths"
+                  accentColor={colors.mint}
+                  accentSoft={colors.mintSoft}
+                  colors={colors}
+                  styles={styles}
+                  wide={isWide}
+                >
+                  <BulletList items={insight.strengths} colors={colors} styles={styles} />
+                </InsightSection>
+
+                <InsightSection
+                  icon="trending-up-outline"
+                  title="Areas to improve"
+                  accentColor={colors.amber}
+                  accentSoft={colors.amberSoft}
+                  colors={colors}
+                  styles={styles}
+                  wide={isWide}
+                >
+                  <BulletList items={insight.improvementAreas} colors={colors} styles={styles} />
+                </InsightSection>
+              </View>
+
+              <View style={[styles.sectionGrid, isWide && styles.sectionGridWide]}>
+                <InsightSection
+                  icon="pulse-outline"
+                  title="Focus trend"
+                  accentColor={colors.tomato}
+                  accentSoft={colors.tomatoSoft}
+                  colors={colors}
+                  styles={styles}
+                  wide={isWide}
+                >
+                  <Text style={styles.bodyText}>{insight.focusTrend || "—"}</Text>
+                </InsightSection>
+
+                <InsightSection
+                  icon="time-outline"
+                  title="Best study time"
+                  accentColor={colors.amber}
+                  accentSoft={colors.amberSoft}
+                  colors={colors}
+                  styles={styles}
+                  wide={isWide}
+                >
+                  <Text style={styles.bodyText}>{insight.bestStudyTime || "—"}</Text>
+                </InsightSection>
+              </View>
+
+              <InsightSection
+                icon="book-outline"
+                title="Subject focus"
+                accentColor={colors.violet}
+                accentSoft={colors.violetSoft}
+                colors={colors}
+                styles={styles}
+              >
+                <BulletList items={insight.subjectFocus} colors={colors} styles={styles} />
+              </InsightSection>
+
+              <InsightSection
+                icon="calendar-outline"
+                title="Weekly summary"
+                accentColor={colors.mint}
+                accentSoft={colors.mintSoft}
+                colors={colors}
+                styles={styles}
+              >
+                <Text style={styles.bodyText}>{insight.weeklySummary || "—"}</Text>
+              </InsightSection>
+
+              <View style={[styles.sectionGrid, isWide && styles.sectionGridWide]}>
+                <InsightSection
+                  icon="bulb-outline"
+                  title="Recommendations"
+                  accentColor={colors.violet}
+                  accentSoft={colors.violetSoft}
+                  colors={colors}
+                  styles={styles}
+                  wide={isWide}
+                >
+                  <BulletList items={insight.recommendations} colors={colors} styles={styles} />
+                </InsightSection>
+
+                <InsightSection
+                  icon="school-outline"
+                  title="Study tips"
+                  accentColor={colors.mint}
+                  accentSoft={colors.mintSoft}
+                  colors={colors}
+                  styles={styles}
+                  wide={isWide}
+                >
+                  <BulletList items={insight.studyTips} colors={colors} styles={styles} />
+                </InsightSection>
+              </View>
+            </>
+          )}
+        </View>
       </ScrollView>
     </Screen>
   );
 }
 
-const useStyles = (colors) =>
+const createStyles = (colors, isWide, compact) =>
   StyleSheet.create({
-    header: { color: colors.text, fontSize: 22, fontWeight: "700" },
-    subtitle: { color: colors.textMuted, fontSize: 13, marginTop: 4, marginBottom: 16 },
-    sectionLabel: { color: colors.textMuted, fontSize: 12, fontWeight: "700", marginBottom: 6 },
-    body: { color: colors.text, fontSize: 13.5, lineHeight: 20 },
-    muted: { color: colors.textMuted, fontSize: 13, lineHeight: 19 },
-    error: { color: colors.tomato, fontSize: 13, marginBottom: 12 },
-    emptyIcon: { width: 54, height: 54, borderRadius: 16, alignItems: "center", justifyContent: "center" },
-    emptyTitle: { fontSize: 15.5, fontWeight: "700", marginTop: 12 },
-    button: {
-      backgroundColor: colors.violet, borderRadius: 14, paddingVertical: 14,
-      alignItems: "center", marginTop: 8,
+    scroll: {
+      paddingTop: SPACING.md,
+      paddingBottom: SPACING.xl * 2,
     },
-    buttonText: { color: "#fff", fontWeight: "700", fontSize: 15 },
-    secondaryBtn: {
+    page: {
+      width: "100%",
+      maxWidth: isWide ? 860 : 520,
+      alignSelf: "center",
+    },
+    hero: { marginBottom: SPACING.lg },
+    heroIcon: {
+      width: 52,
+      height: 52,
+      borderRadius: RADIUS.lg,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: SPACING.md,
+    },
+    title: {
+      color: colors.text,
+      fontSize: compact ? 24 : 26,
+      fontWeight: "900",
+      letterSpacing: -0.3,
+      marginBottom: 6,
+    },
+    subtitle: {
+      color: colors.textMuted,
+      fontSize: 13.5,
+      lineHeight: 20,
+      maxWidth: 520,
+    },
+    statsRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: SPACING.sm,
+      marginBottom: SPACING.lg,
+    },
+    statsRowWide: {
+      flexWrap: "nowrap",
+    },
+    statCard: {
+      flexGrow: 1,
+      flexBasis: compact ? "47%" : "22%",
+      minWidth: compact ? "47%" : 100,
+      borderWidth: 1,
+      borderRadius: RADIUS.lg,
+      padding: SPACING.md,
+    },
+    statIcon: {
+      width: 32,
+      height: 32,
+      borderRadius: RADIUS.sm,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: 8,
+    },
+    statValue: {
+      fontSize: 22,
+      fontWeight: "900",
+      letterSpacing: -0.5,
+    },
+    statSuffix: {
+      fontSize: 14,
+      fontWeight: "700",
+    },
+    statLabel: {
+      color: colors.textMuted,
+      fontSize: 11,
+      fontWeight: "600",
+      marginTop: 2,
+    },
+    statsLoading: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      marginBottom: SPACING.md,
+    },
+    statsLoadingText: {
+      color: colors.textMuted,
+      fontSize: 12,
+    },
+    primaryBtn: {
+      height: 50,
+      borderRadius: RADIUS.md,
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "center",
       gap: 8,
-      borderWidth: 1,
-      borderRadius: 14,
-      paddingVertical: 13,
-      marginTop: 8,
+      marginBottom: SPACING.lg,
     },
-    secondaryBtnText: { fontWeight: "700", fontSize: 14.5 },
+    primaryBtnText: {
+      color: "#fff",
+      fontWeight: "800",
+      fontSize: 15,
+    },
+    emptyCard: {
+      borderWidth: 1,
+      borderRadius: RADIUS.lg,
+      padding: SPACING.xl,
+      alignItems: "center",
+      marginBottom: SPACING.lg,
+    },
+    emptyIcon: {
+      width: 64,
+      height: 64,
+      borderRadius: 20,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: SPACING.md,
+    },
+    emptyTitle: {
+      color: colors.text,
+      fontSize: 17,
+      fontWeight: "800",
+      marginBottom: 8,
+    },
+    emptyText: {
+      color: colors.textMuted,
+      fontSize: 13,
+      lineHeight: 19,
+      textAlign: "center",
+      maxWidth: 320,
+    },
+    loadingCard: {
+      borderWidth: 1,
+      borderRadius: RADIUS.lg,
+      padding: SPACING.xl,
+      alignItems: "center",
+      marginBottom: SPACING.lg,
+    },
+    loadingTitle: {
+      fontSize: 15,
+      fontWeight: "800",
+      marginTop: SPACING.md,
+      marginBottom: 6,
+    },
+    loadingText: {
+      color: colors.textMuted,
+      fontSize: 13,
+      lineHeight: 19,
+      textAlign: "center",
+      maxWidth: 300,
+    },
+    errorCard: {
+      borderWidth: 1,
+      borderRadius: RADIUS.lg,
+      padding: SPACING.lg,
+      marginBottom: SPACING.lg,
+    },
+    errorHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      marginBottom: 8,
+    },
+    errorTitle: {
+      fontSize: 14,
+      fontWeight: "800",
+    },
+    errorText: {
+      color: colors.text,
+      fontSize: 13,
+      lineHeight: 19,
+      marginBottom: SPACING.md,
+    },
+    retryBtn: {
+      alignSelf: "flex-start",
+      borderWidth: 1,
+      borderRadius: RADIUS.sm,
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+    },
+    retryBtnText: {
+      fontWeight: "800",
+      fontSize: 13,
+    },
+    motivationBanner: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 10,
+      borderWidth: 1,
+      borderRadius: RADIUS.lg,
+      padding: SPACING.lg,
+      marginBottom: SPACING.lg,
+    },
+    motivationText: {
+      flex: 1,
+      fontSize: 14,
+      fontWeight: "700",
+      lineHeight: 21,
+    },
+    sectionGrid: {
+      gap: SPACING.sm,
+      marginBottom: SPACING.sm,
+    },
+    sectionGridWide: {
+      flexDirection: "row",
+      alignItems: "stretch",
+    },
+    sectionCard: {
+      borderWidth: 1,
+      borderRadius: RADIUS.lg,
+      padding: SPACING.lg,
+      marginBottom: SPACING.sm,
+    },
+    sectionCardWide: {
+      flex: 1,
+      marginBottom: 0,
+    },
+    sectionHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      marginBottom: SPACING.md,
+    },
+    sectionIcon: {
+      width: 36,
+      height: 36,
+      borderRadius: RADIUS.sm,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    sectionTitle: {
+      color: colors.text,
+      fontSize: 14,
+      fontWeight: "800",
+    },
+    bodyText: {
+      color: colors.text,
+      fontSize: 14,
+      lineHeight: 22,
+    },
+    bulletRow: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      marginBottom: 8,
+    },
+    bulletDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      marginTop: 8,
+      marginRight: 10,
+    },
+    emptySection: {
+      color: colors.textMuted,
+      fontSize: 13,
+      fontStyle: "italic",
+    },
+    pressed: {
+      opacity: 0.82,
+    },
   });

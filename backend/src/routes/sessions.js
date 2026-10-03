@@ -23,6 +23,8 @@ router.post("/", async (req, res) => {
     });
   }
   await prisma.activityLog.create({ data: { userId: req.user.id, action: "session_complete" } });
+  const { scheduleDailyChallengeCheck } = require("../lib/dailyChallenge");
+  scheduleDailyChallengeCheck(req.user.id);
 
   res.status(201).json({ session });
 });

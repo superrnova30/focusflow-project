@@ -1,50 +1,164 @@
 const express = require("express");
 const prisma = require("../lib/prisma");
 const { requireAuth, requireRole } = require("../middleware/auth");
-const { generateFlashcards } = require("../lib/ai");
+const { generateFlashcards, generateDeckTutorLesson } = require("../lib/ai");
+const { loadUserGamification, bumpStreak, xpWithinLevel, xpForNextLevel, LEVEL_XP_STEP } = require("../lib/gamification");
+const { isPremiumActive } = require("../lib/premium");
+const { enforcePromptLimit, enforceTutorLimit, buildLimitsPayload } = require("../lib/featureLimits");
+const {
+  XP_PER_CORRECT,
+  HALF_XP_WITH_HINT3,
+  LIGHTNING_SECONDS,
+  buildGameState,
+  buildClue,
+  answersMatch,
+  pickQuestionType,
+} = require("../lib/memorize");
 
 const router = express.Router();
 router.use(requireAuth);
+
+const PRACTICE_UNLOCK_TARGET = 247;
+const VALID_DECK_COLORS = ["violet", "mint", "amber", "tomato"];
+
+function normalizeColor(color) {
+  const id = String(color || "violet").toLowerCase();
+  return VALID_DECK_COLORS.includes(id) ? id : "violet";
+}
+
+function shuffle(arr) {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+function buildMcqOptions(cards, card) {
+  const others = cards.filter((c) => c.id !== card.id);
+  const distractors = shuffle(others).slice(0, 3).map((c) => c.back);
+  const fallbacks = ["Not quite — review this card", "A related but incorrect idea", "This is a common misconception"];
+  while (distractors.length < 3) {
+    distractors.push(fallbacks[distractors.length] || "None of the above");
+  }
+  return shuffle([card.back, ...distractors.slice(0, 3)]);
+}
+
+function buildPracticeQuestions(cards, count = 10) {
+  if (!cards.length) return [];
+  const pool = shuffle(cards);
+  const take = Math.min(count, pool.length);
+
+  return pool.slice(0, take).map((card, idx) => {
+    const options = buildMcqOptions(cards, card);
+    return {
+      id: `${card.id}-${idx}`,
+      cardId: card.id,
+      question: card.front,
+      options,
+      answer: card.back,
+    };
+  });
+}
+
+function buildMemorizeQuestions(cards, settings) {
+  const pool = shuffle(cards);
+  return pool.map((card, idx) => {
+    const type = pickQuestionType(settings, idx + card.front.length);
+    const base = {
+      id: `${card.id}-m${idx}`,
+      cardId: card.id,
+      question: card.front,
+      answer: card.back,
+      type,
+    };
+    if (type === "mcq") {
+      base.options = buildMcqOptions(cards, card);
+    }
+    return base;
+  });
+}
+
+async function getOrCreateProgress(userId, collectionId) {
+  const existing = await prisma.deckStudyProgress.findUnique({
+    where: { userId_collectionId: { userId, collectionId } },
+  });
+  if (existing) return existing;
+  return prisma.deckStudyProgress.create({
+    data: { userId, collectionId },
+  });
+}
+
+async function getOwnedCollection(userId, collectionId) {
+  return prisma.flashcardCollection.findFirst({
+    where: { id: collectionId, userId },
+    include: { flashcards: true },
+  });
+}
 
 function getUserFriendlyAiError(err) {
   if (err?.message) return err.message;
   return "AI generation is temporarily unavailable. Please try again in a moment.";
 }
 
+function safe(handler) {
+  return async (req, res) => {
+    try {
+      await handler(req, res);
+    } catch (err) {
+      console.error("[flashcards]", err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Could not complete the flashcard request. Please try again." });
+      }
+    }
+  };
+}
+
 // ---- Collections ----
 
 // List the current user's flashcard collections with card counts.
-router.get("/collections", async (req, res) => {
+router.get("/collections", safe(async (req, res) => {
   const collections = await prisma.flashcardCollection.findMany({
     where: { userId: req.user.id },
     include: { _count: { select: { flashcards: true } } },
     orderBy: { createdAt: "desc" },
   });
   res.json({ collections });
-});
+}));
 
 // Create a new collection.
-router.post("/collections", async (req, res) => {
-  const { name } = req.body;
+router.post("/collections", safe(async (req, res) => {
+  const { name, isPublic, color } = req.body;
   const trimmed = name && String(name).trim();
   if (!trimmed) return res.status(400).json({ error: "Collection name is required." });
 
   const collection = await prisma.flashcardCollection.create({
-    data: { name: trimmed, userId: req.user.id },
+    data: {
+      name: trimmed,
+      userId: req.user.id,
+      isPublic: Boolean(isPublic),
+      color: normalizeColor(color),
+    },
     include: { _count: { select: { flashcards: true } } },
   });
   res.status(201).json({ collection });
-});
+}));
 
-// Rename a collection (owner only).
-router.patch("/collections/:id", async (req, res) => {
-  const { name } = req.body;
-  const trimmed = name && String(name).trim();
-  if (!trimmed) return res.status(400).json({ error: "Collection name is required." });
+// Update a collection (owner only).
+router.patch("/collections/:id", safe(async (req, res) => {
+  const { name, isPublic, color } = req.body;
+  const data = {};
+  if (typeof name === "string" && name.trim()) data.name = name.trim();
+  if (typeof isPublic === "boolean") data.isPublic = isPublic;
+  if (typeof color === "string" && color.trim()) data.color = normalizeColor(color);
+  if (Object.keys(data).length === 0) {
+    return res.status(400).json({ error: "Nothing to update." });
+  }
 
   const result = await prisma.flashcardCollection.updateMany({
     where: { id: req.params.id, userId: req.user.id },
-    data: { name: trimmed },
+    data,
   });
   if (result.count === 0) return res.status(404).json({ error: "Collection not found" });
 
@@ -53,53 +167,379 @@ router.patch("/collections/:id", async (req, res) => {
     include: { _count: { select: { flashcards: true } } },
   });
   res.json({ collection });
-});
+}));
 
 // Delete a collection (owner only). Cards in it are removed with it.
-router.delete("/collections/:id", async (req, res) => {
+router.delete("/collections/:id", safe(async (req, res) => {
   const result = await prisma.flashcardCollection.deleteMany({
     where: { id: req.params.id, userId: req.user.id },
   });
   if (result.count === 0) return res.status(404).json({ error: "Collection not found" });
   res.json({ ok: true });
-});
+}));
 
-// Fetch one collection with its cards.
-router.get("/collections/:id", async (req, res) => {
-  const collection = await prisma.flashcardCollection.findFirst({
-    where: { id: req.params.id, userId: req.user.id },
+// Fetch one collection with its cards (owner always; other students only when public).
+router.get("/collections/:id", safe(async (req, res) => {
+  const collection = await prisma.flashcardCollection.findUnique({
+    where: { id: req.params.id },
     include: { flashcards: true },
   });
   if (!collection) return res.status(404).json({ error: "Collection not found" });
-  res.json({ collection });
-});
+
+  const isOwner = collection.userId === req.user.id;
+  if (!isOwner && !collection.isPublic) {
+    return res.status(404).json({ error: "Collection not found" });
+  }
+
+  res.json({ collection, isOwner });
+}));
+
+// ---- Deck study modes ----
+
+router.get("/collections/:id/study/progress", safe(async (req, res) => {
+  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  if (!collection) return res.status(404).json({ error: "Collection not found" });
+
+  const progress = await getOrCreateProgress(req.user.id, collection.id);
+  res.json({
+    progress,
+    target: PRACTICE_UNLOCK_TARGET,
+    cardCount: collection.flashcards.length,
+    collection: {
+      id: collection.id,
+      name: collection.name,
+      color: collection.color,
+      cardCount: collection.flashcards.length,
+    },
+  });
+}));
+
+router.get("/collections/:id/study/memorize", safe(async (req, res) => {
+  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  if (!collection) return res.status(404).json({ error: "Collection not found" });
+  if (!collection.flashcards.length) {
+    return res.status(400).json({ error: "Add cards to this deck before studying." });
+  }
+
+  const user = await loadUserGamification(req.user.id);
+  const premium = isPremiumActive(user);
+  const game = buildGameState(user, premium);
+  const questions = buildMemorizeQuestions(collection.flashcards, game.settings);
+
+  res.json({
+    collection: {
+      id: collection.id,
+      name: collection.name,
+      color: collection.color,
+      cardCount: collection.flashcards.length,
+    },
+    questions,
+    cards: collection.flashcards,
+    game,
+    lightningSeconds: LIGHTNING_SECONDS,
+  });
+}));
+
+router.post("/collections/:id/study/memorize/hint", safe(async (req, res) => {
+  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  if (!collection) return res.status(404).json({ error: "Collection not found" });
+
+  const { cardId, hintType, options = [] } = req.body || {};
+  const card = collection.flashcards.find((c) => c.id === cardId);
+  if (!card) return res.status(404).json({ error: "Card not found in this deck." });
+
+  const user = await loadUserGamification(req.user.id);
+  const premium = isPremiumActive(user);
+  let hintsRemaining = premium ? 999 : user.hints;
+
+  if (!premium) {
+    if (user.hints <= 0) {
+      return res.status(403).json({
+        error: "No hints remaining today. Upgrade to Go Unlimited for unlimited hints.",
+        code: "HINTS_DEPLETED",
+        upgradeRequired: true,
+        limits: buildLimitsPayload(user),
+      });
+    }
+    const updated = await prisma.user.update({
+      where: { id: req.user.id },
+      data: { hints: { decrement: 1 } },
+      select: { hints: true },
+    });
+    hintsRemaining = updated.hints;
+    await prisma.activityLog.create({
+      data: { userId: req.user.id, action: "hint_used", meta: { cardId, hintType, collectionId: collection.id } },
+    });
+  }
+
+  const type = Number(hintType);
+  const payload = { hintsRemaining, unlimitedHints: premium, noXpPenalty: false };
+
+  if (type === 1) {
+    const incorrect = (options.length ? options : buildMcqOptions(collection.flashcards, card)).filter(
+      (opt) => opt !== card.back
+    );
+    payload.eliminatedOptions = shuffle(incorrect).slice(0, Math.min(2, incorrect.length));
+  } else if (type === 2) {
+    payload.clue = buildClue(card.back);
+  } else if (type === 3) {
+    payload.answer = card.back;
+    payload.noXpPenalty = true;
+  } else {
+    return res.status(400).json({ error: "Invalid hint type." });
+  }
+
+  res.json(payload);
+}));
+
+router.post("/collections/:id/study/memorize/answer", safe(async (req, res) => {
+  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  if (!collection) return res.status(404).json({ error: "Collection not found" });
+
+  const {
+    cardId,
+    answer,
+    questionType,
+    timedOut = false,
+    selfCorrect,
+    usedHint3 = false,
+    skipped = false,
+  } = req.body || {};
+
+  const card = collection.flashcards.find((c) => c.id === cardId);
+  if (!card) return res.status(404).json({ error: "Card not found in this deck." });
+
+  let user = await loadUserGamification(req.user.id);
+  const premium = isPremiumActive(user);
+  const settings = buildGameState(user, premium).settings;
+
+  if (!premium && user.hearts <= 0) {
+    const heartsRefillAt = user.heartsDepletedAt
+      ? new Date(new Date(user.heartsDepletedAt).getTime() + 24 * 60 * 60 * 1000).toISOString()
+      : null;
+    return res.status(403).json({
+      error: "You are out of hearts. Wait 24 hours for a refill, or upgrade to Go Unlimited for unlimited hearts.",
+      code: "HEARTS_DEPLETED",
+      gameOver: true,
+      upgradeRequired: true,
+      heartsRefillAt,
+      limits: buildLimitsPayload(user),
+    });
+  }
+
+  if (!skipped) {
+    await prisma.activityLog.create({
+      data: {
+        userId: req.user.id,
+        action: "flashcard_reviewed",
+        meta: { cardId, collectionId: collection.id },
+      },
+    });
+  }
+
+  let isCorrect = false;
+  if (questionType === "flashcard") {
+    isCorrect = Boolean(selfCorrect);
+  } else if (timedOut || skipped) {
+    isCorrect = false;
+  } else if (questionType === "mcq") {
+    isCorrect = String(answer || "").trim() === String(card.back).trim();
+  } else {
+    isCorrect = answersMatch(answer, card.back, settings.spellingMistakesAllowed);
+  }
+
+  let xpAwarded = 0;
+  let leveledUp = false;
+  let gameOver = false;
+  let heartsRefillAt = null;
+
+  if (isCorrect && !usedHint3) {
+    xpAwarded = XP_PER_CORRECT;
+  } else if (isCorrect && usedHint3) {
+    xpAwarded = HALF_XP_WITH_HINT3;
+  }
+
+  if (isCorrect && xpAwarded > 0) {
+    const beforeLevel = user.currentLevel;
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: {
+        xp: { increment: xpAwarded },
+        totalXpEarned: { increment: xpAwarded },
+        correctAnswers: { increment: 1 },
+      },
+    });
+    await bumpStreak(req.user.id);
+    await prisma.activityLog.create({
+      data: { userId: req.user.id, action: "xp_gain", meta: { amount: xpAwarded, source: "memorize", cardId } },
+    });
+    user = await loadUserGamification(req.user.id);
+    leveledUp = user.currentLevel > beforeLevel;
+  } else if (!isCorrect) {
+    if (!premium) {
+      const beforeHearts = user.hearts;
+      const nextHearts = Math.max(0, beforeHearts - 1);
+      const heartData = { hearts: nextHearts };
+      if (nextHearts <= 0) heartData.heartsDepletedAt = new Date();
+      user = await prisma.user.update({
+        where: { id: req.user.id },
+        data: { ...heartData, wrongAnswers: { increment: 1 } },
+      });
+      gameOver = nextHearts <= 0;
+      if (gameOver && user.heartsDepletedAt) {
+        heartsRefillAt = new Date(new Date(user.heartsDepletedAt).getTime() + 24 * 60 * 60 * 1000).toISOString();
+      }
+      await prisma.activityLog.create({
+        data: { userId: req.user.id, action: "hearts_change", meta: { from: beforeHearts, to: nextHearts, source: "memorize" } },
+      });
+    } else {
+      await prisma.user.update({
+        where: { id: req.user.id },
+        data: { wrongAnswers: { increment: 1 } },
+      });
+      user = await loadUserGamification(req.user.id);
+    }
+  }
+
+  const game = buildGameState(user, premium);
+  const { scheduleDailyChallengeCheck } = require("../lib/dailyChallenge");
+  scheduleDailyChallengeCheck(req.user.id);
+
+  res.json({
+    correct: isCorrect,
+    xpAwarded,
+    leveledUp,
+    gameOver,
+    heartsRefillAt,
+    correctAnswer: card.back,
+    game,
+  });
+}));
+
+router.post("/collections/:id/study/memorize/complete", safe(async (req, res) => {
+  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  if (!collection) return res.status(404).json({ error: "Collection not found" });
+
+  const { correct = 0, total = 0, xpEarned = 0 } = req.body || {};
+  const progress = await prisma.deckStudyProgress.upsert({
+    where: { userId_collectionId: { userId: req.user.id, collectionId: collection.id } },
+    create: { userId: req.user.id, collectionId: collection.id, memorizeSessions: 1 },
+    update: { memorizeSessions: { increment: 1 } },
+  });
+
+  await prisma.activityLog.create({
+    data: {
+      userId: req.user.id,
+      action: "memorize_complete",
+      meta: { collectionId: collection.id, correct: Number(correct) || 0, total: Number(total) || 0, xpEarned: Number(xpEarned) || 0 },
+    },
+  });
+
+  res.json({ progress, summary: { correct: Number(correct) || 0, total: Number(total) || 0, xpEarned: Number(xpEarned) || 0 } });
+}));
+
+router.post("/collections/:id/study/tutor-lesson", safe(async (req, res) => {
+  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  if (!collection) return res.status(404).json({ error: "Collection not found" });
+  if (!collection.flashcards.length) {
+    return res.status(400).json({ error: "Add cards to this deck before starting a tutor lesson." });
+  }
+
+  if (!(await enforceTutorLimit(req, res))) return;
+
+  try {
+    const lesson = await generateDeckTutorLesson(collection.name, collection.flashcards);
+    res.json({ lesson });
+  } catch (err) {
+    console.error("Tutor lesson error:", err);
+    res.status(502).json({ error: getUserFriendlyAiError(err) });
+  }
+}));
+
+router.post("/collections/:id/study/tutor-lesson/complete", safe(async (req, res) => {
+  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  if (!collection) return res.status(404).json({ error: "Collection not found" });
+
+  const progress = await prisma.deckStudyProgress.upsert({
+    where: { userId_collectionId: { userId: req.user.id, collectionId: collection.id } },
+    create: { userId: req.user.id, collectionId: collection.id, tutorCompleted: true },
+    update: { tutorCompleted: true },
+  });
+
+  res.json({ progress });
+}));
+
+router.get("/collections/:id/study/practice/questions", safe(async (req, res) => {
+  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  if (!collection) return res.status(404).json({ error: "Collection not found" });
+  if (!collection.flashcards.length) {
+    return res.status(400).json({ error: "Add cards to this deck before taking a practice test." });
+  }
+
+  const progress = await getOrCreateProgress(req.user.id, collection.id);
+  const batchSize = Math.min(Number(req.query.count) || 10, 20);
+  const questions = buildPracticeQuestions(collection.flashcards, batchSize);
+
+  res.json({
+    questions,
+    progress,
+    target: PRACTICE_UNLOCK_TARGET,
+    unlocked: progress.practiceUnlocked,
+  });
+}));
+
+router.post("/collections/:id/study/practice/answer", safe(async (req, res) => {
+  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  if (!collection) return res.status(404).json({ error: "Collection not found" });
+
+  const { correct } = req.body || {};
+  const progress = await getOrCreateProgress(req.user.id, collection.id);
+  const nextCount = progress.practiceAnswered + 1;
+  const unlocked = nextCount >= PRACTICE_UNLOCK_TARGET || progress.practiceUnlocked;
+
+  const updated = await prisma.deckStudyProgress.update({
+    where: { id: progress.id },
+    data: {
+      practiceAnswered: nextCount,
+      practiceUnlocked: unlocked,
+    },
+  });
+
+  res.json({
+    progress: updated,
+    target: PRACTICE_UNLOCK_TARGET,
+    correct: Boolean(correct),
+    justUnlocked: !progress.practiceUnlocked && unlocked,
+  });
+}));
 
 // ---- Flashcards ----
 
-// Create a flashcard (either standalone or inside a collection).
-router.post("/", async (req, res) => {
+// Create a flashcard inside a collection.
+router.post("/", safe(async (req, res) => {
   const { front, back, collectionId } = req.body;
   if (!front?.trim() || !back?.trim()) {
     return res.status(400).json({ error: "Both the front and back of the card are required." });
   }
-
-  if (collectionId) {
-    const collection = await prisma.flashcardCollection.findFirst({
-      where: { id: collectionId, userId: req.user.id },
-    });
-    if (!collection) return res.status(404).json({ error: "Collection not found" });
+  if (!collectionId) {
+    return res.status(400).json({ error: "Choose a deck for this card." });
   }
+
+  const collection = await prisma.flashcardCollection.findFirst({
+    where: { id: collectionId, userId: req.user.id },
+  });
+  if (!collection) return res.status(404).json({ error: "Collection not found" });
 
   const flashcard = await prisma.flashcard.create({
     data: {
       front: front.trim(),
       back: back.trim(),
-      collectionId: collectionId || null,
+      collectionId: collection.id,
       materialId: null,
     },
   });
-  res.status(201).json({ flashcard });
-});
+  res.status(201).json({ flashcard, collection: { id: collection.id, name: collection.name } });
+}));
 
 // Update a flashcard (owner via collection or material ownership).
 router.patch("/:id", async (req, res) => {
@@ -151,7 +591,7 @@ router.delete("/:id", async (req, res) => {
 // uploaded PDF. Requires a target collection (or creates one).
 router.post("/magic-import", requireRole("STUDENT"), async (req, res) => {
   try {
-    const { topic, notes, materialId, collectionName } = req.body;
+    const { topic, notes, materialId, collectionName, collectionId } = req.body;
     const hasTopic = topic && String(topic).trim().length > 0;
     const hasNotes = notes && String(notes).trim().length > 0;
 
@@ -180,10 +620,16 @@ router.post("/magic-import", requireRole("STUDENT"), async (req, res) => {
       });
     }
 
-    // Determine target collection: use collectionName (create if needed) or
-    // an auto-created one named after the source.
+    if (!(await enforcePromptLimit(req, res))) return;
+
+    // Determine target collection: prefer collectionId, then collectionName.
     let collection = null;
-    if (collectionName && String(collectionName).trim()) {
+    if (collectionId) {
+      collection = await prisma.flashcardCollection.findFirst({
+        where: { id: collectionId, userId: req.user.id },
+      });
+      if (!collection) return res.status(404).json({ error: "Collection not found" });
+    } else if (collectionName && String(collectionName).trim()) {
       const existing = await prisma.flashcardCollection.findFirst({
         where: { userId: req.user.id, name: String(collectionName).trim() },
       });

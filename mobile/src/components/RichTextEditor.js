@@ -18,9 +18,15 @@ import { useTheme } from "../context/ThemeContext";
  *  - onChange: (blocks) => void
  *  - placeholder: string
  */
-export default function RichTextEditor({ value = [], onChange, placeholder }) {
+export default function RichTextEditor({
+  value = [],
+  onChange,
+  placeholder,
+  compact = false,
+  embedded = false,
+  scrollable = false,
+}) {
   const { colors } = useTheme();
-  const styles = useStyles(colors);
 
   const updateBlock = (index, patch) => {
     const next = [...value];
@@ -62,13 +68,13 @@ export default function RichTextEditor({ value = [], onChange, placeholder }) {
     if (block.type === "heading") {
       const size = block.level === 1 ? 24 : block.level === 3 ? 15 : 19;
       return (
-        <View key={index} style={styles.blockRow}>
+        <View key={index} style={editorStyles.blockRow}>
           <TextInput
-            value={block.text}
+            value={block.text ?? ""}
             onChangeText={(text) => updateBlock(index, { text })}
             placeholder="Heading"
             placeholderTextColor={colors.textMuted}
-            style={[styles.blockInput, styles.heading, { fontSize: size, color: colors.text }]}
+            style={[editorStyles.blockInput, editorStyles.heading, { fontSize: size, color: colors.text }]}
             multiline
           />
           <IconButton name="remove" onPress={() => removeBlock(index)} color={colors.textMuted} />
@@ -79,14 +85,14 @@ export default function RichTextEditor({ value = [], onChange, placeholder }) {
     if (block.type === "bullet" || block.type === "numbered") {
       const bullet = block.type === "bullet" ? "•" : `${index - 0 + 1}.`;
       return (
-        <View key={index} style={styles.blockRow}>
-          <Text style={[styles.marker, { color: colors.violet }]}>{bullet}</Text>
+        <View key={index} style={editorStyles.blockRow}>
+          <Text style={[editorStyles.marker, { color: colors.violet }]}>{bullet}</Text>
           <TextInput
-            value={block.text}
+            value={block.text ?? ""}
             onChangeText={(text) => updateBlock(index, { text })}
             placeholder="List item"
             placeholderTextColor={colors.textMuted}
-            style={[styles.blockInput, { color: colors.text }]}
+            style={[editorStyles.blockInput, { color: colors.text }]}
             multiline
           />
           {isLast ? (
@@ -100,7 +106,7 @@ export default function RichTextEditor({ value = [], onChange, placeholder }) {
 
     if (block.type === "checklist") {
       return (
-        <View key={index} style={styles.blockRow}>
+        <View key={index} style={editorStyles.blockRow}>
           <Pressable onPress={() => updateBlock(index, { checked: !block.checked })} hitSlop={8}>
             <Ionicons
               name={block.checked ? "checkbox" : "square-outline"}
@@ -109,12 +115,12 @@ export default function RichTextEditor({ value = [], onChange, placeholder }) {
             />
           </Pressable>
           <TextInput
-            value={block.text}
+            value={block.text ?? ""}
             onChangeText={(text) => updateBlock(index, { text })}
             placeholder="Checklist item"
             placeholderTextColor={colors.textMuted}
             style={[
-              styles.blockInput,
+              editorStyles.blockInput,
               { color: colors.text },
               block.checked && { textDecorationLine: "line-through", color: colors.textMuted },
             ]}
@@ -133,14 +139,14 @@ export default function RichTextEditor({ value = [], onChange, placeholder }) {
     const marks = Array.isArray(block.marks) ? block.marks : [];
     const hasMark = (m) => marks.includes(m);
     return (
-      <View key={index} style={styles.blockRow}>
+      <View key={index} style={editorStyles.blockRow}>
         <TextInput
-          value={block.text}
+          value={block.text ?? ""}
           onChangeText={(text) => updateBlock(index, { text })}
           placeholder={placeholder || "Start typing…"}
           placeholderTextColor={colors.textMuted}
           style={[
-            styles.blockInput,
+            editorStyles.blockInput,
             { color: colors.text },
             hasMark("bold") && { fontWeight: "700" },
             hasMark("italic") && { fontStyle: "italic" },
@@ -157,38 +163,93 @@ export default function RichTextEditor({ value = [], onChange, placeholder }) {
     );
   };
 
+  const lastTextBlockIndex = (() => {
+    for (let i = value.length - 1; i >= 0; i -= 1) {
+      if (value[i]?.type === "text") return i;
+    }
+    return -1;
+  })();
+
+  const applyMark = (mark) => {
+    const idx = lastTextBlockIndex >= 0 ? lastTextBlockIndex : 0;
+    if (lastTextBlockIndex < 0 && value.length === 0) {
+      onChange([{ type: "text", text: "", marks: [mark] }]);
+      return;
+    }
+    toggleMark(idx, mark);
+  };
+
+  const showToolbar = value.length > 0;
+
   return (
-    <View style={[styles.container, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-      {value.length > 0 && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.toolbar}>
-          <ToolButton label="H1" active={false} onPress={() => addBlock(value.length - 1, "heading")} />
-          <ToolButton icon="arrow-redo" onPress={() => {}} disabled />
+    <View
+      style={[
+        editorStyles.container,
+        compact && editorStyles.containerCompact,
+        embedded && editorStyles.containerEmbedded,
+        !embedded && { backgroundColor: colors.surface, borderColor: colors.border },
+      ]}
+    >
+      {showToolbar && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={editorStyles.toolbarContent}
+          style={[editorStyles.toolbar, { borderBottomColor: colors.border }]}
+        >
+          <Text style={[editorStyles.toolbarLabel, { color: colors.textMuted }]}>Format</Text>
           <ToolButton
-            icon="link"
-            label=""
+            label="B"
+            active={value[lastTextBlockIndex]?.marks?.includes("bold")}
+            onPress={() => applyMark("bold")}
+          />
+          <ToolButton
+            label="I"
+            active={value[lastTextBlockIndex]?.marks?.includes("italic")}
+            onPress={() => applyMark("italic")}
+          />
+          <ToolButton
+            icon="list-outline"
+            label="List"
             active={false}
-            onPress={() => {
-              const lastText = value.filter((b) => b.type === "text");
-              const idx = value.indexOf(lastText[lastText.length - 1]);
-              if (idx >= 0) toggleMark(idx, "bold");
-            }}
+            onPress={() => addBlock(value.length - 1, "bullet")}
+          />
+          <ToolButton
+            icon="remove-outline"
+            label="Heading"
+            active={false}
+            onPress={() => addBlock(value.length - 1, "heading")}
+          />
+          <ToolButton
+            icon="checkbox-outline"
+            label="Check"
+            active={false}
+            onPress={() => addBlock(value.length - 1, "checklist")}
           />
         </ScrollView>
       )}
 
       {value.length === 0 ? (
-        <Text style={[styles.emptyHint, { color: colors.textMuted }]}>
-          Tap + to add headings, lists, checklists, or text blocks.
-        </Text>
-      ) : (
-        value.map(renderBlock)
-      )}
-
-      {value.length === 0 && (
-        <Pressable onPress={() => onChange([{ type: "text", text: "", marks: [] }])} style={styles.addFirstBtn}>
-          <Ionicons name="add" size={18} color={colors.violet} />
-          <Text style={[styles.addFirstText, { color: colors.violet }]}>Add first block</Text>
+        <Pressable
+          onPress={() => onChange([{ type: "text", text: "", marks: [] }])}
+          style={[editorStyles.emptyTap, { borderColor: colors.border }]}
+        >
+          <Ionicons name="create-outline" size={20} color={colors.violet} />
+          <Text style={[editorStyles.emptyHint, { color: colors.textMuted }]}>
+            {placeholder || "Tap to start writing…"}
+          </Text>
         </Pressable>
+      ) : scrollable ? (
+        <ScrollView
+          nestedScrollEnabled
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          style={editorStyles.blocksScroll}
+        >
+          <View style={editorStyles.blocks}>{value.map(renderBlock)}</View>
+        </ScrollView>
+      ) : (
+        <View style={editorStyles.blocks}>{value.map(renderBlock)}</View>
       )}
     </View>
   );
@@ -196,7 +257,7 @@ export default function RichTextEditor({ value = [], onChange, placeholder }) {
 
 function IconButton({ name, onPress, color }) {
   return (
-    <Pressable onPress={onPress} hitSlop={8} style={styles.iconBtn}>
+    <Pressable onPress={onPress} hitSlop={8} style={editorStyles.iconBtn}>
       <Ionicons name={name} size={18} color={color} />
     </Pressable>
   );
@@ -209,38 +270,61 @@ function ToolButton({ icon, label, active, onPress, disabled }) {
       onPress={onPress}
       disabled={disabled}
       style={[
-        styles.toolBtn,
+        editorStyles.toolBtn,
         { borderColor: colors.border },
         active && { backgroundColor: colors.violetSoft, borderColor: colors.violet },
       ]}
     >
       {icon ? (
-        <Ionicons name={icon} size={16} color={active ? colors.violet : colors.text} />
+        <>
+          <Ionicons name={icon} size={15} color={active ? colors.violet : colors.text} />
+          {label ? (
+            <Text style={[editorStyles.toolLabelSmall, { color: active ? colors.violet : colors.textMuted }]}>
+              {label}
+            </Text>
+          ) : null}
+        </>
       ) : (
-        <Text style={[styles.toolLabel, { color: active ? colors.violet : colors.text }]}>{label}</Text>
+        <Text style={[editorStyles.toolLabel, { color: active ? colors.violet : colors.text }]}>{label}</Text>
       )}
     </Pressable>
   );
 }
 
-const styles = StyleSheet.create({
+const editorStyles = StyleSheet.create({
   container: { borderWidth: 1, borderRadius: 14, padding: 12, minHeight: 200 },
-  toolbar: { flexDirection: "row", marginBottom: 8, borderBottomWidth: 1, borderBottomColor: "#00000010", paddingBottom: 8 },
+  containerCompact: { minHeight: 128 },
+  containerEmbedded: { borderWidth: 0, borderRadius: 0, minHeight: 0, padding: 10 },
+  toolbar: { marginBottom: 8, borderBottomWidth: 1, paddingBottom: 8, maxHeight: 44 },
+  toolbarContent: { flexDirection: "row", alignItems: "center", gap: 6, paddingRight: 8 },
+  toolbarLabel: { fontSize: 9, fontWeight: "900", letterSpacing: 0.6, marginRight: 4, textTransform: "uppercase" },
   toolBtn: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    borderWidth: 1,
-    marginRight: 6,
+    flexDirection: "row",
     alignItems: "center",
+    gap: 4,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    borderWidth: 1,
     justifyContent: "center",
   },
-  toolLabel: { fontSize: 13, fontWeight: "700" },
-  emptyHint: { fontSize: 13, lineHeight: 20, marginVertical: 8 },
-  addFirstBtn: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6, alignSelf: "flex-start" },
-  addFirstText: { fontWeight: "700", fontSize: 13 },
-  blockRow: { flexDirection: "row", alignItems: "flex-start", marginBottom: 4 },
-  blockInput: { flex: 1, fontSize: 15, lineHeight: 22, paddingVertical: 4, paddingHorizontal: 4 },
+  toolLabel: { fontSize: 13, fontWeight: "800" },
+  toolLabelSmall: { fontSize: 10, fontWeight: "700" },
+  emptyTap: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 14,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderStyle: "dashed",
+  },
+  emptyHint: { flex: 1, fontSize: 13, lineHeight: 19 },
+  blocksScroll: { flexGrow: 0, maxHeight: 140 },
+  blocks: { gap: 2 },
+  blockRow: { flexDirection: "row", alignItems: "flex-start", marginBottom: 6 },
+  blockInput: { flex: 1, fontSize: 15, lineHeight: 22, paddingVertical: 6, paddingHorizontal: 6 },
   heading: { fontWeight: "700" },
   marker: { width: 24, fontSize: 15, fontWeight: "700", paddingTop: 6, textAlign: "right", marginRight: 6 },
   iconBtn: { padding: 4, marginLeft: 4 },

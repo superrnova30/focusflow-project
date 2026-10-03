@@ -30,6 +30,10 @@ import FlashcardCollectionsScreen from "./src/screens/FlashcardCollectionsScreen
 import FlashcardCollectionScreen from "./src/screens/FlashcardCollectionScreen";
 import FlashcardEditScreen from "./src/screens/FlashcardEditScreen";
 import FlashcardStudyScreen from "./src/screens/FlashcardStudyScreen";
+import FlashcardStudyModesScreen from "./src/screens/FlashcardStudyModesScreen";
+import FlashcardMemorizeScreen from "./src/screens/FlashcardMemorizeScreen";
+import FlashcardTutorLessonScreen from "./src/screens/FlashcardTutorLessonScreen";
+import FlashcardPracticeTestScreen from "./src/screens/FlashcardPracticeTestScreen";
 import MagicImportScreen from "./src/screens/MagicImportScreen";
 import StudyNotesScreen from "./src/screens/StudyNotesScreen";
 import NoteEditScreen from "./src/screens/NoteEditScreen";
@@ -39,6 +43,7 @@ import CardImportScreen from "./src/screens/CardImportScreen";
 import GamifiedQuizScreen from "./src/screens/GamifiedQuizScreen";
 import ProgressScreen from "./src/screens/ProgressScreen";
 import LeaderboardScreen from "./src/screens/LeaderboardScreen";
+import StudentProfileScreen from "./src/screens/StudentProfileScreen";
 import AdminHomeScreen from "./src/screens/AdminHomeScreen";
 import { AIChatProvider } from './src/context/AIChatContext';
 import { AIHistoryProvider } from './src/context/AIHistoryContext';
@@ -101,7 +106,7 @@ function StudyNavigator() {
       <StudyStack.Screen name="StudyHome" component={StudyHomeScreen} options={{ headerShown: false }} />
       <StudyStack.Screen name="Coach" component={CoachScreen} options={{ title: "AI Study Coach" }} />
       <StudyStack.Screen name="StudyAI" component={StudyAIResultScreen} />
-      <StudyStack.Screen name="StudyChat" component={StudyChatScreen} />
+      <StudyStack.Screen name="StudyChat" component={StudyChatScreen} options={{ headerShown: false }} />
       <StudyStack.Screen name="AIHistory" component={AIHistoryScreen} options={{ title: "AI History" }} />
       <StudyStack.Screen name="AIHistoryDetail" component={AIHistoryDetailScreen} options={{ title: "Conversation" }} />
       <StudyStack.Screen name="Premium" component={PremiumScreen} options={{ title: "Go Unlimited" }} />
@@ -113,6 +118,10 @@ function StudyNavigator() {
       <StudyStack.Screen name="FlashcardCollection" component={FlashcardCollectionScreen} />
       <StudyStack.Screen name="FlashcardEdit" component={FlashcardEditScreen} />
       <StudyStack.Screen name="FlashcardStudy" component={FlashcardStudyScreen} />
+      <StudyStack.Screen name="FlashcardStudyModes" component={FlashcardStudyModesScreen} />
+      <StudyStack.Screen name="FlashcardMemorize" component={FlashcardMemorizeScreen} />
+      <StudyStack.Screen name="FlashcardTutorLesson" component={FlashcardTutorLessonScreen} />
+      <StudyStack.Screen name="FlashcardPracticeTest" component={FlashcardPracticeTestScreen} />
       <StudyStack.Screen name="MagicImport" component={MagicImportScreen} />
       <StudyStack.Screen name="Notes" component={StudyNotesScreen} />
       <StudyStack.Screen name="NoteEdit" component={NoteEditScreen} />
@@ -122,6 +131,7 @@ function StudyNavigator() {
       <StudyStack.Screen name="GamifiedQuiz" component={GamifiedQuizScreen} />
       <StudyStack.Screen name="Progress" component={ProgressScreen} />
       <StudyStack.Screen name="Leaderboard" component={LeaderboardScreen} />
+      <StudyStack.Screen name="StudentProfile" component={StudentProfileScreen} options={{ title: "Student profile" }} />
     </StudyStack.Navigator>
   );
 }

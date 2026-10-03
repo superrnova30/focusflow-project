@@ -19,11 +19,12 @@ import { usePremium } from '../context/PremiumContext';
 import { SPACING, RADIUS } from '../theme/theme';
 
 const BENEFITS = [
-  { label: 'Unlimited Cards', desc: 'Build every deck you need', icon: 'layers-outline', basic: true },
-  { label: 'Unlimited Hearts', desc: 'Keep going without losing progress', icon: 'heart-outline', basic: false },
-  { label: 'Unlimited AI Tutor', desc: 'Ask anything, anytime', icon: 'sparkles-outline', basic: false },
-  { label: 'Unlimited Hints', desc: 'Get unstuck faster on quizzes', icon: 'bulb-outline', basic: false },
-  { label: 'Unlimited Prompts', desc: 'Generate more study content', icon: 'chatbubbles-outline', basic: false },
+  { label: 'Unlimited Cards', desc: 'Build every deck you need', icon: 'layers-outline', basic: true, basicDetail: 'Included' },
+  { label: 'Unlimited Hearts', desc: 'Keep going without losing progress', icon: 'heart-outline', basic: false, basicDetail: '5 hearts · 24h refill' },
+  { label: 'Unlimited AI Tutor', desc: 'Deck tutor lessons without caps', icon: 'school-outline', basic: false, basicDetail: '3 sessions/day' },
+  { label: 'Unlimited Hints', desc: 'Get unstuck faster in Memorize', icon: 'bulb-outline', basic: false, basicDetail: '3 hints/day' },
+  { label: 'Unlimited AI Chat', desc: 'Talk to your study assistant freely', icon: 'chatbubbles-outline', basic: false, basicDetail: '15 messages/day' },
+  { label: 'Unlimited AI Generations', desc: 'Study packs, imports, coach & more', icon: 'sparkles-outline', basic: false, basicDetail: '10 generations/day' },
 ];
 
 const VALUE_PROPS = [
@@ -190,7 +191,13 @@ export default function PremiumScreen({ navigation }) {
             </View>
           </View>
           <View style={s.planHeadCol}>
-            <BenefitStatus included={row.basic} colors={colors} />
+            {row.basic ? (
+              <BenefitStatus included colors={colors} />
+            ) : (
+              <Text style={[s.basicLimitText, { color: colors.textMuted }]} numberOfLines={2}>
+                {row.basicDetail}
+              </Text>
+            )}
           </View>
           <View style={[s.planHeadCol, s.unlimitedHeadCol, { backgroundColor: GOLD + (isDark ? '0A' : '10') }]}>
             <BenefitStatus included colors={colors} isUnlimited />
@@ -215,7 +222,7 @@ export default function PremiumScreen({ navigation }) {
                 color={row.basic ? colors.textMuted : colors.textMuted + '55'}
               />
               <Text style={[s.planCardListText, { color: row.basic ? colors.text : colors.textMuted }]}>
-                {row.label}
+                {row.basic ? row.label : `${row.label.replace(/^Unlimited /, '')} · ${row.basicDetail}`}
               </Text>
             </View>
           ))}
@@ -644,6 +651,7 @@ const createStyles = (colors, width, compact, wide) => {
     benefitTextWrap: { flex: 1, minWidth: 0 },
     benefitLabel: { fontSize: compact ? 12.5 : 13.5, fontWeight: '700' },
     benefitDesc: { fontSize: 11, marginTop: 1 },
+    basicLimitText: { fontSize: 10, fontWeight: '700', textAlign: 'center', lineHeight: 13, paddingHorizontal: 2 },
 
     /* Plan cards (wide) */
     planCardsRow: {

@@ -2,15 +2,32 @@ const express = require("express");
 const prisma = require("../lib/prisma");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { generateQuiz } = require("../lib/ai");
-const { bumpStreak, xpWithinLevel, xpForNextLevel, todayKey, computeCalendar, LEVEL_XP_STEP } = require("../lib/gamification");
+const {
+  bumpStreak,
+  xpWithinLevel,
+  xpForNextLevel,
+  levelForXp,
+  todayKey,
+  computeCalendar,
+  syncHeartRefill,
+  loadUserGamification,
+  LEVEL_XP_STEP,
+  MAX_HEARTS,
+} = require("../lib/gamification");
 const { isPremiumActive, premiumState } = require("../lib/premium");
+const { normalizeMemorizeSettings, buildGameState } = require("../lib/memorize");
+const { buildLimitsPayload, consumeAiPrompt, sendLimitResponse, countActiveTasks } = require("../lib/featureLimits");
+const {
+  getChallengeProgress,
+  ensureTodayChallenge,
+  tryAutoCompleteDailyChallenge,
+  scheduleDailyChallengeCheck,
+} = require("../lib/dailyChallenge");
 
 const router = express.Router();
 router.use(requireAuth);
 
 const XP_PER_CORRECT = 200;
-const STARTING_HEARTS = 5;
-const MAX_HEARTS = 5;
 
 function getUserFriendlyAiError(err) {
   if (err?.message) return err.message;
@@ -19,18 +36,49 @@ function getUserFriendlyAiError(err) {
 
 // ---- Gamification state ----
 
-// Current XP + Hearts for the logged-in student.
+// Current XP + Hearts + Hints for the logged-in student.
 router.get("/state", async (req, res) => {
+  let user = await loadUserGamification(req.user.id);
+  if (!user) return res.status(404).json({ error: "User not found" });
+  const premium = premiumState(user);
+  const game = buildGameState(user, premium.isPremium);
+  const activeTaskCount = await countActiveTasks(req.user.id);
+  res.json({
+    state: {
+      xp: game.xp,
+      hearts: game.hearts,
+      hints: game.hints,
+      correctAnswers: user.correctAnswers,
+      wrongAnswers: user.wrongAnswers,
+      totalXpEarned: user.totalXpEarned,
+      heartsRefillAt: game.heartsRefillAt,
+      level: game.level,
+    },
+    premium,
+    limits: buildLimitsPayload(user, { activeTaskCount }),
+  });
+});
+
+// Memorize quiz settings (persisted per student).
+router.get("/memorize-settings", async (req, res) => {
   const user = await prisma.user.findUnique({
     where: { id: req.user.id },
-    select: { xp: true, hearts: true, correctAnswers: true, wrongAnswers: true, totalXpEarned: true },
+    select: { memorizeSettings: true },
   });
-  // Go Unlimited students keep a full heart bar at all times.
-  const premium = premiumState(req.user);
-  res.json({
-    state: user ? { ...user, hearts: premium.isPremium ? MAX_HEARTS : user.hearts } : user,
-    premium,
+  res.json({ settings: normalizeMemorizeSettings(user?.memorizeSettings) });
+});
+
+router.put("/memorize-settings", async (req, res) => {
+  const current = normalizeMemorizeSettings(
+    (await prisma.user.findUnique({ where: { id: req.user.id }, select: { memorizeSettings: true } }))?.memorizeSettings
+  );
+  const body = req.body || {};
+  const next = normalizeMemorizeSettings({ ...current, ...body });
+  await prisma.user.update({
+    where: { id: req.user.id },
+    data: { memorizeSettings: next },
   });
+  res.json({ settings: next });
 });
 
 // Award XP to the current student (e.g. +200 for a correct quiz answer).
@@ -40,25 +88,43 @@ router.post("/xp", async (req, res) => {
   if (!Number.isFinite(n) || n <= 0) {
     return res.status(400).json({ error: "amount must be a positive number" });
   }
+  const before = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { currentLevel: true },
+  });
   const data = { xp: { increment: n }, totalXpEarned: { increment: n } };
   // A correct answer also increments the correct-answer counter so the
   // progress dashboard stays in sync with the gamified quiz.
   if (correct !== false) data.correctAnswers = { increment: 1 };
-  const user = await prisma.user.update({
-    where: { id: req.user.id },
-    data,
-    select: { xp: true, hearts: true, totalXpEarned: true, correctAnswers: true },
-  });
+  await prisma.user.update({ where: { id: req.user.id }, data });
   await bumpStreak(req.user.id);
-  await prisma.activityLog.create({ data: { userId: req.user.id, action: "xp_gain", meta: { amount: n } } });
-  res.json({ state: user });
+  const refreshed = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { xp: true, hearts: true, hints: true, totalXpEarned: true, correctAnswers: true, currentLevel: true },
+  });
+  await prisma.activityLog.create({
+    data: { userId: req.user.id, action: "xp_gain", meta: { amount: n, source: "game_quiz" } },
+  });
+  scheduleDailyChallengeCheck(req.user.id);
+  const leveledUp = refreshed.currentLevel > (before?.currentLevel || 1);
+  res.json({
+    state: refreshed,
+    level: {
+      current: refreshed.currentLevel,
+      xpWithinLevel: xpWithinLevel(refreshed.xp),
+      xpForNext: xpForNextLevel(refreshed.xp),
+      step: LEVEL_XP_STEP,
+    },
+    leveledUp,
+  });
 });
 
 // Change hearts. Used by the quiz for wrong answers (-1) and by the
 // "Quiz Over" screen for a full refill back to 5.
 router.post("/hearts", async (req, res) => {
   const { delta, set } = req.body;
-  const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+  let user = await loadUserGamification(req.user.id);
+  if (!user) return res.status(404).json({ error: "User not found" });
 
   // Unlimited Hearts: a premium student can never be drained. We still
   // record the attempt so the quiz flow works identically, but the stored
@@ -66,26 +132,50 @@ router.post("/hearts", async (req, res) => {
   if (isPremiumActive(user)) {
     const pinned = await prisma.user.update({
       where: { id: req.user.id },
-      data: { hearts: MAX_HEARTS },
-      select: { xp: true, hearts: true, totalXpEarned: true },
+      data: { hearts: MAX_HEARTS, heartsDepletedAt: null },
+      select: { xp: true, hearts: true, hints: true, totalXpEarned: true },
     });
-    return res.json({ state: pinned, unlimitedHearts: true });
+    return res.json({ state: pinned, unlimitedHearts: true, gameOver: false });
   }
 
   let nextHearts = user.hearts;
 
   if (typeof set === "number" && Number.isFinite(set)) {
-    nextHearts = Math.max(0, Math.min(MAX_HEARTS, Math.floor(set)));
+    const target = Math.floor(set);
+    if (target >= MAX_HEARTS) {
+      user = await syncHeartRefill(user);
+      if (user.hearts <= 0) {
+        return res.status(403).json({
+          error: "Hearts depleted. Wait 24 hours for a refill, or upgrade to Go Unlimited for unlimited hearts.",
+          code: "HEARTS_DEPLETED",
+          gameOver: true,
+          upgradeRequired: true,
+          heartsRefillAt: user.heartsDepletedAt
+            ? new Date(new Date(user.heartsDepletedAt).getTime() + 24 * 60 * 60 * 1000).toISOString()
+            : null,
+        });
+      }
+      nextHearts = user.hearts;
+    } else {
+      nextHearts = Math.max(0, Math.min(MAX_HEARTS, target));
+    }
   } else {
     const d = Math.floor(Number(delta));
     if (!Number.isFinite(d)) return res.status(400).json({ error: "delta must be a number" });
     nextHearts = Math.max(0, Math.min(MAX_HEARTS, user.hearts + d));
   }
 
+  const heartData = { hearts: nextHearts };
+  if (nextHearts <= 0 && user.hearts > 0) {
+    heartData.heartsDepletedAt = new Date();
+  } else if (nextHearts > 0) {
+    heartData.heartsDepletedAt = null;
+  }
+
   const updated = await prisma.user.update({
     where: { id: req.user.id },
-    data: { hearts: nextHearts },
-    select: { xp: true, hearts: true, totalXpEarned: true },
+    data: heartData,
+    select: { xp: true, hearts: true, hints: true, totalXpEarned: true, heartsDepletedAt: true },
   });
 
   if (nextHearts < user.hearts) {
@@ -98,7 +188,44 @@ router.post("/hearts", async (req, res) => {
     data: { userId: req.user.id, action: "hearts_change", meta: { from: user.hearts, to: nextHearts } },
   });
 
-  res.json({ state: updated });
+  const gameOver = nextHearts <= 0;
+  const heartsRefillAt =
+    gameOver && updated.heartsDepletedAt
+      ? new Date(new Date(updated.heartsDepletedAt).getTime() + 24 * 60 * 60 * 1000).toISOString()
+      : null;
+
+  res.json({ state: updated, gameOver, heartsRefillAt });
+});
+
+// Use a hint key during Memorize mode.
+router.post("/hints", async (req, res) => {
+  let user = await loadUserGamification(req.user.id);
+  if (!user) return res.status(404).json({ error: "User not found" });
+
+  if (isPremiumActive(user)) {
+    return res.json({ hints: 999, unlimitedHints: true });
+  }
+
+  if (user.hints <= 0) {
+    return res.status(403).json({
+      error: "No hints remaining today. Upgrade to Go Unlimited for unlimited hints.",
+      code: "HINTS_DEPLETED",
+      upgradeRequired: true,
+      limits: buildLimitsPayload(user),
+    });
+  }
+
+  const updated = await prisma.user.update({
+    where: { id: req.user.id },
+    data: { hints: { decrement: 1 } },
+    select: { hints: true },
+  });
+
+  await prisma.activityLog.create({
+    data: { userId: req.user.id, action: "hint_used", meta: req.body || {} },
+  });
+
+  res.json({ hints: updated.hints, unlimitedHints: false });
 });
 
 // ---- Gamified quiz generation ----
@@ -107,6 +234,13 @@ router.post("/hearts", async (req, res) => {
 // self-scoring, instant-feedback quiz (XP/hearts are synced per answer).
 router.post("/quiz", requireRole("STUDENT"), async (req, res) => {
   try {
+    try {
+      await consumeAiPrompt(req.user.id);
+    } catch (limitErr) {
+      if (limitErr.upgradeRequired) return sendLimitResponse(res, limitErr);
+      throw limitErr;
+    }
+
     const { topic, notes } = req.body;
     const hasTopic = topic && String(topic).trim().length > 0;
     const hasNotes = notes && String(notes).trim().length > 0;
@@ -233,107 +367,46 @@ router.get("/leaderboard", async (req, res) => {
   res.json({ leaderboard: ranked, me: { rank: myRank, ...myRankEntry } });
 });
 
-// ---- Daily challenges ----
-const CHALLENGE_POOL = [
-  { title: "Quiz Whiz", description: "Answer 5 quiz questions correctly today.", targetValue: 5, metric: "quiz_correct", xpReward: 150 },
-  { title: "Deep Work", description: "Log 25 focus minutes today.", targetValue: 25, metric: "focus_minutes", xpReward: 120 },
-  { title: "Card Collector", description: "Review 10 flashcards today.", targetValue: 10, metric: "cards_reviewed", xpReward: 100 },
-  { title: "Daily Attendance", description: "Open the app and start your streak.", targetValue: 1, metric: "login", xpReward: 50 },
-  { title: "Task Tamer", description: "Complete 3 tasks today.", targetValue: 3, metric: "tasks_completed", xpReward: 130 },
-];
-
-// Helper to derive today's progress for the user.
-async function getChallengeProgress(userId, metric) {
-  const today = todayKey();
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-
-  switch (metric) {
-    case "quiz_correct": {
-      const a = await prisma.user.findUnique({ where: { id: userId }, select: { correctAnswers: true, wrongAnswers: true } });
-      // Track correct answers log arrivals later; simplest proxy: count from aggregate or derive.
-      return a.correctAnswers;
-    }
-    case "focus_minutes": {
-      const agg = await prisma.pomodoroSession.aggregate({
-        where: { userId, type: "focus", startedAt: { gte: start } },
-        _sum: { minutes: true },
-      });
-      return agg._sum.minutes || 0;
-    }
-    case "cards_reviewed": {
-      // No dedicated review-log table; approximate using collections count is not right,
-      // so default to 0 — can be extended. We'll treat challenge as completable via
-      // explicit completion endpoint for demos.
-      return 0;
-    }
-    case "login": {
-      const user = await prisma.user.findUnique({ where: { id: userId }, select: { lastActiveDate: true } });
-      return user.lastActiveDate === today ? 1 : 0;
-    }
-    case "tasks_completed": {
-      const count = await prisma.task.count({
-        where: { userId, completed: true, ...(false ? {} : {}) },
-      });
-      // completedAt isn't tracked; approximate with total completed count.
-      return count;
-    }
-    default:
-      return 0;
-  }
-}
-
-async function ensureTodayChallenge() {
-  const today = todayKey();
-  const existing = await prisma.dailyChallenge.findUnique({ where: { date: today } });
-  if (existing) return existing;
-  const pick = CHALLENGE_POOL[today.length % CHALLENGE_POOL.length];
-  return prisma.dailyChallenge.upsert({
-    where: { date: today },
-    update: pick,
-    create: { date: today, ...pick },
-  });
-}
-
 router.get("/challenges", async (req, res) => {
   const challenge = await ensureTodayChallenge();
-  const completion = await prisma.dailyChallengeCompletion.findUnique({
-    where: { challengeId_userId: { challengeId: challenge.id, userId: req.user.id } },
-  });
-  const progress = await getChallengeProgress(req.user.id, challenge.metric);
+  const autoResult = await tryAutoCompleteDailyChallenge(req.user.id);
+  const completed = autoResult.completed;
+  const progress = completed
+    ? challenge.targetValue
+    : Math.min(autoResult.progress ?? (await getChallengeProgress(req.user.id, challenge.metric)), challenge.targetValue);
+
   res.json({
-    challenge: { ...challenge, completed: !!completion },
-    progress: Math.min(progress, challenge.targetValue),
+    challenge: { ...challenge, completed },
+    progress,
     target: challenge.targetValue,
+    autoCompleted: Boolean(autoResult.autoCompleted),
+    xpAwarded: autoResult.xpAwarded || 0,
   });
 });
 
-// Mark today's challenge complete (server verifies the metric where possible).
+// Legacy manual claim — auto-complete is preferred; this endpoint delegates to the same logic.
 router.post("/challenges/:id/complete", async (req, res) => {
   const { id } = req.params;
   const challenge = await prisma.dailyChallenge.findUnique({ where: { id } });
   if (!challenge || challenge.date !== todayKey()) {
     return res.status(404).json({ error: "That challenge isn't available today" });
   }
-  const existing = await prisma.dailyChallengeCompletion.findUnique({
-    where: { challengeId_userId: { challengeId: id, userId: req.user.id } },
-  });
-  if (existing) return res.json({ ok: true, state: existing });
 
-  const progress = await getChallengeProgress(req.user.id, challenge.metric);
-  if (progress < challenge.targetValue) {
-    return res.status(400).json({ error: "You haven't met this challenge's goal yet", progress, target: challenge.targetValue });
+  const result = await tryAutoCompleteDailyChallenge(req.user.id);
+  if (!result.completed) {
+    return res.status(400).json({
+      error: "You haven't met this challenge's goal yet",
+      progress: result.progress ?? 0,
+      target: challenge.targetValue,
+    });
   }
 
-  const state = await prisma.dailyChallengeCompletion.create({
-    data: { challengeId: id, userId: req.user.id },
+  res.status(result.autoCompleted ? 201 : 200).json({
+    ok: true,
+    state: result.state,
+    xpAwarded: result.xpAwarded || 0,
+    alreadyDone: Boolean(result.alreadyDone),
   });
-  await prisma.user.update({
-    where: { id: req.user.id },
-    data: { xp: { increment: challenge.xpReward }, totalXpEarned: { increment: challenge.xpReward }, challengesCompleted: { increment: 1 } },
-  });
-  await prisma.activityLog.create({ data: { userId: req.user.id, action: "challenge_completed", meta: { challengeId: id } } });
-  res.status(201).json({ ok: true, state, xpAwarded: challenge.xpReward });
 });
 
 module.exports = router;

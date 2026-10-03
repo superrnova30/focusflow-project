@@ -8,17 +8,20 @@ const {
   expireLapsedSubscriptions,
   settlePaidPayment,
 } = require('../lib/premium');
+const { BASIC_LIMITS } = require('../lib/featureLimits');
 
 const router = express.Router();
 
 // Benefits shown on the premium page. Kept on the server so the pricing screen
 // and any future client stay in sync with one source of truth.
 const PLAN_BENEFITS = [
-  { key: 'unlimitedCards', label: 'Unlimited Cards', basic: true, unlimited: true },
-  { key: 'unlimitedHearts', label: 'Unlimited Hearts', basic: false, unlimited: true },
-  { key: 'unlimitedAiTutor', label: 'Unlimited AI Tutor', basic: false, unlimited: true },
-  { key: 'unlimitedHints', label: 'Unlimited Hints', basic: false, unlimited: true },
-  { key: 'unlimitedPrompts', label: 'Unlimited Prompts', basic: false, unlimited: true },
+  { key: 'unlimitedCards', label: 'Unlimited Cards', basic: true, unlimited: true, basicDetail: 'Included' },
+  { key: 'unlimitedTasks', label: 'Unlimited Tasks', basic: false, unlimited: true, basicDetail: '5 active tasks' },
+  { key: 'unlimitedHearts', label: 'Unlimited Hearts', basic: false, unlimited: true, basicDetail: '5 hearts · 24h refill' },
+  { key: 'unlimitedAiTutor', label: 'Unlimited AI Tutor', basic: false, unlimited: true, basicDetail: '3 sessions/day' },
+  { key: 'unlimitedHints', label: 'Unlimited Hints', basic: false, unlimited: true, basicDetail: '3 hints/day' },
+  { key: 'unlimitedChat', label: 'Unlimited AI Chat', basic: false, unlimited: true, basicDetail: '15 messages/day' },
+  { key: 'unlimitedPrompts', label: 'Unlimited AI Generations', basic: false, unlimited: true, basicDetail: '10 generations/day' },
 ];
 
 function buildReturnUrl(kind) {
@@ -59,6 +62,7 @@ router.get('/plan', requireAuth, async (req, res) => {
       durationDays,
       heading: 'AI Powered Pomodoro Unlimited members get higher grades',
       benefits: PLAN_BENEFITS,
+      basicLimits: BASIC_LIMITS,
     },
     paymentsEnabled: xendit.paymentsAvailable(),
     testMode: xendit.isTestMode(),
