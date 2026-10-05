@@ -35,7 +35,15 @@ function verifyToken(token) {
 // signup, /auth/me) carries the student's current entitlement — that is what
 // keeps Go Unlimited active across logout/login and page refreshes.
 function publicUser(user) {
-  const { passwordHash, emailVerificationCode, ...safe } = user;
+  const {
+    passwordHash,
+    emailVerificationCode,
+    emailVerificationExpires,
+    passwordResetCodeHash,
+    passwordResetExpires,
+    passwordResetAttempts,
+    ...safe
+  } = user;
   try {
     const { premiumState } = require("./premium");
     safe.premium = premiumState(user);

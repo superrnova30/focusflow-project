@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect, useRef } from "react";
-import { View, Text, StyleSheet, Pressable, Animated } from "react-native";
+import { View, Text, StyleSheet, Pressable, Animated, Easing, AccessibilityInfo } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { Card } from "./Screen";
 import { useTheme } from "../context/ThemeContext";
@@ -27,15 +27,123 @@ function getActivityLevel(day) {
   return 1;
 }
 
+function useReduceMotion() {
+  const [enabled, setEnabled] = useState(false);
+  useEffect(() => {
+    let mounted = true;
+    AccessibilityInfo.isReduceMotionEnabled?.().then((value) => {
+      if (mounted) setEnabled(!!value);
+    });
+    const sub = AccessibilityInfo.addEventListener?.("reduceMotionChanged", setEnabled);
+    return () => {
+      mounted = false;
+      sub?.remove?.();
+    };
+  }, []);
+  return enabled;
+}
+
+function useStreakPulse(reduceMotion) {
+  const pulse = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (reduceMotion) {
+      pulse.setValue(0);
+      return undefined;
+    }
+    pulse.setValue(0);
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, {
+          toValue: 1,
+          duration: 1400,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulse, {
+          toValue: 0,
+          duration: 1600,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse, reduceMotion]);
+  return pulse;
+}
+
+function StreakFlame({ pulse, color, lively = false, size = 10, glow = false }) {
+  const scale = pulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: lively ? [1, 1.16] : [1, 1.07],
+  });
+  const translateY = pulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: lively ? [0.4, -1.4] : [0, -0.5],
+  });
+  const opacity = pulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: lively ? [0.88, 1] : [0.72, 0.92],
+  });
+  const glowScale = pulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.85, 1.35],
+  });
+  const glowOpacity = pulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.12, 0.32],
+  });
+
+  return (
+    <View style={streakFlameStyles.wrap}>
+      {glow ? (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            streakFlameStyles.glow,
+            { backgroundColor: color, opacity: glowOpacity, transform: [{ scale: glowScale }] },
+          ]}
+        />
+      ) : null}
+      <Animated.View style={{ opacity, transform: [{ translateY }, { scale }] }}>
+        <Ionicons name="flame" size={size} color={color} />
+      </Animated.View>
+    </View>
+  );
+}
+
+const streakFlameStyles = StyleSheet.create({
+  wrap: { alignItems: "center", justifyContent: "center" },
+  glow: {
+    position: "absolute",
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+});
+
 /**
  * A self-contained, themed monthly calendar grid.
- * `days` is an array of { date, active, focusMinutes, sessions, quizzes,
- * xpEarned, correct, wrong } objects for the currently-viewed month.
+ * `days` is an array of { date, active, streak, inCurrentStreak, focusMinutes,
+ * sessions, quizzes, xpEarned, correct, wrong } objects for the month.
  * `viewMonth` is a Date pointing at the first of the displayed month.
  */
-export default function Calendar({ days = [], viewMonth, onPrev, onNext, selectedDate, onSelectDate }) {
+export default function Calendar({
+  days = [],
+  viewMonth,
+  onPrev,
+  onNext,
+  selectedDate,
+  onSelectDate,
+  streakColor,
+}) {
   const { colors } = useTheme();
   const styles = useStyles(colors);
+  const streakTint = streakColor || "#F97316";
+  const historicStreakTint = `${streakTint}99`;
+  const reduceMotion = useReduceMotion();
+  const streakPulse = useStreakPulse(reduceMotion);
 
   const [anim] = useState(() => new Animated.Value(0));
 
@@ -118,31 +226,55 @@ export default function Calendar({ days = [], viewMonth, onPrev, onNext, selecte
             const isToday = c.key === todayKeyStr;
             const isSelected = c.key === selectedKey;
             const hasActivity = !!info && info.active;
+            const hasStreak = !!info && info.streak;
+            const inCurrentStreak = !!info && info.inCurrentStreak;
+            const flameColor = inCurrentStreak ? streakTint : historicStreakTint;
 
             return (
               <Pressable
                 key={c.key}
                 onPress={() => onSelectDate && onSelectDate(c.key)}
+                accessibilityRole="button"
+                accessibilityLabel={`${c.day}${inCurrentStreak ? ", current streak day" : hasStreak ? ", streak day" : hasActivity ? ", study activity" : ""}`}
                 style={styles.cell}
               >
-                <View
-                  style={[
-                    styles.dayCircle,
-                    hasActivity && level >= 1 && { backgroundColor: colors.mintSoft },
-                    isSelected && { backgroundColor: colors.tomato },
-                    isToday && !isSelected && { borderColor: colors.tomato, borderWidth: 1.5 },
-                  ]}
-                >
-                  <Text
+                <View style={styles.dayWrap}>
+                  <View
                     style={[
-                      styles.dayText,
-                      isSelected && { color: "#fff", fontWeight: "800" },
-                      isToday && !isSelected && { color: colors.tomato, fontWeight: "800" },
-                      !hasActivity && { color: colors.textMuted },
+                      styles.dayCircle,
+                      hasActivity && level >= 1 && { backgroundColor: colors.mintSoft },
+                      inCurrentStreak && !isSelected && { backgroundColor: `${streakTint}22` },
+                      isSelected && { backgroundColor: colors.tomato },
+                      isToday && !isSelected && { borderColor: colors.tomato, borderWidth: 1.5 },
                     ]}
                   >
-                    {c.day}
-                  </Text>
+                    <Text
+                      style={[
+                        styles.dayText,
+                        isSelected && { color: "#fff", fontWeight: "800" },
+                        isToday && !isSelected && { color: colors.tomato, fontWeight: "800" },
+                        !hasActivity && !inCurrentStreak && { color: colors.textMuted },
+                      ]}
+                    >
+                      {c.day}
+                    </Text>
+                  </View>
+                  {hasStreak ? (
+                    <View
+                      style={[
+                        styles.streakBadge,
+                        { backgroundColor: isSelected ? "#fff" : colors.surface },
+                      ]}
+                    >
+                      <StreakFlame
+                        pulse={streakPulse}
+                        color={isSelected ? streakTint : flameColor}
+                        lively={inCurrentStreak}
+                        glow={inCurrentStreak}
+                        size={10}
+                      />
+                    </View>
+                  ) : null}
                 </View>
                 {/* Activity intensity dots */}
                 <View style={styles.dotRow}>
@@ -162,14 +294,40 @@ export default function Calendar({ days = [], viewMonth, onPrev, onNext, selecte
         </View>
       </Animated.View>
 
+      <View style={styles.legendRow}>
+        <View style={styles.legendItem}>
+          <StreakFlame pulse={streakPulse} color={streakTint} lively glow size={12} />
+          <Text style={styles.legendText}>Current streak</Text>
+        </View>
+        <View style={styles.legendItem}>
+          <StreakFlame pulse={streakPulse} color={historicStreakTint} size={12} />
+          <Text style={styles.legendText}>Past study day</Text>
+        </View>
+      </View>
+
       {/* Selected day detail */}
       <View style={styles.detailBox}>
         <View style={styles.detailHeader}>
           <Ionicons name="calendar" size={16} color={colors.mint} />
           <Text style={styles.detailDate}>{fmt(selectedKey)}</Text>
+          {selectedInfo?.inCurrentStreak ? (
+            <View style={[styles.streakChip, { backgroundColor: `${streakTint}22` }]}>
+              <StreakFlame pulse={streakPulse} color={streakTint} lively glow size={12} />
+              <Text style={[styles.streakChipText, { color: streakTint }]}>Streak day</Text>
+            </View>
+          ) : selectedInfo?.streak ? (
+            <View style={[styles.streakChip, { backgroundColor: colors.bg }]}>
+              <StreakFlame pulse={streakPulse} color={historicStreakTint} size={12} />
+              <Text style={styles.streakChipMuted}>Contributed</Text>
+            </View>
+          ) : null}
         </View>
         {!selectedInfo || !selectedInfo.active ? (
-          <Text style={styles.detailEmpty}>No study activity recorded this day.</Text>
+          <Text style={styles.detailEmpty}>
+            {selectedInfo?.inCurrentStreak
+              ? "This day is part of your current streak. Study today to keep the flame going."
+              : "No study activity recorded this day."}
+          </Text>
         ) : (
           <View style={styles.detailStats}>
             <Stat icon="time-outline" color={colors.tomato} value={`${selectedInfo.focusMinutes || 0}m`} label="Focus" />
@@ -232,7 +390,15 @@ const useStyles = (colors) =>
     cell: {
       width: `${100 / 7}%`,
       alignItems: "center",
-      marginVertical: 4,
+      marginVertical: 6,
+      overflow: "visible",
+    },
+    dayWrap: {
+      width: 36,
+      height: 36,
+      alignItems: "center",
+      justifyContent: "center",
+      overflow: "visible",
     },
     dayCircle: {
       width: 34,
@@ -242,16 +408,49 @@ const useStyles = (colors) =>
       justifyContent: "center",
     },
     dayText: { color: colors.text, fontSize: 13, fontWeight: "600" },
+    streakBadge: {
+      position: "absolute",
+      top: -3,
+      right: -4,
+      width: 16,
+      height: 16,
+      borderRadius: 8,
+      alignItems: "center",
+      justifyContent: "center",
+      borderWidth: 1,
+      borderColor: colors.border,
+      overflow: "visible",
+    },
     dotRow: { flexDirection: "row", gap: 2, marginTop: 3 },
     dot: { width: 4, height: 4, borderRadius: 2 },
+    legendRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 14,
+      marginTop: 10,
+    },
+    legendItem: { flexDirection: "row", alignItems: "center", gap: 5 },
+    legendText: { color: colors.textMuted, fontSize: 11, fontWeight: "600" },
     detailBox: {
       marginTop: 14,
       borderTopWidth: 1,
       borderTopColor: colors.border,
       paddingTop: 12,
     },
-    detailHeader: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 8 },
+    detailHeader: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 8 },
     detailDate: { color: colors.text, fontSize: 13, fontWeight: "700" },
+    streakChip: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      borderRadius: 999,
+      paddingHorizontal: 8,
+      paddingVertical: 3,
+    },
+    streakChipText: { fontSize: 11, fontWeight: "800" },
+    streakChipMuted: { color: colors.textMuted, fontSize: 11, fontWeight: "700" },
     detailEmpty: { color: colors.textMuted, fontSize: 12.5 },
     detailStats: { flexDirection: "row", marginTop: 4 },
   });

@@ -6,18 +6,42 @@ const { sendExpoPush } = require("../lib/reminders");
 const router = express.Router();
 router.use(requireAuth);
 
+function normalizeTimezone(value) {
+  const timezone = String(value || "UTC").trim();
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format();
+    return timezone;
+  } catch (e) {
+    return "UTC";
+  }
+}
+
 // Register (or refresh) a device push token for the authenticated user.
 // `platform` is expected to be "ios" or "android".
 router.post("/register", async (req, res) => {
-  const { token, platform } = req.body;
+  const { token, platform, timezone } = req.body;
   if (!token || typeof token !== "string" || token.trim().length < 10) {
     return res.status(400).json({ error: "A valid push token is required" });
   }
   try {
+    const normalizedTimezone = normalizeTimezone(timezone);
     const saved = await prisma.deviceToken.upsert({
       where: { token: token.trim() },
-      update: { userId: req.user.id, platform: platform || "unknown" },
-      create: { token: token.trim(), userId: req.user.id, platform: platform || "unknown" },
+      update: {
+        userId: req.user.id,
+        platform: platform || "unknown",
+        timezone: normalizedTimezone,
+      },
+      create: {
+        token: token.trim(),
+        userId: req.user.id,
+        platform: platform || "unknown",
+        timezone: normalizedTimezone,
+      },
+    });
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: { timezone: normalizedTimezone },
     });
     res.json({ ok: true, deviceToken: saved });
   } catch (err) {
@@ -52,6 +76,12 @@ router.post("/send-test", async (req, res) => {
       tokens.map((t) => t.token),
       { title: title || "FocusFlow test", body: body || "Your device is successfully registered! 🎉", data: { type: "test" } }
     );
+    if (!result.ok || result.accepted === 0) {
+      return res.status(502).json({
+        error: result.error || "Expo did not accept the notification",
+        result,
+      });
+    }
     res.json({ ok: true, result });
   } catch (err) {
     console.error("Test push failed:", err);

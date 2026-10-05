@@ -27,7 +27,7 @@ async function getChallengeProgress(userId, metric) {
           select: { meta: true },
         }),
         prisma.quizAttempt.aggregate({
-          where: { userId, createdAt: { gte: start } },
+          where: { userId, takenAt: { gte: start } },
           _sum: { score: true },
         }),
       ]);
@@ -105,6 +105,24 @@ async function tryAutoCompleteDailyChallenge(userId) {
   await prisma.activityLog.create({
     data: { userId, action: "challenge_completed", meta: { challengeId: challenge.id, auto: true } },
   });
+  const { recordProfileActivity } = require("./social");
+  recordProfileActivity({
+    userId,
+    type: "challenge",
+    title: `Completed ${challenge.title}`,
+    body: challenge.description,
+    dedupeKey: `challenge:${challenge.id}`,
+    meta: { challengeId: challenge.id, xpReward: challenge.xpReward },
+  }).catch(() => {});
+  const { createNotification } = require("./notifications");
+  createNotification({
+    userId,
+    type: "challenge",
+    title: `Daily challenge complete`,
+    body: challenge.title,
+    data: { screen: "Progress" },
+    dedupeKey: `challenge:${challenge.id}`,
+  }).catch(() => {});
 
   return {
     completed: true,

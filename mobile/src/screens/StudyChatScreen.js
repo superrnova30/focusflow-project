@@ -52,8 +52,13 @@ export default function StudyChatScreen({ navigation, route }) {
   const { user } = useAuth();
   const { width } = useWindowDimensions();
   const isWide = width >= 700;
-  const { messages, send, sending } = useAIChat();
+  const { messages, send, sending, conversationId } = useAIChat();
   const visibleMessages = messages.filter((m) => m.role !== 'system');
+  const isResumedConversation =
+    Boolean(conversationId) && route?.params?.resumedConversationId === conversationId;
+  const chatTitle = isResumedConversation && route?.params?.conversationTitle
+    ? route.params.conversationTitle
+    : 'Study Chat';
   const [text, setText] = useState('');
   const listRef = useRef();
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -74,18 +79,19 @@ export default function StudyChatScreen({ navigation, route }) {
     }
   };
 
-  const sentInitialRef = useRef(false);
+  const handledInitialRequestRef = useRef(null);
   useEffect(() => {
     const initial = route?.params?.initialTopic;
-    if (initial && initial.trim() && !sentInitialRef.current) {
-      sentInitialRef.current = true;
+    const requestKey = route?.params?.initialRequestId || initial;
+    if (initial && initial.trim() && handledInitialRequestRef.current !== requestKey) {
+      handledInitialRequestRef.current = requestKey;
       setTimeout(() => {
         send(initial).catch((e) => {
           handleLimitError(navigation, e);
         });
       }, 120);
     }
-  }, [route?.params?.initialTopic]);
+  }, [navigation, route?.params?.initialRequestId, route?.params?.initialTopic, send]);
 
   const handleScroll = (e) => {
     try {
@@ -109,19 +115,28 @@ export default function StudyChatScreen({ navigation, route }) {
       keyboardVerticalOffset={90}
     >
       <View style={[styles.header, { backgroundColor: colors.surface, borderBottomColor: colors.border }]}> 
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconButton}>
+        <TouchableOpacity
+          onPress={() => navigation.goBack()}
+          style={styles.iconButton}
+          accessibilityLabel="End conversation and go back"
+        >
           <Ionicons name="chevron-back" size={22} color={colors.text} />
         </TouchableOpacity>
 
         <View style={styles.headerTitleWrap}>
-          <Text style={[styles.headerTitle, { color: colors.text }]}>Study Chat</Text>
+          <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={1}>{chatTitle}</Text>
           <Text style={[styles.headerSubtitle, { color: colors.textMuted }]}>
-            {user?.name ? `${user.name.split(' ')[0]} · FocusFlow AI` : 'Study assistant'}
+            {isResumedConversation
+              ? 'Continuing saved conversation'
+              : user?.name
+                ? `${user.name.split(' ')[0]} · FocusFlow AI`
+                : 'Study assistant'}
           </Text>
         </View>
 
         <View style={[styles.statusPill, { backgroundColor: colors.tomatoSoft, borderColor: colors.border }]}>
-          <Text style={[styles.statusText, { color: colors.tomato }]}>Online</Text>
+          <Ionicons name={conversationId ? 'cloud-done' : 'ellipse'} size={9} color={colors.tomato} />
+          <Text style={[styles.statusText, { color: colors.tomato }]}>{conversationId ? 'Saved' : 'Online'}</Text>
         </View>
 
         {/* Jump straight to the saved AI history from where the chat happens. */}
@@ -229,6 +244,9 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   statusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
     paddingHorizontal: 8,
     paddingVertical: 5,
     borderRadius: 999,

@@ -21,7 +21,7 @@ async function taskLimitsForUser(userId) {
 }
 
 router.get("/", async (req, res) => {
-  const archived = req.query.archived === "true";
+  const archived = String(req.query.archived || "").toLowerCase() === "true";
   const tasks = await prisma.task.findMany({
     where: { userId: req.user.id, archived },
     include: { subject: true },

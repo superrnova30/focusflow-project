@@ -5,6 +5,7 @@ import { Screen, Card } from "../components/Screen";
 import { Input, Button } from "../components/Inputs";
 import { useTheme } from "../context/ThemeContext";
 import client from "../api/client";
+import { notifyTasksChanged } from "../lib/tasks";
 
 export default function SubjectsScreen({ navigation }) {
   const { colors } = useTheme();
@@ -47,6 +48,7 @@ export default function SubjectsScreen({ navigation }) {
     try {
       await client.post(`/subjects/${subject.id}/archive`);
       await fetchSubjects();
+      notifyTasksChanged();
     } catch (e) {
       Alert.alert("Error", e.message);
     }
@@ -56,6 +58,7 @@ export default function SubjectsScreen({ navigation }) {
     try {
       await client.post(`/subjects/${subject.id}/restore`);
       await fetchSubjects();
+      notifyTasksChanged();
     } catch (e) {
       Alert.alert("Error", e.message);
     }
@@ -74,6 +77,7 @@ export default function SubjectsScreen({ navigation }) {
             try {
               await client.delete(`/subjects/${subject.id}`);
               await fetchSubjects();
+              notifyTasksChanged();
             } catch (e) {
               Alert.alert("Error", e.message);
             }

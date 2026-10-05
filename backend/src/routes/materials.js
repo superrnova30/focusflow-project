@@ -6,61 +6,7 @@ const prisma = require("../lib/prisma");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { generateStudyPack, generateCoachInsight } = require("../lib/ai");
 const { enforcePromptLimit } = require("../lib/featureLimits");
-
-// Real PDF text extraction. Uses pdf-parse (already a dependency) to pull
-// text out of an uploaded PDF buffer so uploaded documents are actually
-// analyzed rather than stubbed.
-async function parsePdf(buffer) {
-  try {
-    const pdf = require("pdf-parse");
-    const result = await pdf(buffer);
-    return { text: (result && result.text) || "" };
-  } catch (err) {
-    console.error("PDF parsing failed:", err.message);
-    return { text: "" };
-  }
-}
-
-// Extract text from a Word (.docx) document using mammoth.
-async function parseDocx(buffer) {
-  try {
-    const mammoth = require("mammoth");
-    const result = await mammoth.extractRawText({ buffer });
-    return { text: (result && result.value) || "" };
-  } catch (err) {
-    console.error("DOCX parsing failed:", err.message);
-    return { text: "" };
-  }
-}
-
-// Extract text from a PowerPoint (.pptx) / Excel (.xlsx) file using
-// officeparser (handles the whole Office Open XML family).
-async function parseOffice(buffer) {
-  try {
-    const officeParser = require("officeparser");
-    // officeparser accepts a Buffer and returns a plain-text string.
-    const text = await officeParser.parseOfficeAsync(buffer);
-    return { text: text || "" };
-  } catch (err) {
-    console.error("Office parsing failed:", err.message);
-    return { text: "" };
-  }
-}
-
-// Dispatch parsing based on the file type. Returns extracted plain text.
-async function extractTextFromBuffer(fileType, buffer) {
-  switch ((fileType || "pdf").toLowerCase()) {
-    case "docx":
-      return (await parseDocx(buffer)).text;
-    case "pptx":
-    case "xlsx":
-      return (await parseOffice(buffer)).text;
-    default:
-      return (await parsePdf(buffer)).text;
-  }
-}
-
-const SUPPORTED_FILE_TYPES = ["pdf", "docx", "pptx", "xlsx"];
+const { extractTextFromBuffer, SUPPORTED_FILE_TYPES } = require("../lib/documentText");
 
 const UPLOAD_DIR = path.join(__dirname, "..", "..", "uploads");
 

@@ -2,13 +2,14 @@ import React, { createContext, useContext, useState, useCallback, useRef } from 
 import client from '../api/client';
 
 const AIChatContext = createContext(null);
+const SYSTEM_MESSAGE = {
+  id: 'system',
+  role: 'system',
+  content: 'You are a friendly conversational assistant. Respond naturally and match the user tone.',
+};
 
 export function AIChatProvider({ children }) {
-  const [messages, setMessages] = useState([
-    // Keep the client-side system message neutral — backend will pick a
-    // system prompt based on intent. Avoid forcing a study template here.
-    { id: 'system', role: 'system', content: 'You are a friendly conversational assistant. Respond naturally and match the user tone.' },
-  ]);
+  const [messages, setMessages] = useState([SYSTEM_MESSAGE]);
   // Server-side id of the thread these messages belong to. Echoing it back on
   // each turn appends to one saved conversation instead of creating a new one
   // per message, which is what makes History read like real threads.
@@ -19,6 +20,14 @@ export function AIChatProvider({ children }) {
 
   const appendMessage = useCallback((msg) => {
     setMessages((m) => {
+      const previous = m[m.length - 1];
+      if (
+        msg?.role === 'assistant' &&
+        previous?.role === 'assistant' &&
+        String(previous.content || '').trim() === String(msg.content || '').trim()
+      ) {
+        return m;
+      }
       const next = [...m, msg];
       messagesRef.current = next;
       return next;
@@ -26,11 +35,26 @@ export function AIChatProvider({ children }) {
   }, []);
 
   const clear = useCallback(() => {
-    const initial = [{ id: 'system', role: 'system', content: messagesRef.current?.[0]?.content || '' }];
+    const initial = [SYSTEM_MESSAGE];
     messagesRef.current = initial;
     setMessages(initial);
     // Starting a fresh chat should start a fresh saved thread.
     setConversationId(null);
+  }, []);
+
+  const resumeConversation = useCallback((id, savedMessages = []) => {
+    const restored = (Array.isArray(savedMessages) ? savedMessages : [])
+      .filter((message) => message && ['user', 'assistant'].includes(message.role) && String(message.content || '').trim())
+      .map((message, index) => ({
+        id: message.id || `restored-${index}`,
+        role: message.role,
+        content: String(message.content).trim(),
+        createdAt: message.createdAt,
+      }));
+    const next = [SYSTEM_MESSAGE, ...restored];
+    messagesRef.current = next;
+    setMessages(next);
+    setConversationId(id || null);
   }, []);
 
   const send = useCallback(async (text) => {
@@ -39,11 +63,14 @@ export function AIChatProvider({ children }) {
      if (sendingRef.current) return;
      sendingRef.current = true;
     const userMsg = { id: `user-${Date.now()}`, role: 'user', content: String(text) };
-    // Optimistically append the user message and use the latest messages from the ref
-    appendMessage(userMsg);
+    // Build the request from one authoritative snapshot. Calling appendMessage
+    // and then concatenating userMsg again could send the latest message twice.
+    const nextMessages = [...(messagesRef.current || []), userMsg];
+    messagesRef.current = nextMessages;
+    setMessages(nextMessages);
     setSending(true);
     try {
-      const conversation = (messagesRef.current || []).concat([userMsg]).map(({ role, content }) => ({ role, content }));
+      const conversation = nextMessages.map(({ role, content }) => ({ role, content }));
       const payload = { messages: conversation };
       if (conversationId) payload.conversationId = conversationId;
       const { data } = await client.post('/ai/chat', payload, { timeout: 30000 });
@@ -89,10 +116,10 @@ export function AIChatProvider({ children }) {
        sendingRef.current = false;
       setSending(false);
     }
-  }, [appendMessage, messages, conversationId]);
+  }, [appendMessage, conversationId]);
 
   return (
-    <AIChatContext.Provider value={{ messages, appendMessage, send, sending, clear, conversationId }}>
+    <AIChatContext.Provider value={{ messages, appendMessage, send, sending, clear, resumeConversation, conversationId }}>
       {children}
     </AIChatContext.Provider>
   );

@@ -1,0 +1,5 @@
+-- Persistent streak rewards and purchasable hint balance.
+ALTER TABLE "User"
+ADD COLUMN IF NOT EXISTS "coins" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN IF NOT EXISTS "bonusHints" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN IF NOT EXISTS "streakRewardLevel" INTEGER NOT NULL DEFAULT 0;

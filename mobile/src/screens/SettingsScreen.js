@@ -13,6 +13,7 @@ import { registerForPushNotifications, unregisterPushNotifications, sendTestPush
 import { ALARM_SOUNDS, loadAlarmPrefs, saveAlarmPrefs } from "../lib/alarmPrefs";
 import { previewAlarm } from "../lib/alarmPlayer";
 import client from "../api/client";
+import HeaderWallet from "../components/HeaderWallet";
 
 const GOLD = "#FFC15E";
 
@@ -43,6 +44,7 @@ export default function SettingsScreen({ navigation }) {
   const [name, setName] = useState(user?.name || "");
   const [studentId, setStudentId] = useState(user?.studentId || "");
   const [course, setCourse] = useState(user?.course || "");
+  const [school, setSchool] = useState(user?.school || "");
   const [yearLevel, setYearLevel] = useState(user?.yearLevel || "");
   const [section, setSection] = useState(user?.section || "");
   const [profilePicture, setProfilePicture] = useState(user?.profilePicture || "");
@@ -101,6 +103,7 @@ export default function SettingsScreen({ navigation }) {
     setName(user?.name || "");
     setStudentId(user?.studentId || "");
     setCourse(user?.course || "");
+    setSchool(user?.school || "");
     setYearLevel(user?.yearLevel || "");
     setSection(user?.section || "");
     setProfilePicture(user?.profilePicture || "");
@@ -118,6 +121,7 @@ export default function SettingsScreen({ navigation }) {
       name: (user?.name || "").trim(),
       studentId: (user?.studentId || "").trim(),
       course: (user?.course || "").trim(),
+      school: (user?.school || "").trim(),
       yearLevel: (user?.yearLevel || "").trim(),
       section: (user?.section || "").trim(),
       profilePicture: user?.profilePicture || "",
@@ -137,6 +141,7 @@ export default function SettingsScreen({ navigation }) {
       name.trim() !== savedProfile.name ||
       studentId.trim() !== savedProfile.studentId ||
       course.trim() !== savedProfile.course ||
+      school.trim() !== savedProfile.school ||
       yearLevel.trim() !== savedProfile.yearLevel ||
       section.trim() !== savedProfile.section ||
       profilePicture !== savedProfile.profilePicture ||
@@ -151,6 +156,7 @@ export default function SettingsScreen({ navigation }) {
       name,
       studentId,
       course,
+      school,
       yearLevel,
       section,
       profilePicture,
@@ -169,20 +175,16 @@ export default function SettingsScreen({ navigation }) {
     setPushBusy(true);
     try {
       if (value) {
-        const token = await registerForPushNotifications();
-        if (!token) {
-          Alert.alert("Push unavailable", "Permission was denied or this device can't receive push notifications.");
-          setPushEnabled(false);
-          return;
-        }
+        await registerForPushNotifications();
         setPushEnabled(true);
-        Alert.alert("Push enabled", "You'll get study reminders on this device.");
+        Alert.alert("Push enabled", "Background notifications are registered for this device.");
       } else {
         await unregisterPushNotifications();
         setPushEnabled(false);
       }
     } catch (e) {
-      Alert.alert("Error", e.message);
+      setPushEnabled(false);
+      Alert.alert("Push unavailable", e.message || "This device could not be registered.");
     } finally {
       setPushBusy(false);
     }
@@ -191,8 +193,11 @@ export default function SettingsScreen({ navigation }) {
   const handleTestPush = async () => {
     setPushBusy(true);
     try {
-      await sendTestPush();
-      Alert.alert("Sent", "A test notification was sent to this device.");
+      const result = await sendTestPush();
+      Alert.alert(
+        "Notification queued",
+        `Expo accepted the test notification for ${result?.result?.accepted || 1} device${result?.result?.accepted === 1 ? "" : "s"}.`
+      );
     } catch (e) {
       Alert.alert("Error", e.message);
     } finally {
@@ -250,6 +255,7 @@ export default function SettingsScreen({ navigation }) {
         name: name.trim(),
         studentId: studentId.trim(),
         course: course.trim(),
+        school: school.trim(),
         yearLevel: yearLevel.trim(),
         section: section.trim(),
         profilePicture,
@@ -274,6 +280,7 @@ export default function SettingsScreen({ navigation }) {
     setName(savedProfile.name);
     setStudentId(savedProfile.studentId);
     setCourse(savedProfile.course);
+    setSchool(savedProfile.school);
     setYearLevel(savedProfile.yearLevel);
     setSection(savedProfile.section);
     setProfilePicture(savedProfile.profilePicture);
@@ -340,12 +347,28 @@ export default function SettingsScreen({ navigation }) {
   return (
     <Screen>
       <ScrollView
+        style={styles.scrollView}
         showsVerticalScrollIndicator={false}
+        bounces={false}
+        overScrollMode="never"
         contentContainerStyle={[styles.page, hasUnsavedChanges && styles.pageWithStickyBar]}
       >
         <View style={styles.header}>
-          <Text style={styles.eyebrow}>ACCOUNT</Text>
-          <Text style={styles.headerTitle}>Settings</Text>
+          <View style={styles.headerTop}>
+            {navigation?.canGoBack?.() ? (
+              <Pressable
+                onPress={() => navigation.goBack()}
+                style={({ pressed }) => [{ width: 36, height: 36, borderRadius: 10, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center", marginRight: 8 }, pressed && styles.pressed]}
+              >
+                <Ionicons name="chevron-back" size={18} color={colors.text} />
+              </Pressable>
+            ) : null}
+            <View style={{ flex: 1 }}>
+              <Text style={styles.eyebrow}>ACCOUNT</Text>
+              <Text style={styles.headerTitle}>Settings</Text>
+            </View>
+            <HeaderWallet compact={compact} />
+          </View>
           <Text style={styles.headerSubtitle}>
             Profile and study preferences save together. Theme, push, and alarm settings apply instantly.
           </Text>
@@ -359,7 +382,7 @@ export default function SettingsScreen({ navigation }) {
             style={({ pressed }) => [styles.avatarWrap, pressed && styles.pressed]}
           >
             {profilePicture ? (
-              <Image source={{ uri: profilePicture }} style={styles.avatar} />
+              <Image source={{ uri: profilePicture }} style={styles.avatar} resizeMode="cover" />
             ) : (
               <View style={[styles.avatar, styles.avatarFallback]}>
                 <Text style={styles.avatarInitial}>{(name || "?").charAt(0).toUpperCase()}</Text>
@@ -381,6 +404,15 @@ export default function SettingsScreen({ navigation }) {
                 </Text>
               </View>
             </View>
+            {user?.id ? (
+              <Pressable
+                onPress={() => navigation.navigate("ProfileHome")}
+                style={({ pressed }) => [styles.publicProfileLink, pressed && styles.pressed]}
+              >
+                <Ionicons name="globe-outline" size={13} color={colors.violet} />
+                <Text style={styles.publicProfileLinkText}>View public profile</Text>
+              </Pressable>
+            ) : null}
           </View>
           <Pressable onPress={confirmLogout} style={({ pressed }) => [styles.logoutBtn, pressed && styles.pressed]}>
             <Ionicons name="log-out-outline" size={18} color={colors.tomato} />
@@ -428,6 +460,7 @@ export default function SettingsScreen({ navigation }) {
                 <Input label="Student ID" value={studentId} onChangeText={setStudentId} placeholder="Student ID" autoCapitalize="characters" />
               </View>
               <Input label="Course" value={course} onChangeText={setCourse} placeholder="e.g. BS Computer Science" />
+              <Input label="School" value={school} onChangeText={setSchool} placeholder="e.g. FocusFlow University" />
               <View style={styles.formRow}>
                 <Input label="Year level" value={yearLevel} onChangeText={setYearLevel} placeholder="e.g. 2nd Year" />
                 <Input label="Section" value={section} onChangeText={setSection} placeholder="Optional" />
@@ -674,18 +707,22 @@ export default function SettingsScreen({ navigation }) {
 
 const createStyles = (colors, isWide, compact) =>
   StyleSheet.create({
+    scrollView: {
+      flex: 1,
+    },
     page: {
       width: "100%",
       maxWidth: 1120,
       alignSelf: "center",
       paddingTop: SPACING.md,
-      paddingBottom: 40,
+      paddingBottom: SPACING.md,
     },
     pageWithStickyBar: {
       paddingBottom: 96,
     },
     pressed: { opacity: 0.72, transform: [{ scale: 0.985 }] },
     header: { marginBottom: SPACING.lg },
+    headerTop: { flexDirection: "row", alignItems: "flex-start", gap: 12 },
     eyebrow: { color: colors.violet, fontSize: 8, fontWeight: "900", letterSpacing: 1, marginBottom: 3 },
     headerTitle: {
       color: colors.text,
@@ -727,6 +764,14 @@ const createStyles = (colors, isWide, compact) =>
       borderColor: colors.surface,
     },
     accountCopy: { flex: 1, minWidth: 0 },
+    publicProfileLink: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 5,
+      marginTop: 8,
+      alignSelf: "flex-start",
+    },
+    publicProfileLinkText: { color: colors.violet, fontSize: 12, fontWeight: "800" },
     accountName: { color: colors.text, fontSize: compact ? 15 : 18, fontWeight: "900" },
     accountEmail: { color: colors.textMuted, fontSize: compact ? 10.5 : 12, marginTop: 2 },
     accountBadges: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8 },
@@ -790,7 +835,14 @@ const createStyles = (colors, isWide, compact) =>
     subscriptionBadgeActive: { backgroundColor: colors.mint },
     subscriptionBadgeText: { color: "#1A1400", fontSize: 8.5, fontWeight: "900", letterSpacing: 0.5 },
     settingsGrid: { flexDirection: isWide ? "row" : "column", alignItems: "flex-start", gap: 12 },
-    settingsColumn: { flex: 1, width: isWide ? undefined : "100%", minWidth: 0, gap: 12 },
+    settingsColumn: {
+      flexGrow: isWide ? 1 : 0,
+      flexShrink: isWide ? 1 : 0,
+      flexBasis: isWide ? 0 : "auto",
+      width: isWide ? undefined : "100%",
+      minWidth: 0,
+      gap: 12,
+    },
     settingsCard: { width: "100%", borderRadius: RADIUS.lg, marginBottom: 0, padding: compact ? 13 : 16 },
     cardHeading: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 15 },
     cardIcon: { width: 39, height: 39, borderRadius: 12, alignItems: "center", justifyContent: "center", flexShrink: 0 },

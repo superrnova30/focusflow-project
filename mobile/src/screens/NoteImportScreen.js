@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useLayoutEffect } from "react";
+import React, { useState, useMemo, useLayoutEffect, useEffect, useRef } from "react";
 import {
   View,
   Text,
@@ -79,9 +79,13 @@ export default function NoteImportScreen({ navigation }) {
   const [topic, setTopic] = useState("");
   const [notes, setNotes] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [progressStep, setProgressStep] = useState("");
+  const [progressHint, setProgressHint] = useState("");
+  const [elapsedSec, setElapsedSec] = useState(0);
   const [importedNote, setImportedNote] = useState(null);
   const [importMessage, setImportMessage] = useState("");
   const [isPublic, setIsPublic] = useState(false);
+  const elapsedTimer = useRef(null);
 
   const [fileName, setFileName] = useState("");
   const [fileBase64, setFileBase64] = useState("");
@@ -97,6 +101,21 @@ export default function NoteImportScreen({ navigation }) {
       headerStyle: { backgroundColor: colors.bg },
     });
   }, [navigation, colors.text, colors.bg]);
+
+  useEffect(() => {
+    if (!generating) {
+      if (elapsedTimer.current) clearInterval(elapsedTimer.current);
+      elapsedTimer.current = null;
+      return undefined;
+    }
+    setElapsedSec(0);
+    elapsedTimer.current = setInterval(() => {
+      setElapsedSec((sec) => sec + 1);
+    }, 1000);
+    return () => {
+      if (elapsedTimer.current) clearInterval(elapsedTimer.current);
+    };
+  }, [generating]);
 
   const pickFile = async () => {
     try {
@@ -148,26 +167,18 @@ export default function NoteImportScreen({ navigation }) {
 
     setGenerating(true);
     setImportedNote(null);
+    setProgressStep(source === "file" ? "Reading your document" : "Preparing your source");
+    setProgressHint(source === "file" ? "Extracting text and starting the note generator." : "Sending your topic to FocusFlow AI.");
     try {
       let payload = { isPublic };
       if (source === "file") {
-        const upRes = await client.post("/materials/extract-text", {
+        payload = {
+          ...payload,
+          topic: fileName.replace(/\.[^.]+$/, "") || "Imported document",
           fileName,
           fileType,
           base64Content: fileBase64,
-          rawText: "",
-        });
-        const extractedTitle = upRes.data.title || fileName.replace(/\.[^.]+$/, "") || "Imported document";
-        const extractedText = upRes.data.rawText || "";
-        payload = {
-          ...payload,
-          topic: extractedTitle,
-          notes: extractedText.trim() || undefined,
         };
-        if (!payload.topic?.trim()) {
-          Alert.alert("Could not read file", "No text could be extracted from that document. Try pasted notes instead.");
-          return;
-        }
       } else {
         payload = {
           ...payload,
@@ -176,7 +187,11 @@ export default function NoteImportScreen({ navigation }) {
         };
       }
 
-      const { data } = await client.post("/notes/magic-import", payload, { timeout: 120000 });
+      setProgressStep("Generating study notes");
+      setProgressHint("AI is structuring a concise study guide. This is usually quick.");
+      const { data } = await client.post("/notes/magic-import", payload, { timeout: 75000 });
+      setProgressStep("Saving to Your Notes");
+      setProgressHint("Almost done — adding the note to your library.");
       if (!data.saved || !data.note?.id) {
         Alert.alert("Import incomplete", "Notes were generated but could not be saved. Please try again.");
         return;
@@ -283,7 +298,8 @@ export default function NoteImportScreen({ navigation }) {
                       return (
                         <Pressable
                           key={item.key}
-                          onPress={() => setSource(item.key)}
+                          onPress={() => !generating && setSource(item.key)}
+                          disabled={generating}
                           style={({ pressed }) => [
                             styles.sourceTile,
                             isWide && styles.sourceTileWide,
@@ -314,6 +330,7 @@ export default function NoteImportScreen({ navigation }) {
                     <TextInput
                       value={topic}
                       onChangeText={setTopic}
+                      editable={!generating}
                       placeholder="e.g. Photosynthesis, WW2 causes, Calculus limits…"
                       placeholderTextColor={colors.textMuted}
                       style={[styles.input, styles.textInput, { color: colors.text, borderColor: colors.border, backgroundColor: colors.bg }]}
@@ -324,6 +341,7 @@ export default function NoteImportScreen({ navigation }) {
                     <TextInput
                       value={notes}
                       onChangeText={setNotes}
+                      editable={!generating}
                       placeholder="Paste lecture notes, textbook excerpts, or study text here…"
                       placeholderTextColor={colors.textMuted}
                       multiline
@@ -336,6 +354,7 @@ export default function NoteImportScreen({ navigation }) {
                     <>
                       <Pressable
                         onPress={pickFile}
+                        disabled={generating}
                         style={({ pressed }) => [
                           styles.filePicker,
                           { borderColor: colors.violet, backgroundColor: colors.violetSoft },
@@ -368,7 +387,10 @@ export default function NoteImportScreen({ navigation }) {
                   ]}
                 >
                   {generating ? (
-                    <ActivityIndicator color="#fff" />
+                    <>
+                      <ActivityIndicator color="#fff" />
+                      <Text style={styles.primaryBtnText}>Importing…</Text>
+                    </>
                   ) : (
                     <>
                       <Ionicons name="sparkles" size={20} color="#fff" />
@@ -378,9 +400,26 @@ export default function NoteImportScreen({ navigation }) {
                 </Pressable>
 
                 {generating ? (
-                  <View style={styles.loadingBox}>
-                    <Text style={styles.loadingText}>AI is structuring your study guide…</Text>
-                    <Text style={styles.loadingSub}>This may take up to a minute.</Text>
+                  <View style={[styles.progressCard, { backgroundColor: colors.violetSoft, borderColor: colors.violet }]}>
+                    <View style={styles.progressHeader}>
+                      <ActivityIndicator color={colors.violet} />
+                      <Text style={[styles.progressTitle, { color: colors.text }]}>{progressStep || "Importing notes"}</Text>
+                    </View>
+                    <Text style={styles.progressHint}>{progressHint}</Text>
+                    <View style={[styles.progressTrack, { backgroundColor: colors.surface }]}>
+                      <View
+                        style={[
+                          styles.progressFill,
+                          {
+                            backgroundColor: colors.violet,
+                            width: `${Math.min(92, 18 + elapsedSec * 12)}%`,
+                          },
+                        ]}
+                      />
+                    </View>
+                    <Text style={styles.progressMeta}>
+                      {elapsedSec < 2 ? "Starting…" : `Working… ${elapsedSec}s`}
+                    </Text>
                   </View>
                 ) : null}
               </>
@@ -582,6 +621,28 @@ const createStyles = (colors, isWide, compact) =>
     loadingBox: { alignItems: "center", marginTop: SPACING.md, gap: 4 },
     loadingText: { color: colors.text, fontSize: 14, fontWeight: "700" },
     loadingSub: { color: colors.textMuted, fontSize: 12 },
+    progressCard: {
+      borderWidth: 1,
+      borderRadius: RADIUS.lg,
+      padding: SPACING.lg,
+      marginTop: SPACING.md,
+    },
+    progressHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      marginBottom: 8,
+    },
+    progressTitle: { flex: 1, fontSize: 15, fontWeight: "900" },
+    progressHint: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginBottom: 12 },
+    progressTrack: {
+      height: 8,
+      borderRadius: 4,
+      overflow: "hidden",
+      marginBottom: 8,
+    },
+    progressFill: { height: "100%", borderRadius: 4 },
+    progressMeta: { color: colors.textMuted, fontSize: 12, fontWeight: "700" },
     previewHeader: {
       borderWidth: 1,
       borderRadius: RADIUS.lg,

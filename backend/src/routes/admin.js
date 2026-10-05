@@ -2,6 +2,7 @@ const express = require("express");
 const prisma = require("../lib/prisma");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { hashPassword, publicUser } = require("../lib/auth");
+const { issuePasswordResetEmail } = require("../lib/passwordReset");
 const { buildStudentStats } = require("../lib/student_stats");
 const {
   premiumState,
@@ -199,6 +200,10 @@ router.post("/users", async (req, res) => {
   const passwordHash = await hashPassword(password);
   const user = await prisma.user.create({ data: { name, email: email.toLowerCase(), passwordHash, role } });
   await prisma.activityLog.create({ data: { userId: user.id, action: "account_created" } });
+  if (role === "STUDENT") {
+    const { notifyWelcome } = require("../lib/notifications");
+    notifyWelcome(user.id).catch(() => {});
+  }
   res.status(201).json({ user: publicUser(user) });
 });
 
@@ -222,12 +227,36 @@ const allowed = ["name", "email", "role", "status", "course", "yearLevel", "sect
 });
 
 router.post("/users/:id/reset-password", async (req, res) => {
-  const tempPassword = Math.random().toString(36).slice(2, 10);
-  const passwordHash = await hashPassword(tempPassword);
-  const user = await prisma.user.update({ where: { id: req.params.id }, data: { passwordHash } });
-  await prisma.activityLog.create({ data: { userId: user.id, action: "password_reset" } });
-  // In production, email this rather than returning it in the response.
-  res.json({ tempPassword });
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.params.id } });
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (user.role !== "STUDENT") {
+      return res.status(400).json({ error: "Password reset emails can only be sent to student accounts." });
+    }
+    if (!user.email) {
+      return res.status(400).json({ error: "This student has no registered email address." });
+    }
+
+    const result = await issuePasswordResetEmail(user, { initiatedBy: "admin", ignoreCooldown: true });
+    const { notifySystem } = require("../lib/notifications");
+    notifySystem(user.id, {
+      title: "Password reset email sent",
+      body: "Check your inbox for a code so you can create a new password.",
+      dedupeKey: `password_reset:${new Date().toISOString().slice(0, 16)}`,
+      data: { screen: "Settings" },
+      refresh: true,
+    }).catch(() => {});
+    return res.json({
+      ok: true,
+      emailedTo: result.email,
+      message: `A password reset email was sent to ${result.email}. The student can use the verification code to create a new password.`,
+    });
+  } catch (err) {
+    console.error("Admin password reset email failed:", err.message || err);
+    return res.status(err.status || 500).json({
+      error: err.message || "Failed to send the password reset email.",
+    });
+  }
 });
 
 router.delete("/users/:id", async (req, res) => {
@@ -492,6 +521,29 @@ router.patch("/system", async (req, res) => {
     where: { id: 1 }, update: data, create: { id: 1, ...data },
   });
   res.json({ settings });
+});
+
+router.post("/notifications/broadcast", async (req, res) => {
+  try {
+    const title = String(req.body?.title || "").trim();
+    const body = String(req.body?.body || "").trim();
+    if (!title) return res.status(400).json({ error: "A notification title is required." });
+    if (title.length > 80) return res.status(400).json({ error: "Keep the title under 80 characters." });
+    if (body.length > 240) return res.status(400).json({ error: "Keep the message under 240 characters." });
+    const { broadcastSystemUpdate } = require("../lib/notifications");
+    const result = await broadcastSystemUpdate({ title, body });
+    await prisma.activityLog.create({
+      data: {
+        userId: req.user.id,
+        action: "admin_broadcast_notification",
+        meta: { title, sent: result.sent },
+      },
+    });
+    res.json({ ok: true, sent: result.sent });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not send the update to students." });
+  }
 });
 
 // ---- Content oversight (Cards / Notes / AI Coach) ----

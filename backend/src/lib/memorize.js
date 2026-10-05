@@ -1,4 +1,4 @@
-const { levelForXp, xpWithinLevel, xpForNextLevel, LEVEL_XP_STEP } = require("./gamification");
+const { levelForXp, xpWithinLevel, xpForNextLevel, LEVEL_XP_STEP, heartsRefillAtFrom } = require("./gamification");
 
 const MAX_HEARTS = 5;
 const STARTING_HINTS = 3;
@@ -88,17 +88,18 @@ function buildClue(answer) {
 }
 
 function buildGameState(user, premiumActive) {
-  const hearts = premiumActive ? MAX_HEARTS : user.hearts;
-  const hints = premiumActive ? 999 : user.hints;
+  const hearts = user.hearts ?? MAX_HEARTS;
+  const hints = premiumActive ? 999 : (user.hints || 0) + (user.bonusHints || 0);
   const heartsBlocked = !premiumActive && hearts <= 0;
   let heartsRefillAt = null;
-  if (heartsBlocked && user.heartsDepletedAt) {
-    heartsRefillAt = new Date(new Date(user.heartsDepletedAt).getTime() + HEART_REFILL_MS).toISOString();
+  if (heartsBlocked) {
+    heartsRefillAt = heartsRefillAtFrom(user);
   }
   return {
     xp: user.xp,
     hearts,
     hints,
+    coins: user.coins || 0,
     unlimitedHearts: premiumActive,
     unlimitedHints: premiumActive,
     heartsBlocked,

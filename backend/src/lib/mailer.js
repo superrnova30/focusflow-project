@@ -135,6 +135,61 @@ async function sendVerificationEmailMessage(email, code) {
   return sendEmail({ to: email, subject, html, text });
 }
 
+function passwordResetEmailContent(code, { initiatedBy = "self" } = {}) {
+  const adminRequested = initiatedBy === "admin";
+  const subject = `${code} is your FocusFlow password reset code`;
+  const intro = adminRequested
+    ? "An administrator requested a password reset for your FocusFlow account."
+    : "Use this verification code to choose a new FocusFlow password.";
+  const steps = [
+    "1. Open FocusFlow and tap Forgot password.",
+    "2. Enter this email address.",
+    "3. Tap “I already have a code”, then enter the code below.",
+    "4. Create and confirm your new password.",
+  ];
+  const text = [
+    "Reset your FocusFlow password",
+    "",
+    intro,
+    "",
+    `Your verification code is: ${code}`,
+    "",
+    ...steps,
+    "",
+    "This code expires in 15 minutes.",
+    adminRequested
+      ? "If you were not expecting this, you can ignore this email and keep using your current password."
+      : "If you did not ask to reset your password, you can ignore this email.",
+  ].join("\n");
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827;max-width:520px">
+      <h2 style="margin:0 0 12px">Reset your FocusFlow password</h2>
+      <p style="margin:0 0 16px">${intro}</p>
+      <div style="font-size:32px;font-weight:800;letter-spacing:6px;padding:16px 20px;background:#F0ECFF;border-radius:12px;display:inline-block;color:#6C5CE7">
+        ${code}
+      </div>
+      <p style="margin:16px 0 8px">Then finish the reset in the app:</p>
+      <ol style="margin:0 0 16px;padding-left:20px;color:#374151;font-size:14px">
+        <li>Open FocusFlow and tap Forgot password.</li>
+        <li>Enter this email address.</li>
+        <li>Tap “I already have a code”, then enter the code above.</li>
+        <li>Create and confirm your new password.</li>
+      </ol>
+      <p style="margin:0;color:#6B7280;font-size:14px">This code expires in 15 minutes. ${
+        adminRequested
+          ? "If you were not expecting this, you can ignore this email and keep using your current password."
+          : "If you did not request a password reset, you can ignore this email."
+      }</p>
+    </div>
+  `;
+  return { subject, html, text };
+}
+
+async function sendPasswordResetEmailMessage(email, code, options = {}) {
+  const { subject, html, text } = passwordResetEmailContent(code, options);
+  return sendEmail({ to: email, subject, html, text });
+}
+
 async function verifyEmailDelivery() {
   if (!isEmailConfigured()) {
     throw new Error("Email delivery is not configured");
@@ -151,5 +206,6 @@ module.exports = {
   isEmailConfigured,
   sendEmail,
   sendVerificationEmailMessage,
+  sendPasswordResetEmailMessage,
   verifyEmailDelivery,
 };

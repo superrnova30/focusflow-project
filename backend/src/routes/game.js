@@ -11,12 +11,23 @@ const {
   computeCalendar,
   syncHeartRefill,
   loadUserGamification,
+  getStreakLevel,
+  heartsDepletedPayload,
+  heartsRefillAtFrom,
+  loseHeart,
+  awardCorrectAnswer,
   LEVEL_XP_STEP,
   MAX_HEARTS,
 } = require("../lib/gamification");
 const { isPremiumActive, premiumState } = require("../lib/premium");
 const { normalizeMemorizeSettings, buildGameState } = require("../lib/memorize");
-const { buildLimitsPayload, consumeAiPrompt, sendLimitResponse, countActiveTasks } = require("../lib/featureLimits");
+const {
+  buildLimitsPayload,
+  consumeAiPrompt,
+  consumeHint,
+  sendLimitResponse,
+  countActiveTasks,
+} = require("../lib/featureLimits");
 const {
   getChallengeProgress,
   ensureTodayChallenge,
@@ -48,9 +59,11 @@ router.get("/state", async (req, res) => {
       xp: game.xp,
       hearts: game.hearts,
       hints: game.hints,
+      coins: game.coins,
       correctAnswers: user.correctAnswers,
       wrongAnswers: user.wrongAnswers,
       totalXpEarned: user.totalXpEarned,
+      heartsBlocked: game.heartsBlocked,
       heartsRefillAt: game.heartsRefillAt,
       level: game.level,
     },
@@ -92,23 +105,50 @@ router.post("/xp", async (req, res) => {
     where: { id: req.user.id },
     select: { currentLevel: true },
   });
-  const data = { xp: { increment: n }, totalXpEarned: { increment: n } };
-  // A correct answer also increments the correct-answer counter so the
-  // progress dashboard stays in sync with the gamified quiz.
-  if (correct !== false) data.correctAnswers = { increment: 1 };
-  await prisma.user.update({ where: { id: req.user.id }, data });
-  await bumpStreak(req.user.id);
-  const refreshed = await prisma.user.findUnique({
-    where: { id: req.user.id },
-    select: { xp: true, hearts: true, hints: true, totalXpEarned: true, correctAnswers: true, currentLevel: true },
-  });
-  await prisma.activityLog.create({
-    data: { userId: req.user.id, action: "xp_gain", meta: { amount: n, source: "game_quiz" } },
-  });
+
+  let refreshed;
+  let comboHit = false;
+  let coinsEarned = 0;
+  let bonusXp = 0;
+  let xpAwarded = n;
+
+  if (correct === false) {
+    const current = await prisma.user.findUnique({ where: { id: req.user.id }, select: { xp: true } });
+    refreshed = await prisma.user.update({
+      where: { id: req.user.id },
+      data: {
+        xp: { increment: n },
+        totalXpEarned: { increment: n },
+        currentLevel: levelForXp((current?.xp || 0) + n),
+      },
+      select: { xp: true, hearts: true, hints: true, coins: true, totalXpEarned: true, correctAnswers: true, currentLevel: true, answerCombo: true },
+    });
+    await bumpStreak(req.user.id);
+  } else {
+    const reward = await awardCorrectAnswer(req.user.id, { baseXp: n });
+    refreshed = reward.user;
+    comboHit = reward.comboHit;
+    coinsEarned = reward.coinsEarned;
+    bonusXp = reward.bonusXp;
+    xpAwarded = reward.xpAwarded;
+  }
+
   scheduleDailyChallengeCheck(req.user.id);
   const leveledUp = refreshed.currentLevel > (before?.currentLevel || 1);
+  if (refreshed.coins != null) {
+    // keep shop caches in sync when a combo pays out
+  }
   res.json({
-    state: refreshed,
+    state: {
+      xp: refreshed.xp,
+      hearts: refreshed.hearts,
+      hints: refreshed.hints,
+      coins: refreshed.coins || 0,
+      totalXpEarned: refreshed.totalXpEarned,
+      correctAnswers: refreshed.correctAnswers,
+      currentLevel: refreshed.currentLevel,
+      answerCombo: refreshed.answerCombo,
+    },
     level: {
       current: refreshed.currentLevel,
       xpWithinLevel: xpWithinLevel(refreshed.xp),
@@ -116,6 +156,10 @@ router.post("/xp", async (req, res) => {
       step: LEVEL_XP_STEP,
     },
     leveledUp,
+    comboHit,
+    coinsEarned,
+    bonusXp,
+    xpAwarded,
   });
 });
 
@@ -126,16 +170,38 @@ router.post("/hearts", async (req, res) => {
   let user = await loadUserGamification(req.user.id);
   if (!user) return res.status(404).json({ error: "User not found" });
 
-  // Unlimited Hearts: a premium student can never be drained. We still
-  // record the attempt so the quiz flow works identically, but the stored
-  // value stays pinned at the maximum.
-  if (isPremiumActive(user)) {
-    const pinned = await prisma.user.update({
-      where: { id: req.user.id },
-      data: { hearts: MAX_HEARTS, heartsDepletedAt: null },
-      select: { xp: true, hearts: true, hints: true, totalXpEarned: true },
-    });
-    return res.json({ state: pinned, unlimitedHearts: true, gameOver: false });
+  const requestedDelta = Math.floor(Number(delta));
+  if (typeof set !== "number" && Number.isFinite(requestedDelta) && requestedDelta < 0) {
+    try {
+      const lost = await loseHeart(req.user.id, "game_quiz");
+      return res.json({
+        state: {
+          xp: lost.user.xp,
+          hearts: lost.hearts,
+          hints: lost.user.hints,
+          coins: lost.coins,
+          totalXpEarned: lost.user.totalXpEarned,
+          heartsDepletedAt: lost.user.heartsDepletedAt,
+        },
+        gameOver: lost.gameOver,
+        heartsBlocked: lost.heartsBlocked,
+        heartsRefillAt: lost.heartsRefillAt,
+        coins: lost.coins,
+        unlimitedHearts: lost.unlimitedHearts,
+        unlimitedRefill: lost.unlimitedRefill,
+      });
+    } catch (err) {
+      if (err.status === 403 && err.payload) return res.status(403).json(err.payload);
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      throw err;
+    }
+  }
+
+  if (user.hearts <= 0) {
+    user = await syncHeartRefill(user);
+    if (user.hearts <= 0) {
+      return res.status(403).json(heartsDepletedPayload(user));
+    }
   }
 
   let nextHearts = user.hearts;
@@ -145,15 +211,7 @@ router.post("/hearts", async (req, res) => {
     if (target >= MAX_HEARTS) {
       user = await syncHeartRefill(user);
       if (user.hearts <= 0) {
-        return res.status(403).json({
-          error: "Hearts depleted. Wait 24 hours for a refill, or upgrade to Go Unlimited for unlimited hearts.",
-          code: "HEARTS_DEPLETED",
-          gameOver: true,
-          upgradeRequired: true,
-          heartsRefillAt: user.heartsDepletedAt
-            ? new Date(new Date(user.heartsDepletedAt).getTime() + 24 * 60 * 60 * 1000).toISOString()
-            : null,
-        });
+        return res.status(403).json(heartsDepletedPayload(user));
       }
       nextHearts = user.hearts;
     } else {
@@ -175,7 +233,7 @@ router.post("/hearts", async (req, res) => {
   const updated = await prisma.user.update({
     where: { id: req.user.id },
     data: heartData,
-    select: { xp: true, hearts: true, hints: true, totalXpEarned: true, heartsDepletedAt: true },
+    select: { xp: true, hearts: true, hints: true, coins: true, totalXpEarned: true, heartsDepletedAt: true },
   });
 
   if (nextHearts < user.hearts) {
@@ -189,43 +247,123 @@ router.post("/hearts", async (req, res) => {
   });
 
   const gameOver = nextHearts <= 0;
-  const heartsRefillAt =
-    gameOver && updated.heartsDepletedAt
-      ? new Date(new Date(updated.heartsDepletedAt).getTime() + 24 * 60 * 60 * 1000).toISOString()
-      : null;
+  const heartsRefillAt = gameOver ? heartsRefillAtFrom(updated) : null;
 
-  res.json({ state: updated, gameOver, heartsRefillAt });
+  res.json({
+    state: updated,
+    gameOver,
+    heartsBlocked: gameOver,
+    heartsRefillAt,
+    coins: updated.coins || 0,
+  });
 });
 
 // Use a hint key during Memorize mode.
 router.post("/hints", async (req, res) => {
-  let user = await loadUserGamification(req.user.id);
-  if (!user) return res.status(404).json({ error: "User not found" });
-
-  if (isPremiumActive(user)) {
-    return res.json({ hints: 999, unlimitedHints: true });
-  }
-
-  if (user.hints <= 0) {
-    return res.status(403).json({
-      error: "No hints remaining today. Upgrade to Go Unlimited for unlimited hints.",
-      code: "HINTS_DEPLETED",
-      upgradeRequired: true,
-      limits: buildLimitsPayload(user),
+  try {
+    const result = await consumeHint(req.user.id);
+    await prisma.activityLog.create({
+      data: { userId: req.user.id, action: "hint_used", meta: req.body || {} },
     });
+    res.json({ hints: result.hints, unlimitedHints: result.unlimitedHints });
+  } catch (err) {
+    if (err.code === "USER_NOT_FOUND") return res.status(404).json({ error: err.message });
+    if (err.code === "NO_HINTS_REMAINING") {
+      return res.status(403).json({
+        error: "No hints remaining. Earn coins from streak levels or upgrade for unlimited hints.",
+        code: "HINTS_DEPLETED",
+        upgradeRequired: true,
+        limits: err.limits,
+      });
+    }
+    throw err;
   }
+});
 
-  const updated = await prisma.user.update({
-    where: { id: req.user.id },
-    data: { hints: { decrement: 1 } },
-    select: { hints: true },
-  });
+// Spend streak coins in the student reward shop.
+router.post("/coins/spend", async (req, res) => {
+  const item = String(req.body?.item || "").toLowerCase();
+  const prices = { heart: 5, hint: 10 };
+  if (!prices[item]) return res.status(400).json({ error: "item must be 'heart' or 'hint'" });
+  const quantity = item === "heart"
+    ? Math.max(1, Math.min(MAX_HEARTS, Math.floor(Number(req.body?.quantity) || 1)))
+    : 1;
+  const price = prices[item] * quantity;
 
-  await prisma.activityLog.create({
-    data: { userId: req.user.id, action: "hint_used", meta: req.body || {} },
-  });
+  try {
+    // Apply any due automatic refill before deciding whether another heart can
+    // be purchased, so students never spend coins on an already-refilled bar.
+    await loadUserGamification(req.user.id);
+    const updated = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.findUnique({ where: { id: req.user.id } });
+      if (!user) {
+        const err = new Error("User not found");
+        err.status = 404;
+        throw err;
+      }
+      if (isPremiumActive(user)) {
+        const err = new Error(`Your Unlimited plan already includes unlimited ${item === "heart" ? "hearts" : "hints"}.`);
+        err.status = 400;
+        throw err;
+      }
+      if (item === "heart" && user.hearts >= MAX_HEARTS) {
+        const err = new Error("Your hearts are already full.");
+        err.status = 400;
+        throw err;
+      }
+      if (item === "heart" && user.hearts + quantity > MAX_HEARTS) {
+        const err = new Error(`You can only revive ${MAX_HEARTS - user.hearts} more heart${MAX_HEARTS - user.hearts === 1 ? "" : "s"}.`);
+        err.status = 400;
+        throw err;
+      }
 
-  res.json({ hints: updated.hints, unlimitedHints: false });
+      const data = item === "heart"
+        ? { coins: { decrement: price }, hearts: { increment: quantity }, heartsDepletedAt: null }
+        : { coins: { decrement: price }, bonusHints: { increment: 1 } };
+      const spent = await tx.user.updateMany({
+        where: {
+          id: req.user.id,
+          coins: { gte: price },
+          ...(item === "heart" ? { hearts: { lte: MAX_HEARTS - quantity } } : {}),
+        },
+        data,
+      });
+      if (spent.count === 0) {
+        const current = await tx.user.findUnique({ where: { id: req.user.id } });
+        const err = new Error(
+          item === "heart" && current.hearts >= MAX_HEARTS
+            ? "Your hearts are already full."
+            : `You need ${price} coins to buy this reward.`
+        );
+        err.status = 400;
+        throw err;
+      }
+
+      await tx.activityLog.create({
+        data: {
+          userId: req.user.id,
+          action: "coins_spent",
+          meta: { item, cost: price, quantity },
+        },
+      });
+      return tx.user.findUnique({ where: { id: req.user.id } });
+    });
+
+    res.json({
+      coins: updated.coins,
+      hearts: updated.hearts,
+      hints: updated.hints + updated.bonusHints,
+      bonusHints: updated.bonusHints,
+      heartsBlocked: updated.hearts <= 0,
+      heartsRefillAt: item === "heart" || updated.hearts > 0 ? null : heartsRefillAtFrom(updated),
+      item,
+      quantity,
+      cost: price,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    throw err;
+  }
 });
 
 // ---- Gamified quiz generation ----
@@ -234,6 +372,11 @@ router.post("/hints", async (req, res) => {
 // self-scoring, instant-feedback quiz (XP/hearts are synced per answer).
 router.post("/quiz", requireRole("STUDENT"), async (req, res) => {
   try {
+    const player = await loadUserGamification(req.user.id);
+    if (player && !isPremiumActive(player) && player.hearts <= 0) {
+      return res.status(403).json(heartsDepletedPayload(player));
+    }
+
     try {
       await consumeAiPrompt(req.user.id);
     } catch (limitErr) {
@@ -283,12 +426,12 @@ router.post("/quiz", requireRole("STUDENT"), async (req, res) => {
 
 // ---- Streak ----
 router.get("/streak", async (req, res) => {
-  await bumpStreak(req.user.id);
+  const streakUpdate = await bumpStreak(req.user.id, req.query.timezone);
   const user = await prisma.user.findUnique({
     where: { id: req.user.id },
     select: {
       streakCount: true, longestStreak: true, lastActiveDate: true,
-      currentLevel: true, xp: true, challengesCompleted: true,
+      currentLevel: true, xp: true, challengesCompleted: true, coins: true,
     },
   });
   res.json({
@@ -296,12 +439,15 @@ router.get("/streak", async (req, res) => {
       current: user.streakCount,
       longest: user.longestStreak,
       lastActiveDate: user.lastActiveDate,
+      level: getStreakLevel(user.streakCount),
     },
     level: {
       current: user.currentLevel,
       xpWithinLevel: xpWithinLevel(user.xp),
       xpForNext: xpForNextLevel(user.xp),
     },
+    coins: user.coins,
+    streakCoinsEarned: streakUpdate?.streakCoinsEarned || 0,
   });
 });
 
@@ -309,28 +455,29 @@ router.get("/streak", async (req, res) => {
 // Returns the student's full progress dashboard payload: hearts, xp + level,
 // streak summary, and per-day calendar activity for the requested month.
 router.get("/progress", async (req, res) => {
-  await bumpStreak(req.user.id);
-  const user = await prisma.user.findUnique({
-    where: { id: req.user.id },
-    select: {
-      xp: true, hearts: true, totalXpEarned: true, correctAnswers: true, wrongAnswers: true,
-      streakCount: true, longestStreak: true, lastActiveDate: true, currentLevel: true,
-      challengesCompleted: true,
-    },
-  });
+  const streakUpdate = await bumpStreak(req.user.id, req.query.timezone);
+  const user = await loadUserGamification(req.user.id);
   if (!user) return res.status(404).json({ error: "User not found" });
 
   const anchor = req.query.month ? `${req.query.month}-01` : undefined;
-  const calendar = await computeCalendar(req.user.id, anchor);
+  const calendar = await computeCalendar(req.user.id, anchor, {
+    timezone: req.query.timezone || user.timezone,
+    lastActiveDate: user.lastActiveDate,
+    streakCount: user.streakCount,
+  });
 
   res.json({
     user: {
       xp: user.xp,
       hearts: user.hearts,
+      coins: user.coins,
+      hints: user.hints + user.bonusHints,
       totalXpEarned: user.totalXpEarned,
       correctAnswers: user.correctAnswers,
       wrongAnswers: user.wrongAnswers,
       challengesCompleted: user.challengesCompleted,
+      heartsBlocked: !isPremiumActive(user) && user.hearts <= 0,
+      heartsRefillAt: !isPremiumActive(user) && user.hearts <= 0 ? heartsRefillAtFrom(user) : null,
     },
     level: {
       current: user.currentLevel,
@@ -342,7 +489,9 @@ router.get("/progress", async (req, res) => {
       current: user.streakCount,
       longest: user.longestStreak,
       lastActiveDate: user.lastActiveDate,
+      level: getStreakLevel(user.streakCount),
     },
+    streakCoinsEarned: streakUpdate?.streakCoinsEarned || 0,
     calendar,
   });
 });
@@ -358,7 +507,7 @@ router.get("/leaderboard", async (req, res) => {
   });
   const myRankEntry = await prisma.user.findUnique({
     where: { id: req.user.id },
-    select: { name: true, xp: true, totalXpEarned: true, longestStreak: true, streakCount: true },
+    select: { id: true, name: true, xp: true, totalXpEarned: true, longestStreak: true, streakCount: true },
   });
   const myRank = (await prisma.user.count({ where: { role: "STUDENT", xp: { gt: req.user.xp } } })) + 1;
 

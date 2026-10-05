@@ -18,6 +18,7 @@ import { AiAssistantAvatar, ChatParticipantAvatar } from '../components/ChatAvat
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { useAIHistory, relativeTime } from '../context/AIHistoryContext';
+import { useAIChat } from '../context/AIChatContext';
 
 const INTENT_STYLE = {
   study: { label: 'Study session', icon: 'school' },
@@ -95,6 +96,7 @@ export default function AIHistoryDetailScreen({ navigation, route }) {
   const initialTitle = route?.params?.title;
 
   const { loadConversation, togglePin, remove, rename, conversations } = useAIHistory();
+  const { resumeConversation } = useAIChat();
 
   const [conversation, setConversation] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -208,16 +210,18 @@ export default function AIHistoryDetailScreen({ navigation, route }) {
     ]);
   }, [conversationId, remove, navigation]);
 
-  // Hand the last question back to the chat screen so the student can pick up
-  // the thread where they left off.
   const handleContinue = useCallback(() => {
-    const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-    if (!lastUser) {
-      navigation.navigate('Study', { screen: 'StudyChat' });
-      return;
+    resumeConversation(conversationId, messages);
+    const routeNames = navigation.getState?.()?.routeNames || [];
+    if (routeNames.includes('StudyChat')) {
+      navigation.navigate('StudyChat', { resumedConversationId: conversationId, conversationTitle: displayTitle });
+    } else {
+      navigation.navigate('Study', {
+        screen: 'StudyChat',
+        params: { resumedConversationId: conversationId, conversationTitle: displayTitle },
+      });
     }
-    navigation.navigate('Study', { screen: 'StudyChat', params: { initialTopic: lastUser.content } });
-  }, [messages, navigation]);
+  }, [conversationId, displayTitle, messages, navigation, resumeConversation]);
 
   const intent = INTENT_STYLE[conversation?.intent] || INTENT_STYLE.other;
   const userCount = messages.filter((m) => m.role === 'user').length;
@@ -279,6 +283,10 @@ export default function AIHistoryDetailScreen({ navigation, route }) {
           </View>
 
           <View style={s.actionRow}>
+            <Pressable onPress={handleContinue} style={[s.continuePill, { backgroundColor: colors.violet }]}>
+              <Ionicons name="chatbubble-ellipses" size={15} color="#fff" />
+              <Text style={s.continuePillText}>Continue chat</Text>
+            </Pressable>
             <Pressable onPress={handlePin} style={[s.actionPill, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <Ionicons name={isPinned ? 'pin' : 'pin-outline'} size={15} color={isPinned ? colors.violet : colors.textMuted} />
               <Text style={[s.actionPillText, { color: colors.text }]}>{isPinned ? 'Pinned' : 'Pin'}</Text>
@@ -311,14 +319,6 @@ export default function AIHistoryDetailScreen({ navigation, route }) {
           />
         ))}
 
-        {/* Continue */}
-        <Pressable
-          onPress={handleContinue}
-          style={({ pressed }) => [s.continueBtn, { backgroundColor: colors.violet, opacity: pressed ? 0.9 : 1 }]}
-        >
-          <Ionicons name="arrow-forward-circle" size={18} color="#fff" />
-          <Text style={s.continueBtnText}>Continue in AI chat</Text>
-        </Pressable>
       </ScrollView>
     </Screen>
   );
@@ -368,15 +368,14 @@ const useStyles = (colors) =>
       paddingVertical: 8,
     },
     actionPillText: { fontSize: 12, fontWeight: '700' },
-    sectionLabel: { fontSize: 11.5, fontWeight: '800', letterSpacing: 0.7, marginBottom: 12, marginTop: 4 },
-    continueBtn: {
+    continuePill: {
       flexDirection: 'row',
       alignItems: 'center',
-      justifyContent: 'center',
-      gap: 8,
-      borderRadius: 15,
-      paddingVertical: 14,
-      marginTop: 10,
+      gap: 6,
+      borderRadius: 999,
+      paddingHorizontal: 14,
+      paddingVertical: 9,
     },
-    continueBtnText: { color: '#fff', fontWeight: '800', fontSize: 14.5 },
+    continuePillText: { color: '#fff', fontSize: 12, fontWeight: '800' },
+    sectionLabel: { fontSize: 11.5, fontWeight: '800', letterSpacing: 0.7, marginBottom: 12, marginTop: 4 },
   });

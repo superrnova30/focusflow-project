@@ -88,6 +88,9 @@ async function grantPremium({ userId, paymentId, plan = 'unlimited', durationDay
     },
   });
 
+  const { notifyPremium } = require("./notifications");
+  notifyPremium(userId).catch(() => {});
+
   return updated;
 }
 
@@ -145,9 +148,27 @@ async function expireLapsedSubscriptions() {
  * from both the webhook and the client-triggered verification — whichever
  * arrives first wins, and the second becomes a no-op.
  */
+function invoiceMatchesPayment(payment, invoice) {
+  if (!payment || !invoice) return false;
+  if (invoice.amount != null && Number(invoice.amount) !== Number(payment.amount)) return false;
+  if (invoice.currency && payment.currency) {
+    if (String(invoice.currency).toUpperCase() !== String(payment.currency).toUpperCase()) return false;
+  }
+  return true;
+}
+
 async function settlePaidPayment({ payment, invoice, source }) {
   if (!payment) return { alreadySettled: false };
   if (payment.status === 'PAID') return { alreadySettled: true };
+
+  if (!invoiceMatchesPayment(payment, invoice)) {
+    console.error('[premium] Invoice amount/currency mismatch — refusing upgrade', {
+      paymentId: payment.id,
+      paymentAmount: payment.amount,
+      invoiceAmount: invoice && invoice.amount,
+    });
+    throw new Error('Payment amount verification failed');
+  }
 
   const paidAt = invoice && invoice.paid_at ? new Date(invoice.paid_at) : new Date();
 

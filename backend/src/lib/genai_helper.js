@@ -66,6 +66,12 @@ async function generateContentWithRetry(client, params, opts = {}) {
         // model-level failure so we fall through to a model that completes.
         const finishReason = resp && resp.candidates && resp.candidates[0] && resp.candidates[0].finishReason;
         if (finishReason === 'MAX_TOKENS' && i < chain.length - 1) {
+          const { hasCompleteJsonObject } = require('./documentText');
+          const parts = resp?.candidates?.[0]?.content?.parts;
+          const visibleText = Array.isArray(parts) ? parts.map((part) => part.text || "").join("") : "";
+          if (hasCompleteJsonObject(visibleText)) {
+            return resp;
+          }
           console.warn(`GenAI: model '${model}' hit MAX_TOKENS (truncated); trying a fallback model.`);
           lastChainErr = new Error(`Model ${model} truncated output (MAX_TOKENS)`);
           continue;

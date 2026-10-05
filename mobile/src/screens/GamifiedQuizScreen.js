@@ -8,15 +8,19 @@ import {
   Alert,
   ScrollView,
   useWindowDimensions,
+  ActivityIndicator,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
 import { Screen } from "../components/Screen";
+import HeartsBlockedPanel from "../components/HeartsBlockedPanel";
 import { useTheme } from "../context/ThemeContext";
 import client from "../api/client";
+import { startGoUnlimitedCheckout } from "../lib/upgradePrompt";
+import { MAX_HEARTS } from "../lib/hearts";
+import { setCachedCoins } from "../lib/coins";
 
 const XP_PER_CORRECT = 200;
-const MAX_HEARTS = 5;
 const OPTION_LABELS = ["A", "B", "C", "D"];
 
 export default function GamifiedQuizScreen({ route, navigation }) {
@@ -32,8 +36,14 @@ export default function GamifiedQuizScreen({ route, navigation }) {
 
   // Reconstruct questions with their answers (the server strips answers and
   // sends a parallel answerKey array to keep the payload tamper-resistant).
+  const sameAnswer = (a, b) =>
+    String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
+
   const buildQuestions = (qs, key) =>
-    (qs || []).map((q, i) => ({ ...q, answer: key?.[i] ?? "" }));
+    (qs || []).map((q, i) => ({
+      ...q,
+      answer: (key && key[i] != null && String(key[i]).length ? key[i] : q.answer) || "",
+    }));
 
   const [questions, setQuestions] = useState(() => buildQuestions(initialQuestions, initialAnswerKey));
   const [idx, setIdx] = useState(0);
@@ -45,6 +55,10 @@ export default function GamifiedQuizScreen({ route, navigation }) {
   const [chosenOption, setChosenOption] = useState(null);
   const [phase, setPhase] = useState("question"); // "question" | "answered" | "gameover" | "complete"
   const [loading, setLoading] = useState(false);
+  const [coins, setCoins] = useState(0);
+  const [heartsRefillAt, setHeartsRefillAt] = useState(null);
+  const [buying, setBuying] = useState(null);
+  const depletedAfterAnswer = useRef(false);
 
   // Animations
   const cardAnim = useRef(new Animated.Value(0)).current;
@@ -54,9 +68,28 @@ export default function GamifiedQuizScreen({ route, navigation }) {
   const floatTranslate = useRef(new Animated.Value(0)).current;
   const [floatText, setFloatText] = useState("");
 
-  // If no questions were passed (deep-link / refresh), try to fetch them.
+  const syncGameState = useCallback(async () => {
+    try {
+      const { data } = await client.get("/game/state");
+      const state = data.state || {};
+      setXp(state.xp ?? 0);
+      setHearts(state.hearts ?? MAX_HEARTS);
+      setCoins(state.coins || 0);
+      setHeartsRefillAt(state.heartsRefillAt || null);
+      if (state.heartsBlocked || (state.hearts ?? MAX_HEARTS) <= 0) {
+        depletedAfterAnswer.current = false;
+        setPhase((current) => (current === "complete" ? current : "gameover"));
+        return state;
+      }
+      return state;
+    } catch {
+      return null;
+    }
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
+      syncGameState();
       if (initialQuestions.length === 0) {
         const key = route.params?.regenerateKey;
         if (key) {
@@ -68,7 +101,7 @@ export default function GamifiedQuizScreen({ route, navigation }) {
             .finally(() => setLoading(false));
         }
       }
-    }, [initialQuestions.length, route.params?.regenerateKey])
+    }, [initialQuestions.length, route.params?.regenerateKey, syncGameState])
   );
 
   useEffect(() => {
@@ -107,8 +140,12 @@ export default function GamifiedQuizScreen({ route, navigation }) {
 
   const answerQuestion = async (option) => {
     if (phase !== "question" || loading) return;
+    if (hearts <= 0) {
+      setPhase("gameover");
+      return;
+    }
     const q = questions[idx];
-    const isCorrect = option === q.answer;
+    const isCorrect = sameAnswer(option, q.answer);
     setChosenOption(option);
     setSelected(isCorrect ? "correct" : "wrong");
     setPhase("answered");
@@ -123,7 +160,17 @@ export default function GamifiedQuizScreen({ route, navigation }) {
       animateXp();
       showFloat(`+${XP_PER_CORRECT} XP`);
       try {
-        await client.post("/game/xp", { amount: XP_PER_CORRECT, correct: true });
+        const { data } = await client.post("/game/xp", { amount: XP_PER_CORRECT, correct: true });
+        if (data?.state?.xp != null) setXp(data.state.xp);
+        if (data?.state?.coins != null) {
+          setCoins(data.state.coins);
+          setCachedCoins(data.state.coins);
+        }
+        if (data?.comboHit) {
+          const extra = data.bonusXp ? ` +${data.bonusXp} bonus XP` : "";
+          showFloat(`Combo! +${data.coinsEarned || 1} coin${extra}`);
+          setXpEarned((current) => current + (data.bonusXp || 0));
+        }
       } catch (e) {
         // Optimistic update already applied; ignore sync failure.
       }
@@ -133,14 +180,32 @@ export default function GamifiedQuizScreen({ route, navigation }) {
       animateHeartLoss();
       showFloat("-1 ❤️");
       try {
-        await client.post("/game/hearts", { delta: -1 });
+        const { data } = await client.post("/game/hearts", { delta: -1 });
+        setHearts(data.state?.hearts ?? newHearts);
+        setCoins(data.coins ?? data.state?.coins ?? coins);
+        if (data.heartsRefillAt) setHeartsRefillAt(data.heartsRefillAt);
+        if (data.gameOver || (data.state?.hearts ?? newHearts) <= 0) {
+          depletedAfterAnswer.current = true;
+          setPhase("gameover");
+        }
       } catch (e) {
-        // ignore
+        const refillAt = e.response?.data?.heartsRefillAt;
+        if (refillAt) setHeartsRefillAt(refillAt);
+        if (e.response?.data?.coins != null) setCoins(e.response.data.coins);
+        if (e.response?.data?.code === "HEARTS_DEPLETED" || newHearts <= 0) {
+          depletedAfterAnswer.current = true;
+          setHearts(0);
+          setPhase("gameover");
+        }
       }
     }
   };
 
   const nextQuestion = () => {
+    if (hearts <= 0) {
+      setPhase("gameover");
+      return;
+    }
     if (idx + 1 < questions.length) {
       setIdx(idx + 1);
       setSelected(null);
@@ -151,16 +216,51 @@ export default function GamifiedQuizScreen({ route, navigation }) {
     }
   };
 
-  const retryQuiz = () => {
+  const continueAfterRevive = (nextHearts) => {
+    setSelected(null);
+    setChosenOption(null);
+    if (nextHearts <= 0) {
+      setPhase("gameover");
+      return;
+    }
+    if (depletedAfterAnswer.current && idx + 1 < questions.length) {
+      setIdx((current) => current + 1);
+    }
+    depletedAfterAnswer.current = false;
+    setPhase("question");
+  };
+
+  const retryQuiz = async () => {
+    const state = await syncGameState();
+    if (!state || state.heartsBlocked || (state.hearts ?? 0) <= 0) {
+      setPhase("gameover");
+      Alert.alert("Hearts needed", "Revive a heart with coins or wait for the 24-hour refill before retrying.");
+      return;
+    }
     setIdx(0);
     setScore(0);
     setXpEarned(0);
     setSelected(null);
     setChosenOption(null);
     setPhase("question");
-    // Refill hearts for a retry.
-    client.post("/game/hearts", { set: MAX_HEARTS }).catch(() => {});
-    setHearts(MAX_HEARTS);
+  };
+
+  const buyHearts = async (quantity) => {
+    if (buying) return;
+    setBuying(quantity > 1 ? "hearts" : "heart");
+    try {
+      const { data } = await client.post("/game/coins/spend", { item: "heart", quantity });
+      setCoins(data.coins || 0);
+      setCachedCoins(data.coins || 0);
+      setHearts(data.hearts || 0);
+      setHeartsRefillAt(null);
+      Alert.alert("Heart revived", quantity > 1 ? `You restored ${quantity} hearts.` : "You revived 1 heart. You can continue the quiz.");
+      continueAfterRevive(data.hearts || 0);
+    } catch (e) {
+      Alert.alert("Unable to revive", e.response?.data?.error || e.message || "Please try again.");
+    } finally {
+      setBuying(null);
+    }
   };
 
   const newSession = () => {
@@ -200,52 +300,34 @@ export default function GamifiedQuizScreen({ route, navigation }) {
   if (phase === "gameover") {
     return (
       <Screen>
-        <View style={styles.centerWrap}>
-          <Animated.View style={[styles.gameOverEmoji, { opacity: cardAnim }]}>
-            <Text style={{ fontSize: 52 }}>💔</Text>
-          </Animated.View>
-          <Text style={styles.gameOverTitle}>Quiz Over</Text>
-          <Text style={styles.gameOverSubtitle}>
-            You ran out of hearts. Don't worry — every wrong answer is a chance to learn!
-          </Text>
-
-          <View style={styles.scoreCard}>
-            <View style={styles.scoreRow}>
-              <Text style={styles.scoreLabel}>Correct</Text>
-              <Text style={styles.scoreValue}>{score}/{idx + 1}</Text>
-            </View>
-            <View style={styles.scoreRow}>
-              <Text style={styles.scoreLabel}>XP earned</Text>
-              <Text style={[styles.scoreValue, { color: colors.amber }]}>+{xpEarned} XP</Text>
-            </View>
-            <View style={styles.scoreRow}>
-              <Text style={styles.scoreLabel}>Total XP</Text>
-              <Text style={styles.scoreValue}>{xp} XP</Text>
-            </View>
-          </View>
-
-          <Pressable
-            onPress={retryQuiz}
-            style={({ pressed }) => [
-              styles.bigBtn,
-              { backgroundColor: colors.tomato, opacity: pressed ? 0.85 : 1 },
-            ]}
-          >
-            <Ionicons name="refresh" size={20} color="#fff" style={{ marginRight: 8 }} />
-            <Text style={styles.bigBtnText}>Retry Quiz</Text>
-          </Pressable>
-          <Pressable
-            onPress={newSession}
-            style={({ pressed }) => [
-              styles.bigBtn,
-              styles.bigBtnSecondary,
-              { borderColor: colors.border, backgroundColor: colors.surface, opacity: pressed ? 0.85 : 1 },
-            ]}
-          >
-            <Ionicons name="sparkles" size={20} color={colors.violet} style={{ marginRight: 8 }} />
-            <Text style={[styles.bigBtnText, { color: colors.text }]}>Generate New Study Session</Text>
-          </Pressable>
-        </View>
+        <ScrollView contentContainerStyle={styles.blockedScroll} showsVerticalScrollIndicator={false}>
+          <HeartsBlockedPanel
+            coins={coins}
+            hearts={hearts}
+            refillAt={heartsRefillAt}
+            buying={buying}
+            title="Quiz unavailable"
+            message="You ran out of hearts after incorrect answers. Wait 24 hours for a full refill, or spend coins to revive hearts and continue."
+            onRevive={() => buyHearts(1)}
+            onRefillAll={(qty) => buyHearts(qty)}
+            onCheckAgain={syncGameState}
+            onBack={newSession}
+            onUpgrade={() => startGoUnlimitedCheckout(navigation)}
+            continueLabel="Continue quiz"
+            summary={
+              <View style={styles.scoreCard}>
+                <View style={styles.scoreRow}>
+                  <Text style={styles.scoreLabel}>Correct so far</Text>
+                  <Text style={styles.scoreValue}>{score}/{Math.min(idx + 1, questions.length || 1)}</Text>
+                </View>
+                <View style={styles.scoreRow}>
+                  <Text style={styles.scoreLabel}>XP earned</Text>
+                  <Text style={[styles.scoreValue, { color: colors.amber }]}>+{xpEarned} XP</Text>
+                </View>
+              </View>
+            }
+          />
+        </ScrollView>
       </Screen>
     );
   }
@@ -282,16 +364,29 @@ export default function GamifiedQuizScreen({ route, navigation }) {
             </View>
           </View>
 
-          <Pressable
-            onPress={retryQuiz}
-            style={({ pressed }) => [
-              styles.bigBtn,
-              { backgroundColor: colors.mint, opacity: pressed ? 0.85 : 1 },
-            ]}
-          >
-            <Ionicons name="refresh" size={20} color="#fff" style={{ marginRight: 8 }} />
-            <Text style={styles.bigBtnText}>Retry Quiz</Text>
-          </Pressable>
+          {hearts > 0 ? (
+            <Pressable
+              onPress={retryQuiz}
+              style={({ pressed }) => [
+                styles.bigBtn,
+                { backgroundColor: colors.mint, opacity: pressed ? 0.85 : 1 },
+              ]}
+            >
+              <Ionicons name="refresh" size={20} color="#fff" style={{ marginRight: 8 }} />
+              <Text style={styles.bigBtnText}>Retry Quiz</Text>
+            </Pressable>
+          ) : (
+            <Pressable
+              onPress={() => setPhase("gameover")}
+              style={({ pressed }) => [
+                styles.bigBtn,
+                { backgroundColor: colors.tomato, opacity: pressed ? 0.85 : 1 },
+              ]}
+            >
+              <Ionicons name="heart" size={20} color="#fff" style={{ marginRight: 8 }} />
+              <Text style={styles.bigBtnText}>Revive hearts to retry</Text>
+            </Pressable>
+          )}
           <Pressable
             onPress={newSession}
             style={({ pressed }) => [
@@ -336,9 +431,14 @@ export default function GamifiedQuizScreen({ route, navigation }) {
                 <Text style={[styles.xpText, { color: colors.amber }]}>{xp}</Text>
               </View>
             </Animated.View>
-            <View style={[styles.heartPill, { backgroundColor: colors.tomatoSoft }]}>
+            <Pressable
+              onPress={() => hearts <= 0 && setPhase("gameover")}
+              accessibilityRole="button"
+              accessibilityLabel={hearts <= 0 ? "Out of hearts. Open revive options." : `${hearts} hearts remaining`}
+              style={[styles.heartPill, { backgroundColor: colors.tomatoSoft }]}
+            >
               {[0, 1, 2, 3, 4].map((i) => renderHeart(i < hearts, i))}
-            </View>
+            </Pressable>
           </View>
           <View style={styles.progressWrap}>
             <Text style={styles.progressText}>
@@ -376,7 +476,7 @@ export default function GamifiedQuizScreen({ route, navigation }) {
           <View style={styles.optionsWrap}>
             {q.options.map((opt, oi) => {
               const isChosen = chosenOption === opt;
-              const isAnswer = opt === q.answer;
+              const isAnswer = sameAnswer(opt, q.answer);
               let borderColor = colors.border;
               let bg = colors.surface;
               let textColor = colors.text;
@@ -539,6 +639,7 @@ const useStyles = (colors) =>
       justifyContent: "center",
     },
     nextBtnText: { color: "#fff", fontWeight: "800", fontSize: 15 },
+    blockedScroll: { flexGrow: 1, justifyContent: "center", paddingVertical: 24 },
     centerWrap: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
     gameOverEmoji: { fontSize: 52, marginBottom: 12 },
     gameOverTitle: { color: colors.text, fontSize: 26, fontWeight: "800", marginBottom: 8, textAlign: "center" },

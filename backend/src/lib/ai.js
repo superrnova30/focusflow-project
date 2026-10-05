@@ -12,6 +12,7 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 // and silently degraded every study-pack request to the local template. Keep a
 // generous default so full responses complete in one call.
 const DEFAULT_MAX_OUTPUT_TOKENS = Number(process.env.AI_MAX_OUTPUT_TOKENS || 4096);
+const { clipStudySource, hasCompleteJsonObject } = require("./documentText");
 
 function looksCutOff(text) {
   const value = String(text || "").trim();
@@ -351,7 +352,7 @@ function extractGeminiText(response) {
   return text;
 }
 
-async function generateJSON({ system, prompt, maxTokens = 1600, fallback }) {
+async function generateJSON({ system, prompt, maxTokens = 1600, fallback, largeOutput = false, model }) {
   if (!client && !geminiClient) {
     if (fallback) return fallback(prompt);
     throw new Error("AI provider is not configured. Set GEMINI_API_KEY or OPENAI_API_KEY to enable AI features.");
@@ -359,26 +360,31 @@ async function generateJSON({ system, prompt, maxTokens = 1600, fallback }) {
 
   try {
     let responseText = "";
+    const outputTokens = largeOutput ? Math.max(maxTokens, DEFAULT_MAX_OUTPUT_TOKENS) : maxTokens;
 
     if (geminiClient) {
       const { generateContentWithRetry } = require('./genai_helper');
       const response = await generateContentWithRetry(geminiClient, {
-        model: GEMINI_MODEL,
+        model: model || GEMINI_MODEL,
         contents: `${system}\n\n${prompt}`,
-        config: { temperature: 0.2, maxOutputTokens: Math.max(maxTokens, DEFAULT_MAX_OUTPUT_TOKENS) },
+        config: { temperature: 0.2, maxOutputTokens: outputTokens },
       });
       responseText = extractGeminiText(response);
     } else {
       const response = await client.responses.create({
         model: MODEL,
-        max_output_tokens: Math.max(maxTokens, DEFAULT_MAX_OUTPUT_TOKENS),
+        max_output_tokens: outputTokens,
         instructions: system,
         input: prompt,
       });
       responseText = getResponseText(response);
     }
 
-    if (geminiClient && looksCutOff(responseText)) {
+    // JSON payloads end with `}`, which the prose cutoff check treats as
+    // incomplete. Skip the extra continuation call when we already have a
+    // complete object — that second Gemini request was doubling import time.
+    const alreadyCompleteJson = hasCompleteJsonObject(extractJsonString(responseText));
+    if (geminiClient && !alreadyCompleteJson && looksCutOff(responseText)) {
       responseText = await continueIncompleteAnswer('gemini', prompt, responseText);
     }
 
@@ -456,8 +462,9 @@ async function generateStudyPack(subject, notes) {
   return generateJSON({
     system,
     prompt: hasNotes
-      ? `Subject: ${subject}\n\nNotes:\n${notes}`
+      ? `Subject: ${subject}\n\nNotes:\n${clipStudySource(notes, 16000)}`
       : `Topic: ${subject}\n\nGenerate a complete study pack for this topic.`,
+    largeOutput: true,
     fallback: () => buildFallbackStudyPack(subject, notes),
   });
 }
@@ -566,8 +573,10 @@ async function generateStudyNotes(topic, notes) {
   return generateJSON({
     system,
     prompt: hasNotes
-      ? `Topic: ${topic || "General"}\n\nNotes:\n${notes}`
-      : `Topic: ${topic || "General"}\n\nGenerate structured study notes for this topic.`,
+      ? `Topic: ${topic || "General"}\n\nNotes:\n${clipStudySource(notes)}`
+      : `Topic: ${topic || "General"}\n\nGenerate structured study notes for this topic. Keep every field concise.`,
+    maxTokens: 1600,
+    model: process.env.GEMINI_FAST_MODEL || "gemini-flash-lite-latest",
     fallback: () => buildFallbackStudyNotes(topic, notes),
   });
 }

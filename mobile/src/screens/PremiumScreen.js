@@ -99,7 +99,7 @@ export default function PremiumScreen({ navigation }) {
     paymentsEnabled,
     premium,
     isPremium,
-    startCheckout,
+    showGoUnlimitedCheckoutModal,
   } = usePremium();
 
   const heroOpacity = useRef(new Animated.Value(0)).current;
@@ -136,20 +136,8 @@ export default function PremiumScreen({ navigation }) {
       return;
     }
 
-    try {
-      const data = await startCheckout();
-      if (!data?.checkoutUrl) {
-        Alert.alert('Something went wrong', 'We could not start your checkout. Please try again.');
-        return;
-      }
-      navigation.navigate('PremiumCheckout', {
-        checkoutUrl: data.checkoutUrl,
-        paymentId: data.payment?.id,
-      });
-    } catch {
-      Alert.alert('Could not start the payment', 'Please try again in a moment.');
-    }
-  }, [starting, paymentsEnabled, startCheckout, navigation]);
+    showGoUnlimitedCheckoutModal();
+  }, [starting, paymentsEnabled, showGoUnlimitedCheckoutModal]);
 
   const renderComparisonTable = () => (
     <View style={[s.table, { backgroundColor: colors.surface, borderColor: colors.border }]}>
@@ -401,7 +389,10 @@ export default function PremiumScreen({ navigation }) {
                 ]}
               >
                 {starting ? (
-                  <ActivityIndicator color={GOLD_DARK} />
+                  <>
+                    <ActivityIndicator color={GOLD_DARK} />
+                    <Text style={s.ctaButtonText}>Preparing secure checkout…</Text>
+                  </>
                 ) : (
                   <>
                     <Ionicons name={isPremium ? 'refresh' : 'diamond-outline'} size={20} color={GOLD_DARK} />
@@ -465,7 +456,10 @@ export default function PremiumScreen({ navigation }) {
               ]}
             >
               {starting ? (
-                <ActivityIndicator color={GOLD_DARK} />
+                <>
+                  <ActivityIndicator color={GOLD_DARK} size="small" />
+                  <Text style={s.stickyCtaText}>Preparing…</Text>
+                </>
               ) : (
                 <Text style={s.stickyCtaText}>{ctaLabel}</Text>
               )}
@@ -793,6 +787,8 @@ const createStyles = (colors, width, compact, wide) => {
       paddingVertical: 14,
       paddingHorizontal: SPACING.xl,
       minWidth: 148,
+      flexDirection: 'row',
+      gap: 8,
       alignItems: 'center',
       justifyContent: 'center',
     },

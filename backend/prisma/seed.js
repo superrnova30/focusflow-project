@@ -28,6 +28,7 @@ async function main() {
       emailVerified: true,
       status: "ACTIVE",
       course: "BS Computer Science",
+      school: "FocusFlow University",
       yearLevel: "2nd Year",
       section: "CS-2A",
       studentId: "2024-10234",
@@ -40,7 +41,7 @@ async function main() {
     create: {
       name: "Mika Santos", email: "student1@school.edu", passwordHash: demoPasswordHash, role: "STUDENT",
       emailVerified: true,
-      course: "BS Computer Science", yearLevel: "2nd Year", section: "CS-2A", studentId: "2024-10234",
+      course: "BS Computer Science", school: "FocusFlow University", yearLevel: "2nd Year", section: "CS-2A", studentId: "2024-10234",
       xp: 0, hearts: 5, correctAnswers: 0, wrongAnswers: 0, totalXpEarned: 0,
     },
   });

@@ -3,6 +3,24 @@ import { View, Text, StyleSheet } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "../context/ThemeContext";
 
+function renderInline(block, styles, keyPrefix) {
+  if (Array.isArray(block.spans) && block.spans.length) {
+    return block.spans.map((span, spanIndex) => (
+      <Text
+        key={`${keyPrefix}-${spanIndex}`}
+        style={[
+          Array.isArray(span.marks) && span.marks.includes("bold") && styles.bold,
+          Array.isArray(span.marks) && span.marks.includes("italic") && { fontStyle: "italic" },
+          Array.isArray(span.marks) && span.marks.includes("underline") && { textDecorationLine: "underline" },
+        ]}
+      >
+        {span.text}
+      </Text>
+    ));
+  }
+  return block.text || "";
+}
+
 export default function NoteContentPreview({ blocks = [], compact = false }) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors, compact), [colors, compact]);
@@ -28,7 +46,7 @@ export default function NoteContentPreview({ blocks = [], compact = false }) {
           const size = block.level === 1 ? 22 : block.level === 3 ? 15 : 18;
           return (
             <Text key={index} style={[styles.heading, { fontSize: size }]}>
-              {block.text}
+              {renderInline(block, styles, index)}
             </Text>
           );
         }
@@ -36,7 +54,7 @@ export default function NoteContentPreview({ blocks = [], compact = false }) {
           return (
             <View key={index} style={styles.row}>
               <View style={[styles.dot, { backgroundColor: colors.violet }]} />
-              <Text style={styles.body}>{block.text}</Text>
+              <Text style={styles.body}>{renderInline(block, styles, index)}</Text>
             </View>
           );
         }
@@ -45,7 +63,7 @@ export default function NoteContentPreview({ blocks = [], compact = false }) {
           return (
             <View key={index} style={styles.row}>
               <Text style={[styles.number, { color: colors.violet }]}>{numberedCounter}.</Text>
-              <Text style={styles.body}>{block.text}</Text>
+              <Text style={styles.body}>{renderInline(block, styles, index)}</Text>
             </View>
           );
         }
@@ -62,14 +80,35 @@ export default function NoteContentPreview({ blocks = [], compact = false }) {
             </View>
           );
         }
+        if (Array.isArray(block.spans) && block.spans.length) {
+          return (
+            <Text key={index} style={styles.paragraph}>
+              {block.spans.map((span, spanIndex) => (
+                <Text
+                  key={`${index}-${spanIndex}`}
+                  style={[
+                    styles.body,
+                    Array.isArray(span.marks) && span.marks.includes("bold") && styles.bold,
+                    Array.isArray(span.marks) && span.marks.includes("italic") && { fontStyle: "italic" },
+                    Array.isArray(span.marks) && span.marks.includes("underline") && { textDecorationLine: "underline" },
+                  ]}
+                >
+                  {span.text}
+                </Text>
+              ))}
+            </Text>
+          );
+        }
         const marks = Array.isArray(block.marks) ? block.marks : [];
-        const parts = String(block.text || "").split(/(\*\*[^*]+\*\*)/g);
+        const parts = String(block.text || "").split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
         if (marks.length === 0 && parts.length === 1) {
           return (
             <Text key={index} style={styles.paragraph}>
               {parts.map((part, i) =>
                 part.startsWith("**") && part.endsWith("**") ? (
                   <Text key={i} style={styles.bold}>{part.slice(2, -2)}</Text>
+                ) : part.startsWith("*") && part.endsWith("*") ? (
+                  <Text key={i} style={{ fontStyle: "italic" }}>{part.slice(1, -1)}</Text>
                 ) : (
                   <Text key={i} style={styles.body}>{part}</Text>
                 )

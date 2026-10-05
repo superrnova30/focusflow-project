@@ -5,44 +5,30 @@ const { hashPassword, verifyPassword, signToken, publicUser } = require("../lib/
 const { requireAuth } = require("../middleware/auth");
 const { bumpStreak } = require("../lib/gamification");
 const { isEmailConfigured, sendVerificationEmailMessage } = require("../lib/mailer");
+const {
+  RESET_MAX_ATTEMPTS,
+  isResetCodeValid,
+  clearPasswordReset,
+  issuePasswordResetEmail,
+} = require("../lib/passwordReset");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 
 const router = express.Router();
 
-const resetTokens = new Map();
 const verificationTokens = new Map();
+const GENERIC_RESET_SENT = "If an account exists, a verification code has been sent to that email.";
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
 
 async function getSystemSettings() {
   return prisma.systemSettings.findUnique({ where: { id: 1 } });
-}
-
-function buildResetPayload(user, rawToken) {
-  const token = rawToken || crypto.randomBytes(8).toString("hex").toUpperCase();
-  const code = token.slice(0, 8).toUpperCase();
-  const email = user.email.toLowerCase();
-  const expiresAt = Date.now() + 60 * 60 * 1000;
-  resetTokens.set(`${email}:${code}`, { userId: user.id, expiresAt, code });
-  return { code, expiresAt };
-}
-
-async function sendPasswordResetEmail(email, code) {
-  const { sendEmail } = require("../lib/mailer");
-  const frontend = process.env.FRONTEND_URL || "http://localhost:8081";
-  const resetLink = `${frontend.replace(/\/$/, "")}/reset-password?email=${encodeURIComponent(email)}&code=${encodeURIComponent(code)}`;
-  const html = `
-    <h2>Password reset requested</h2>
-    <p>Use this code to reset your password:</p>
-    <pre style="font-size:24px;font-weight:700">${code}</pre>
-    <p>Or open this link:</p>
-    <a href="${resetLink}">Reset my password</a>
-  `;
-  await sendEmail({
-    to: email,
-    subject: `${code} is your FocusFlow password reset code`,
-    html,
-    text: `Your password reset code is ${code}`,
-  });
 }
 
 function generateVerificationCode() {
@@ -148,6 +134,8 @@ router.post("/signup", async (req, res) => {
       });
     }
     await prisma.activityLog.create({ data: { userId: user.id, action: "account_created" } });
+    const { notifyWelcome } = require("../lib/notifications");
+    notifyWelcome(user.id).catch(() => {});
 
     res.status(201).json({
       message: "Account created. Check your email for a verification code.",
@@ -161,7 +149,7 @@ router.post("/signup", async (req, res) => {
 
 router.post("/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, timezone } = req.body;
     if (!email || !password) return res.status(400).json({ error: "email and password are required" });
 
     const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
@@ -190,7 +178,7 @@ router.post("/login", async (req, res) => {
     }
 
     await prisma.user.update({ where: { id: user.id }, data: { lastActiveAt: new Date() } });
-    await bumpStreak(user.id);
+    await bumpStreak(user.id, timezone);
     await prisma.activityLog.create({ data: { userId: user.id, action: "login" } });
 
     const refreshed = await prisma.user.findUnique({ where: { id: user.id } });
@@ -204,35 +192,70 @@ router.post("/login", async (req, res) => {
 
 router.post("/forgot-password", async (req, res) => {
   try {
-    const { email } = req.body || {};
-    if (!email || typeof email !== "string") {
-      return res.status(400).json({ error: "email is required" });
+    const email = normalizeEmail(req.body?.email);
+    if (!email) {
+      return res.status(400).json({ error: "Enter the email address linked to your account." });
+    }
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: "Enter a valid email address." });
     }
 
-    const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+    const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
-      return res.status(200).json({ message: "If an account exists, a reset code has been sent to that email." });
+      return res.status(200).json({ message: GENERIC_RESET_SENT });
     }
-
-    const code = crypto.randomBytes(4).toString("hex").toUpperCase();
-    const expiresAt = Date.now() + 60 * 60 * 1000;
-    resetTokens.set(`${user.email.toLowerCase()}:${code}`, { userId: user.id, expiresAt, code });
 
     try {
-      await sendPasswordResetEmail(user.email, code);
+      await issuePasswordResetEmail(user, { initiatedBy: "self" });
     } catch (err) {
-      console.error("Failed to send password reset email:", err.message || err);
+      return res.status(err.status || 500).json({ error: err.message || "Failed to start password reset" });
     }
-    return res.status(200).json({ message: "If an account exists, a reset code has been sent to that email." });
+
+    return res.status(200).json({ message: GENERIC_RESET_SENT });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to start password reset" });
   }
 });
 
+router.post("/verify-reset-code", async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+    const code = String(req.body?.code || "").replace(/\s/g, "");
+    if (!email || !code) {
+      return res.status(400).json({ error: "email and code are required" });
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || (user.passwordResetAttempts || 0) >= RESET_MAX_ATTEMPTS) {
+      return res.status(400).json({ error: "That verification code is invalid or expired." });
+    }
+
+    if (!isResetCodeValid(user, email, code)) {
+      const attempts = (user.passwordResetAttempts || 0) + 1;
+      if (attempts >= RESET_MAX_ATTEMPTS) {
+        await clearPasswordReset(user.id);
+      } else {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { passwordResetAttempts: attempts },
+        });
+      }
+      return res.status(400).json({ error: "That verification code is invalid or expired." });
+    }
+
+    return res.json({ ok: true, message: "Verification code confirmed. You can set a new password." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to verify reset code" });
+  }
+});
+
 router.post("/reset-password", async (req, res) => {
   try {
-    const { email, code, newPassword } = req.body || {};
+    const email = normalizeEmail(req.body?.email);
+    const code = String(req.body?.code || "").replace(/\s/g, "");
+    const { newPassword } = req.body || {};
     if (!email || !code || !newPassword) {
       return res.status(400).json({ error: "email, code, and newPassword are required" });
     }
@@ -240,22 +263,34 @@ router.post("/reset-password", async (req, res) => {
       return res.status(400).json({ error: "Password must be at least 8 characters" });
     }
 
-    const normalizedEmail = String(email).trim().toLowerCase();
-    const normalizedCode = String(code).trim().toUpperCase();
-    const token = resetTokens.get(`${normalizedEmail}:${normalizedCode}`);
-    if (!token) {
-      return res.status(400).json({ error: "That reset code is invalid or expired" });
-    }
-    if (Date.now() > token.expiresAt) {
-      resetTokens.delete(`${normalizedEmail}:${normalizedCode}`);
-      return res.status(400).json({ error: "That reset code is invalid or expired" });
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || (user.passwordResetAttempts || 0) >= RESET_MAX_ATTEMPTS || !isResetCodeValid(user, email, code)) {
+      if (user?.passwordResetCodeHash) {
+        const attempts = (user.passwordResetAttempts || 0) + 1;
+        if (attempts >= RESET_MAX_ATTEMPTS) {
+          await clearPasswordReset(user.id);
+        } else {
+          await prisma.user.update({
+            where: { id: user.id },
+            data: { passwordResetAttempts: attempts },
+          });
+        }
+      }
+      return res.status(400).json({ error: "That verification code is invalid or expired." });
     }
 
     const passwordHash = await hashPassword(newPassword);
-    await prisma.user.update({ where: { id: token.userId }, data: { passwordHash } });
-    await prisma.activityLog.create({ data: { userId: token.userId, action: "password_reset" } });
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        passwordHash,
+        passwordResetCodeHash: null,
+        passwordResetExpires: null,
+        passwordResetAttempts: 0,
+      },
+    });
+    await prisma.activityLog.create({ data: { userId: user.id, action: "password_reset" } });
 
-    resetTokens.delete(`${normalizedEmail}:${normalizedCode}`);
     return res.json({ ok: true, message: "Password was reset successfully" });
   } catch (err) {
     console.error(err);
@@ -441,7 +476,7 @@ router.get("/oauth/google/callback", (req, res, next) => {
 
 router.patch("/me", requireAuth, async (req, res) => {
   const allowed = [
-    "name", "profilePicture", "studentId", "course", "yearLevel", "section", "studyGoals",
+    "name", "profilePicture", "studentId", "course", "school", "yearLevel", "section", "studyGoals",
     "preferredStudyDuration", "dailyGoalMinutes", "focusMinutes", "shortBreakMinutes",
     "longBreakMinutes", "sessionsBeforeLongBreak", "remindersEnabled", "reminderTime",
   ];

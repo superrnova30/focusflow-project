@@ -26,7 +26,7 @@ function buildLimitsPayload(user, { activeTaskCount = null } = {}) {
     hints: {
       unlimited: premium,
       daily: premium ? null : BASIC_LIMITS.dailyHints,
-      remaining: premium ? null : Math.max(0, user.hints ?? 0),
+      remaining: premium ? null : Math.max(0, (user.hints ?? 0) + (user.bonusHints ?? 0)),
     },
     prompts: {
       unlimited: premium,
@@ -107,6 +107,37 @@ async function loadUserWithLimits(userId) {
   let user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) return null;
   return syncDailyUsage(user);
+}
+
+async function consumeHint(userId) {
+  const user = await loadUserWithLimits(userId);
+  if (!user) throw makeLimitError("USER_NOT_FOUND", "User not found");
+  if (isPremiumActive(user)) {
+    return { user, hints: 999, unlimitedHints: true };
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const daily = await tx.user.updateMany({
+      where: { id: userId, hints: { gt: 0 } },
+      data: { hints: { decrement: 1 } },
+    });
+    if (daily.count === 0) {
+      const bonus = await tx.user.updateMany({
+        where: { id: userId, bonusHints: { gt: 0 } },
+        data: { bonusHints: { decrement: 1 } },
+      });
+      if (bonus.count === 0) {
+        throw makeLimitError("NO_HINTS_REMAINING", "No hints remaining", buildLimitsPayload(user));
+      }
+    }
+    return tx.user.findUnique({ where: { id: userId } });
+  });
+
+  return {
+    user: updated,
+    hints: Math.max(0, updated.hints + updated.bonusHints),
+    unlimitedHints: false,
+  };
 }
 
 function makeLimitError(code, message, limits) {
@@ -240,6 +271,7 @@ module.exports = {
   buildLimitsPayload,
   syncDailyUsage,
   loadUserWithLimits,
+  consumeHint,
   countActiveTasks,
   enforceTaskCreationLimit,
   consumeAiPrompt,

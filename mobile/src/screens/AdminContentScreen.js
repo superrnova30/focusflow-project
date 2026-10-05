@@ -4,19 +4,39 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  FlatList,
   Pressable,
   ActivityIndicator,
   Alert,
   Platform,
+  TextInput,
   useWindowDimensions,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
 import { Screen, Card } from "../components/Screen";
-import { Input, Button } from "../components/Inputs";
+import { Input } from "../components/Inputs";
+import UserAvatar from "../components/UserAvatar";
 import { useTheme } from "../context/ThemeContext";
+import { RADIUS } from "../theme/theme";
 import client from "../api/client";
+
+function formatDisplayName(name) {
+  const raw = String(name || "").trim();
+  if (!raw) return "Unnamed student";
+  const letters = raw.replace(/[^A-Za-z]/g, "");
+  const shouty = letters.length > 2 && letters === letters.toUpperCase();
+  if (!shouty) return raw;
+  return raw
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function firstName(name) {
+  return formatDisplayName(name).split(/\s+/)[0] || "this student";
+}
 
 const isWeb = Platform.OS === "web";
 
@@ -333,87 +353,168 @@ export default function AdminContentScreen({ navigation }) {
     </>
   );
 
-  const renderCoachTab = () => (
-    <>
-      <Card style={styles.itemCard}>
-        <Text style={styles.sectionLabel}>GENERATE FOR A STUDENT</Text>
-        <Input
-          value={studentQuery}
-          onChangeText={setStudentQuery}
-          placeholder="Filter students by name or email..."
-          compact
-        />
-        <View style={styles.studentList}>
-          {filteredStudents.length === 0 && <Text style={styles.muted}>No students match.</Text>}
-          {filteredStudents.slice(0, 8).map((s) => {
-            const active = selectedStudent?.id === s.id;
-            return (
-              <Pressable
-                key={s.id}
-                onPress={() => setSelectedStudent(s)}
-                style={[
-                  styles.studentChip,
-                  {
-                    borderColor: active ? colors.violet : colors.border,
-                    backgroundColor: active ? colors.violetSoft : colors.bg,
-                  },
-                ]}
-              >
-                <Text style={[styles.studentChipText, { color: active ? colors.violet : colors.text }]}>
-                  {s.name}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
-        <Button
-          title={selectedStudent ? `Analyze ${selectedStudent.name}` : "Select a student first"}
-          onPress={generateCoach}
-          loading={generatingCoach}
-          disabled={!selectedStudent}
-          style={{ marginTop: 12 }}
-        />
-      </Card>
+  const renderCoachTab = () => {
+    const selectedId = selectedStudent?.id;
+    const orderedStudents = [
+      ...filteredStudents.filter((s) => s.id === selectedId),
+      ...filteredStudents.filter((s) => s.id !== selectedId),
+    ];
+    const visibleStudents = orderedStudents.slice(0, 8);
+    const hiddenCount = Math.max(0, filteredStudents.length - visibleStudents.length);
 
-      <Text style={styles.sectionLabel}>RECENT INSIGHTS ({insights.length})</Text>
-      {insights.length === 0 && !loading && (
-        <Text style={styles.muted}>No coach insights generated yet.</Text>
-      )}
-      {insights.map((ins) => {
-        const d = ins.data || {};
-        return (
-          <Card key={ins.id} style={styles.itemCard}>
-            <View style={styles.itemHeader}>
-              <View style={[styles.itemIcon, { backgroundColor: colors.violetSoft }]}>
-                <Ionicons name="sparkles" size={18} color={colors.violet} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.itemTitle}>{ins.user?.name || "Student"}</Text>
-                <Text style={styles.itemMeta}>{new Date(ins.createdAt).toLocaleString()}</Text>
-              </View>
+    return (
+      <>
+        <Card style={styles.itemCard}>
+          <View style={styles.coachHead}>
+            <View style={[styles.coachHeadIcon, { backgroundColor: colors.violetSoft }]}>
+              <Ionicons name="sparkles" size={18} color={colors.violet} />
             </View>
-            {!!d.summary && <Text style={styles.noteSummary}>{d.summary}</Text>}
-            {Array.isArray(d.strengths) && d.strengths.length > 0 && (
-              <View style={styles.insightBlock}>
-                <Text style={styles.insightLabel}>Strengths</Text>
-                {d.strengths.map((s, i) => (
-                  <Text key={i} style={styles.insightPoint}>• {s}</Text>
-                ))}
-              </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={styles.coachTitle}>Generate a coach insight</Text>
+              <Text style={styles.coachHint}>
+                Choose a student, then analyze their study patterns.
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.coachSearch}>
+            <Ionicons name="search-outline" size={16} color={colors.textMuted} />
+            <TextInput
+              value={studentQuery}
+              onChangeText={setStudentQuery}
+              placeholder="Search by name or email"
+              placeholderTextColor={colors.textMuted}
+              style={styles.coachSearchInput}
+              autoCorrect={false}
+              autoCapitalize="none"
+            />
+            {studentQuery.trim() ? (
+              <Pressable onPress={() => setStudentQuery("")} hitSlop={8} accessibilityLabel="Clear search">
+                <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+              </Pressable>
+            ) : null}
+          </View>
+
+          <View style={styles.studentList}>
+            {visibleStudents.length === 0 ? (
+              <Text style={styles.muted}>
+                {students.length === 0 ? "No students to show yet." : "No students match that search."}
+              </Text>
+            ) : (
+              visibleStudents.map((s) => {
+                const active = selectedId === s.id;
+                const displayName = formatDisplayName(s.name);
+                return (
+                  <Pressable
+                    key={s.id}
+                    onPress={() => setSelectedStudent(active ? null : s)}
+                    style={[styles.studentRow, active && styles.studentRowActive]}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: active }}
+                    accessibilityLabel={`Select ${displayName}`}
+                  >
+                    <UserAvatar user={s} size={36} />
+                    <View style={styles.studentCopy}>
+                      <Text style={[styles.studentName, active && styles.studentNameActive]} numberOfLines={1}>
+                        {displayName}
+                      </Text>
+                      <Text style={styles.studentEmail} numberOfLines={1}>
+                        {s.email || "No email on file"}
+                      </Text>
+                    </View>
+                    <View style={[styles.studentCheck, active && styles.studentCheckOn]}>
+                      {active ? <Ionicons name="checkmark" size={14} color="#FFFFFF" /> : null}
+                    </View>
+                  </Pressable>
+                );
+              })
             )}
-            {Array.isArray(d.recommendations) && d.recommendations.length > 0 && (
-              <View style={styles.insightBlock}>
-                <Text style={styles.insightLabel}>Recommendations</Text>
-                {d.recommendations.map((s, i) => (
-                  <Text key={i} style={styles.insightPoint}>• {s}</Text>
-                ))}
-              </View>
+          </View>
+          {hiddenCount > 0 ? (
+            <Text style={styles.studentMore}>
+              {hiddenCount} more — keep typing to narrow the list
+            </Text>
+          ) : null}
+
+          <Pressable
+            onPress={generateCoach}
+            disabled={!selectedStudent || generatingCoach}
+            accessibilityLabel={
+              selectedStudent
+                ? `Generate insight for ${formatDisplayName(selectedStudent.name)}`
+                : "Select a student to generate an insight"
+            }
+            style={({ pressed }) => [
+              styles.coachCta,
+              !selectedStudent && styles.coachCtaDisabled,
+              pressed && selectedStudent && !generatingCoach && { opacity: 0.86 },
+            ]}
+          >
+            {generatingCoach ? (
+              <ActivityIndicator color="#FFFFFF" size="small" />
+            ) : (
+              <>
+                <Ionicons
+                  name="sparkles"
+                  size={16}
+                  color={selectedStudent ? "#FFFFFF" : colors.textMuted}
+                />
+                <Text style={[styles.coachCtaText, !selectedStudent && styles.coachCtaTextDisabled]}>
+                  {selectedStudent
+                    ? `Generate insight for ${firstName(selectedStudent.name)}`
+                    : "Select a student to continue"}
+                </Text>
+              </>
             )}
-          </Card>
-        );
-      })}
-    </>
-  );
+          </Pressable>
+        </Card>
+
+        <Text style={styles.sectionHeading}>Recent insights ({insights.length})</Text>
+        {insights.length === 0 && !loading ? (
+          <View style={styles.emptyInsights}>
+            <View style={[styles.emptyInsightsIcon, { backgroundColor: colors.violetSoft }]}>
+              <Ionicons name="sparkles-outline" size={18} color={colors.violet} />
+            </View>
+            <Text style={styles.emptyInsightsTitle}>No insights yet</Text>
+            <Text style={styles.emptyInsightsCopy}>
+              Pick a student above to generate the first coach insight.
+            </Text>
+          </View>
+        ) : null}
+        {insights.map((ins) => {
+          const d = ins.data || {};
+          return (
+            <Card key={ins.id} style={styles.itemCard}>
+              <View style={styles.itemHeader}>
+                <UserAvatar user={ins.user} size={40} />
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.itemTitle}>{formatDisplayName(ins.user?.name) || "Student"}</Text>
+                  <Text style={styles.itemMeta}>{new Date(ins.createdAt).toLocaleString()}</Text>
+                </View>
+              </View>
+              {!!d.summary && <Text style={styles.noteSummary}>{d.summary}</Text>}
+              {Array.isArray(d.strengths) && d.strengths.length > 0 && (
+                <View style={styles.insightBlock}>
+                  <Text style={styles.insightLabel}>Strengths</Text>
+                  {d.strengths.map((s, i) => (
+                    <Text key={i} style={styles.insightPoint}>• {s}</Text>
+                  ))}
+                </View>
+              )}
+              {Array.isArray(d.recommendations) && d.recommendations.length > 0 && (
+                <View style={styles.insightBlock}>
+                  <Text style={styles.insightLabel}>Recommendations</Text>
+                  {d.recommendations.map((s, i) => (
+                    <Text key={i} style={styles.insightPoint}>• {s}</Text>
+                  ))}
+                </View>
+              )}
+            </Card>
+          );
+        })}
+      </>
+    );
+  };
 
   return (
     <Screen>
@@ -552,9 +653,122 @@ const useStyles = (colors) =>
 
     noteSummary: { color: colors.textMuted, fontSize: 12.5, lineHeight: 18, marginTop: 10 },
 
-    studentList: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
-    studentChip: { borderWidth: 1, borderRadius: 999, paddingVertical: 7, paddingHorizontal: 12 },
-    studentChipText: { fontSize: 12.5, fontWeight: "600" },
+    coachHead: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 14 },
+    coachHeadIcon: {
+      width: 40,
+      height: 40,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    coachTitle: { color: colors.text, fontSize: 15, fontWeight: "800" },
+    coachHint: { color: colors.textMuted, fontSize: 12.5, lineHeight: 18, marginTop: 2 },
+    coachSearch: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      minHeight: 44,
+      paddingHorizontal: 12,
+      borderRadius: RADIUS.md,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.bg,
+    },
+    coachSearchInput: {
+      flex: 1,
+      minWidth: 0,
+      color: colors.text,
+      fontSize: 14,
+      fontWeight: "600",
+      paddingVertical: 10,
+      ...(Platform.OS === "web" ? { outlineStyle: "none" } : null),
+    },
+    studentList: { marginTop: 12, gap: 8 },
+    studentRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      minHeight: 56,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      borderRadius: RADIUS.md,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.bg,
+    },
+    studentRowActive: {
+      borderColor: colors.violet,
+      backgroundColor: colors.violetSoft,
+    },
+    studentCopy: { flex: 1, minWidth: 0 },
+    studentName: { color: colors.text, fontSize: 14, fontWeight: "700" },
+    studentNameActive: { color: colors.violet },
+    studentEmail: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
+    studentCheck: {
+      width: 22,
+      height: 22,
+      borderRadius: 11,
+      borderWidth: 1,
+      borderColor: colors.border,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: colors.surface,
+    },
+    studentCheckOn: {
+      borderColor: colors.violet,
+      backgroundColor: colors.violet,
+    },
+    studentMore: { color: colors.textMuted, fontSize: 12, marginTop: 8, fontWeight: "600" },
+    coachCta: {
+      marginTop: 14,
+      minHeight: 48,
+      borderRadius: RADIUS.md,
+      backgroundColor: colors.tomato,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      paddingHorizontal: 14,
+    },
+    coachCtaDisabled: {
+      backgroundColor: colors.violetSoft,
+    },
+    coachCtaText: { color: "#FFFFFF", fontSize: 13.5, fontWeight: "800" },
+    coachCtaTextDisabled: { color: colors.textMuted },
+    sectionHeading: {
+      color: colors.text,
+      fontSize: 13,
+      fontWeight: "700",
+      marginTop: 8,
+      marginBottom: 10,
+    },
+    emptyInsights: {
+      alignItems: "center",
+      paddingVertical: 22,
+      paddingHorizontal: 16,
+      borderRadius: RADIUS.md,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surface,
+      marginBottom: 10,
+    },
+    emptyInsightsIcon: {
+      width: 36,
+      height: 36,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: 8,
+    },
+    emptyInsightsTitle: { color: colors.text, fontSize: 14, fontWeight: "800" },
+    emptyInsightsCopy: {
+      color: colors.textMuted,
+      fontSize: 12.5,
+      lineHeight: 18,
+      textAlign: "center",
+      marginTop: 4,
+      maxWidth: 280,
+    },
 
     insightBlock: { marginTop: 10 },
     insightLabel: { color: colors.textMuted, fontSize: 11, fontWeight: "700", letterSpacing: 0.4, marginBottom: 4 },

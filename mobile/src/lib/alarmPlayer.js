@@ -40,7 +40,7 @@ export async function playAlarm(soundId, volume) {
       keepAudioSessionActive: true,
     });
     player.loop = true;
-    player.volume = Math.max(0, Math.min(1, volume));
+    player.volume = Math.max(0, Math.min(1, volume ?? 0.8));
     player.play();
 
     // Auto-stop after 3 minutes.

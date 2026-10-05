@@ -1,8 +1,11 @@
 const express = require("express");
 const prisma = require("../lib/prisma");
 const { requireAuth, requireRole } = require("../middleware/auth");
-const { generateStudyNotes } = require("../lib/ai");
+const { generateStudyNotes, generateQuiz } = require("../lib/ai");
 const { enforcePromptLimit } = require("../lib/featureLimits");
+const { loadUserGamification, heartsDepletedPayload } = require("../lib/gamification");
+const { isPremiumActive } = require("../lib/premium");
+const { extractTextFromBuffer, clipStudySource, SUPPORTED_FILE_TYPES } = require("../lib/documentText");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -14,6 +17,31 @@ function getUserFriendlyAiError(err) {
 
 function sanitizeNoteBlocks(blocks) {
   return (blocks || []).filter((block) => block?.text && String(block.text).trim());
+}
+
+function flattenNoteText(note) {
+  const blocks = Array.isArray(note?.contentJson) ? note.contentJson : [];
+  const fromBlocks = blocks
+    .map((block) => String(block?.text || "").trim())
+    .filter(Boolean)
+    .join("\n");
+  const extras = [
+    note?.aiSummary,
+    ...(Array.isArray(note?.aiKeyConcepts) ? note.aiKeyConcepts.map((item) => (typeof item === "string" ? item : `${item?.term || ""} ${item?.definition || ""}`.trim())) : []),
+    ...(Array.isArray(note?.aiStudyTips) ? note.aiStudyTips : []),
+    ...(Array.isArray(note?.aiLearningObjectives) ? note.aiLearningObjectives : []),
+  ]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .join("\n");
+  return [fromBlocks, extras].filter(Boolean).join("\n\n").trim();
+}
+
+async function getAccessibleNote(userId, noteId) {
+  const note = await prisma.studyNote.findUnique({ where: { id: noteId } });
+  if (!note) return null;
+  if (note.userId === userId || note.isPublic) return note;
+  return null;
 }
 
 // Convert the AI pack into rich-text blocks for the editor.
@@ -62,17 +90,39 @@ router.post("/magic-import", requireRole("STUDENT"), async (req, res) => {
   try {
     if (!(await enforcePromptLimit(req, res))) return;
 
-    const { topic, notes, isPublic, previewOnly } = req.body;
-    const hasTopic = topic && String(topic).trim().length > 0;
-    const hasNotes = notes && String(notes).trim().length > 0;
+    const { topic, notes, isPublic, previewOnly, fileName, fileType, base64Content } = req.body;
+    let studyTopic = topic && String(topic).trim() ? String(topic).trim() : "";
+    let sourceNotes = notes && String(notes).trim() ? String(notes).trim() : "";
+
+    if (base64Content && !sourceNotes) {
+      const normalizedType = String(fileType || "pdf").toLowerCase();
+      if (!SUPPORTED_FILE_TYPES.includes(normalizedType)) {
+        return res.status(400).json({
+          error: `Unsupported file type "${fileType}". Supported: ${SUPPORTED_FILE_TYPES.join(", ")}.`,
+        });
+      }
+      const buffer = Buffer.from(String(base64Content), "base64");
+      sourceNotes = (await extractTextFromBuffer(normalizedType, buffer)).trim();
+      if (!studyTopic) {
+        studyTopic = String(fileName || "").replace(/\.[^.]+$/, "").trim();
+      }
+      if (!sourceNotes && !studyTopic) {
+        return res.status(400).json({
+          error: "No text could be extracted from that document. Try pasted notes instead.",
+        });
+      }
+    }
+
+    const hasTopic = Boolean(studyTopic);
+    const hasNotes = Boolean(sourceNotes);
     if (!hasTopic && !hasNotes) {
       return res.status(400).json({
         error: "Type a topic or paste some notes to generate study notes from.",
       });
     }
 
-    const studyTopic = hasTopic ? String(topic).trim() : "AI Study Notes";
-    const pack = await generateStudyNotes(studyTopic, hasNotes ? String(notes).trim() : "");
+    studyTopic = studyTopic || "AI Study Notes";
+    const pack = await generateStudyNotes(studyTopic, hasNotes ? clipStudySource(sourceNotes) : "");
 
     const contentJson = sanitizeNoteBlocks(buildNoteBlocks(pack));
     if (contentJson.length === 0) {
@@ -127,24 +177,76 @@ router.post("/magic-import", requireRole("STUDENT"), async (req, res) => {
 
 // List the current user's notes (most recently updated first).
 router.get("/", async (req, res) => {
+  const publicScope = String(req.query.scope || "").toLowerCase() === "public";
   const notes = await prisma.studyNote.findMany({
-    where: { userId: req.user.id },
+    where: publicScope ? { isPublic: true } : { userId: req.user.id },
+    ...(publicScope
+      ? { include: { user: { select: { id: true, name: true, profilePicture: true, school: true } } } }
+      : {}),
     orderBy: { updatedAt: "desc" },
+    take: publicScope ? 80 : undefined,
   });
   res.json({ notes });
 });
 
 // Fetch one note (owner always; other students only when public).
 router.get("/:id", async (req, res) => {
-  const note = await prisma.studyNote.findUnique({ where: { id: req.params.id } });
+  const note = await getAccessibleNote(req.user.id, req.params.id);
   if (!note) return res.status(404).json({ error: "Note not found" });
 
-  const isOwner = note.userId === req.user.id;
-  if (!isOwner && !note.isPublic) {
-    return res.status(404).json({ error: "Note not found" });
-  }
+  res.json({ note, isOwner: note.userId === req.user.id });
+});
 
-  res.json({ note, isOwner });
+// Quiz from a public (or owned) note.
+router.post("/:id/quiz", requireRole("STUDENT"), async (req, res) => {
+  try {
+    const note = await getAccessibleNote(req.user.id, req.params.id);
+    if (!note) return res.status(404).json({ error: "Note not found" });
+
+    const sourceText = flattenNoteText(note);
+    if (!sourceText) {
+      return res.status(400).json({ error: "This note does not have enough content to quiz." });
+    }
+
+    const player = await loadUserGamification(req.user.id);
+    if (player && !isPremiumActive(player) && player.hearts <= 0) {
+      return res.status(403).json(heartsDepletedPayload(player));
+    }
+
+    if (!(await enforcePromptLimit(req, res))) return;
+
+    const pack = await generateQuiz(note.title, sourceText);
+    const rawQuestions = Array.isArray(pack.quiz) ? pack.quiz : [];
+    const questions = rawQuestions
+      .filter((q) => q && q.question && Array.isArray(q.options))
+      .map((q) => {
+        const opts = q.options.slice(0, 4);
+        const answer = opts.includes(q.answer) ? q.answer : opts[0];
+        return {
+          question: String(q.question).trim(),
+          options: opts.map((o) => String(o).trim()),
+          answer: String(answer).trim(),
+        };
+      })
+      .slice(0, 10);
+
+    if (questions.length === 0) {
+      return res.status(502).json({ error: "The AI didn't return any quiz questions. Please try again." });
+    }
+
+    await prisma.activityLog.create({
+      data: { userId: req.user.id, action: "note_quiz", meta: { noteId: note.id } },
+    });
+
+    res.status(201).json({
+      topic: note.title,
+      questions: questions.map(({ answer, ...q }) => q),
+      answerKey: questions.map((q) => q.answer),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(502).json({ error: getUserFriendlyAiError(err) });
+  }
 });
 
 // Create a note (manual or AI-sourced content).
@@ -183,6 +285,10 @@ router.post("/", requireRole("STUDENT"), async (req, res) => {
     },
   });
   await prisma.activityLog.create({ data: { userId: req.user.id, action: "create_note" } });
+  if (note.isPublic) {
+    const { recordPublicContentActivity } = require("../lib/social");
+    recordPublicContentActivity(req.user.id, "note", note).catch(() => {});
+  }
   res.status(201).json({ note });
 });
 
@@ -201,6 +307,10 @@ router.patch("/:id", async (req, res) => {
   if (result.count === 0) return res.status(404).json({ error: "Note not found" });
 
   const note = await prisma.studyNote.findUnique({ where: { id: req.params.id } });
+  if (typeof isPublic === "boolean" && isPublic) {
+    const { recordPublicContentActivity } = require("../lib/social");
+    recordPublicContentActivity(req.user.id, "note", note).catch(() => {});
+  }
   res.json({ note });
 });
 

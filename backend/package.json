@@ -5,7 +5,9 @@
   "main": "src/index.js",
   "type": "commonjs",
   "scripts": {
+    "predev": "prisma migrate deploy",
     "dev": "nodemon src/index.js",
+    "prestart": "prisma migrate deploy && prisma generate",
     "start": "node src/index.js",
     "prisma:generate": "prisma generate",
     "postinstall": "prisma generate",

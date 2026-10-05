@@ -24,7 +24,10 @@ import {
   cardsToMemorizeQuestions,
 } from "../lib/collectionStudy";
 import { RADIUS, SPACING } from "../theme/theme";
-import { handleLimitError, navigateToPremium } from "../lib/upgradePrompt";
+import { handleLimitError, startGoUnlimitedCheckout } from "../lib/upgradePrompt";
+import HeartsBlockedPanel from "../components/HeartsBlockedPanel";
+import { formatRefillCountdown } from "../lib/hearts";
+import { setCachedCoins } from "../lib/coins";
 
 const MAX_HEARTS = 5;
 const XP_PER_CORRECT = 200;
@@ -49,18 +52,6 @@ const emptyQuestionState = () => ({
   usedHint3: false,
   flipped: false,
 });
-
-function formatRefillCountdown(iso) {
-  if (!iso) return "";
-  const ms = new Date(iso).getTime() - Date.now();
-  if (ms <= 0) return "Ready now — reload session";
-  const h = Math.floor(ms / 3600000);
-  const m = Math.floor((ms % 3600000) / 60000);
-  const s = Math.floor((ms % 60000) / 1000);
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
-}
 
 export default function FlashcardMemorizeScreen({ route, navigation }) {
   const { colors } = useTheme();
@@ -90,6 +81,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
   const [savingSettings, setSavingSettings] = useState(false);
   const [timerLeft, setTimerLeft] = useState(null);
   const [refillLabel, setRefillLabel] = useState("");
+  const [buying, setBuying] = useState(null);
 
   const xpScale = useRef(new Animated.Value(1)).current;
   const floatOpacity = useRef(new Animated.Value(0)).current;
@@ -157,6 +149,22 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
       setSessionXp(0);
       setPhase(loadedGame?.heartsBlocked ? "blocked" : "quiz");
     } catch (e) {
+      try {
+        const { data: stateRes } = await client.get("/game/state");
+        if (stateRes.state?.heartsBlocked || (stateRes.state?.hearts ?? 5) <= 0) {
+          setGame((g) => ({
+            ...(g || {}),
+            hearts: 0,
+            coins: stateRes.state.coins || 0,
+            heartsBlocked: true,
+            heartsRefillAt: stateRes.state.heartsRefillAt,
+          }));
+          setPhase("blocked");
+          return;
+        }
+      } catch {
+        // ignore and try a local fallback below
+      }
       try {
         const { data: collectionData } = await client.get(`/flashcards/collections/${collectionId}`);
         const cards = collectionData.collection?.flashcards || [];
@@ -268,7 +276,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
         if (data.xpAwarded) {
           setSessionXp((x) => x + data.xpAwarded);
           animateXp();
-          showFloat(`+${data.xpAwarded} XP`);
+          showFloat(data.comboHit ? `Combo! +${data.xpAwarded} XP · +${data.coinsEarned || 1} coin` : `+${data.xpAwarded} XP`);
         }
         if (data.leveledUp) {
           Alert.alert("Level up!", `You reached level ${data.game.level.current}.`);
@@ -278,9 +286,26 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
       }
 
       if (data.gameOver) {
+        setGame((g) => ({
+          ...(data.game || g),
+          heartsBlocked: true,
+          heartsRefillAt: data.heartsRefillAt || data.game?.heartsRefillAt || g?.heartsRefillAt,
+        }));
         setPhase("gameover");
       }
     } catch (e) {
+      if (e?.response?.data?.code === "HEARTS_DEPLETED" || e?.response?.data?.heartsBlocked) {
+        setPhase("blocked");
+        setGame((g) => ({
+          ...g,
+          ...(e.response?.data?.game || {}),
+          hearts: 0,
+          coins: e.response?.data?.coins ?? g?.coins ?? 0,
+          heartsBlocked: true,
+          heartsRefillAt: e.response?.data?.heartsRefillAt,
+        }));
+        return;
+      }
       if (e?.response?.status === 403 || e?.upgradeRequired) {
         if (handleLimitError(navigation, e)) return;
         setPhase("blocked");
@@ -334,6 +359,44 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
       if (!handleLimitError(navigation, e)) {
         Alert.alert("Hint unavailable", e?.response?.data?.error || e.message);
       }
+    }
+  };
+
+  const buyHearts = async (quantity) => {
+    if (buying) return;
+    setBuying(quantity > 1 ? "hearts" : "heart");
+    try {
+      const { data } = await client.post("/game/coins/spend", { item: "heart", quantity });
+      setGame((g) => ({
+        ...g,
+        hearts: data.hearts,
+        coins: data.coins,
+        heartsBlocked: false,
+        heartsRefillAt: null,
+      }));
+      if (data.coins != null) setCachedCoins(data.coins);
+      Alert.alert("Heart revived", quantity > 1 ? `You restored ${quantity} hearts.` : "You revived 1 heart. You can continue.");
+      setPhase("quiz");
+    } catch (e) {
+      Alert.alert("Unable to revive", e.response?.data?.error || e.message || "Please try again.");
+    } finally {
+      setBuying(null);
+    }
+  };
+
+  const restoreHeartsIfReady = async () => {
+    try {
+      const { data } = await client.get("/game/state");
+      setGame((g) => ({
+        ...g,
+        ...(data.state || {}),
+        heartsBlocked: data.state?.heartsBlocked,
+      }));
+      if (!data.state?.heartsBlocked && (data.state?.hearts || 0) > 0) {
+        setPhase("quiz");
+      }
+    } catch {
+      loadSession();
     }
   };
 
@@ -417,48 +480,33 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
     );
   }
 
-  if (phase === "blocked") {
+  if (phase === "blocked" || phase === "gameover") {
     return (
       <Screen>
-        <View style={styles.center}>
-          <View style={[styles.blockedIcon, { backgroundColor: colors.tomatoSoft }]}>
-            <Text style={{ fontSize: 40 }}>💔</Text>
-          </View>
-          <Text style={styles.blockedTitle}>Out of hearts</Text>
-          <Text style={styles.muted}>
-            Your hearts will refill in {refillLabel || "24 hours"}. Take a break and come back ready to memorize.
-          </Text>
-          <Pressable onPress={loadSession} style={({ pressed }) => [styles.primaryBtn, { backgroundColor: accent.color }, pressed && styles.pressed]}>
-            <Text style={styles.primaryBtnText}>Check again</Text>
-          </Pressable>
-          <Pressable onPress={() => navigateToPremium(navigation)} style={({ pressed }) => [styles.primaryBtn, { backgroundColor: colors.violet }, pressed && styles.pressed]}>
-            <Text style={styles.primaryBtnText}>Get unlimited hearts</Text>
-          </Pressable>
-          <Pressable onPress={() => navigation.goBack()} style={({ pressed }) => [styles.secondaryBtn, { borderColor: colors.border }, pressed && styles.pressed]}>
-            <Text style={[styles.secondaryBtnText, { color: colors.text }]}>Back to study modes</Text>
-          </Pressable>
-        </View>
-      </Screen>
-    );
-  }
-
-  if (phase === "gameover") {
-    return (
-      <Screen>
-        <View style={styles.center}>
-          <Text style={{ fontSize: 48, marginBottom: 8 }}>💔</Text>
-          <Text style={styles.blockedTitle}>Hearts depleted</Text>
-          <Text style={styles.muted}>
-            You ran out of hearts before finishing the deck. Refill in {refillLabel || "24 hours"}.
-          </Text>
-          <View style={[styles.summaryCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-            <Text style={styles.summaryRow}>Correct: {sessionCorrect}/{index + (qState.answered ? 1 : 0)}</Text>
-            <Text style={styles.summaryRow}>XP earned: +{sessionXp}</Text>
-          </View>
-          <Pressable onPress={() => navigation.goBack()} style={({ pressed }) => [styles.primaryBtn, { backgroundColor: colors.violet }, pressed && styles.pressed]}>
-            <Text style={styles.primaryBtnText}>Back to study modes</Text>
-          </Pressable>
-        </View>
+        <ScrollView contentContainerStyle={styles.blockedScroll} showsVerticalScrollIndicator={false}>
+          <HeartsBlockedPanel
+            coins={game?.coins || 0}
+            hearts={game?.hearts || 0}
+            refillAt={game?.heartsRefillAt}
+            buying={buying}
+            title={phase === "gameover" ? "Memorize paused" : "Quiz unavailable"}
+            message="You ran out of hearts after incorrect answers. Wait 24 hours for a full refill, or spend coins to revive hearts and keep studying."
+            onRevive={() => buyHearts(1)}
+            onRefillAll={(qty) => buyHearts(qty)}
+            onCheckAgain={restoreHeartsIfReady}
+            onBack={() => navigation.goBack()}
+            onUpgrade={() => startGoUnlimitedCheckout(navigation)}
+            continueLabel="Continue studying"
+            summary={
+              phase === "gameover" ? (
+                <View style={[styles.summaryCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                  <Text style={styles.summaryRow}>Correct: {sessionCorrect}/{index + (qState.answered ? 1 : 0)}</Text>
+                  <Text style={styles.summaryRow}>XP earned: +{sessionXp}</Text>
+                </View>
+              ) : null
+            }
+          />
+        </ScrollView>
       </Screen>
     );
   }
@@ -531,9 +579,14 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
                   {game?.unlimitedHints ? "∞" : game?.hints ?? 0}
                 </Text>
               </Pressable>
-              <View style={[styles.statPill, { backgroundColor: colors.tomatoSoft }]}>
+              <Pressable
+                onPress={() => (game?.hearts || 0) <= 0 && setPhase("blocked")}
+                accessibilityRole="button"
+                accessibilityLabel={(game?.hearts || 0) <= 0 ? "Out of hearts. Open revive options." : `${game?.hearts || 0} hearts remaining`}
+                style={[styles.statPill, { backgroundColor: colors.tomatoSoft }]}
+              >
                 {renderHearts()}
-              </View>
+              </Pressable>
               <Animated.View style={{ transform: [{ scale: xpScale }] }}>
                 <View style={[styles.statPill, { backgroundColor: colors.violetSoft }]}>
                   <Ionicons name="flash" size={14} color={colors.violet} />
@@ -882,6 +935,11 @@ const createStyles = (colors, isWide, compact) =>
       justifyContent: "center",
       padding: SPACING.lg,
       gap: SPACING.md,
+    },
+    blockedScroll: {
+      flexGrow: 1,
+      justifyContent: "center",
+      paddingVertical: SPACING.lg,
     },
     muted: { color: colors.textMuted, fontSize: 14, textAlign: "center", lineHeight: 20 },
     progressSection: { marginBottom: SPACING.sm },

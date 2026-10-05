@@ -7,6 +7,7 @@ import VisibilityPicker, { VisibilityBadge } from "../components/VisibilityPicke
 import { useTheme } from "../context/ThemeContext";
 import client from "../api/client";
 import { RADIUS, SPACING } from "../theme/theme";
+import { startNoteQuiz } from "../lib/publicStudy";
 
 function Block({ block, colors, index, numberedIndex }) {
   const styles = useMemo(() => createBlockStyles(colors), [colors]);
@@ -106,6 +107,7 @@ export default function NoteViewScreen({ route, navigation }) {
   const [isOwner, setIsOwner] = useState(!readOnlyParam);
   const [loading, setLoading] = useState(Boolean(noteId && !initialNote));
   const [savingVisibility, setSavingVisibility] = useState(false);
+  const [quizBusy, setQuizBusy] = useState(false);
 
   const fetchNote = useCallback(async () => {
     const id = noteId || initialNote?.id;
@@ -213,15 +215,30 @@ export default function NoteViewScreen({ route, navigation }) {
               </View>
             </View>
 
-            {!readOnly && (
+            <View style={styles.heroActions}>
               <Pressable
-                onPress={() => navigation.navigate("NoteEdit", { note })}
-                style={({ pressed }) => [styles.editBtn, { backgroundColor: colors.tomato }, pressed && styles.pressed]}
+                onPress={() =>
+                  startNoteQuiz(navigation, note, {
+                    onStart: () => setQuizBusy(true),
+                    onFinish: () => setQuizBusy(false),
+                  })
+                }
+                disabled={quizBusy}
+                style={({ pressed }) => [styles.editBtn, { backgroundColor: colors.violet, opacity: quizBusy ? 0.7 : 1 }, pressed && styles.pressed]}
               >
-                <Ionicons name="pencil" size={16} color="#fff" />
-                <Text style={styles.editBtnText}>Edit note</Text>
+                {quizBusy ? <ActivityIndicator color="#fff" size="small" /> : <Ionicons name="help-circle-outline" size={16} color="#fff" />}
+                <Text style={styles.editBtnText}>Take quiz</Text>
               </Pressable>
-            )}
+              {!readOnly && (
+                <Pressable
+                  onPress={() => navigation.navigate("NoteEdit", { note })}
+                  style={({ pressed }) => [styles.editBtn, { backgroundColor: colors.tomato }, pressed && styles.pressed]}
+                >
+                  <Ionicons name="pencil" size={16} color="#fff" />
+                  <Text style={styles.editBtnText}>Edit note</Text>
+                </Pressable>
+              )}
+            </View>
           </View>
 
           {!readOnly && (
@@ -372,6 +389,9 @@ const createStyles = (colors, isWide, compact) =>
     },
     metaItem: { flexDirection: "row", alignItems: "center", gap: 6 },
     metaText: { color: colors.textMuted, fontSize: 12.5, fontWeight: "600" },
+    heroActions: {
+      gap: 8,
+    },
     editBtn: {
       height: 44,
       borderRadius: RADIUS.md,

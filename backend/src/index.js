@@ -16,6 +16,7 @@ const quizRoutes = require("./routes/quizzes");
 const flashcardRoutes = require("./routes/flashcards");
 const noteRoutes = require("./routes/notes");
 const studentRoutes = require("./routes/students");
+const notificationRoutes = require("./routes/notifications");
 const gameRoutes = require("./routes/game");
 const adminRoutes = require("./routes/admin");
 const pushRoutes = require("./routes/push");
@@ -96,6 +97,7 @@ app.use("/api/quizzes", quizRoutes);
 app.use("/api/flashcards", flashcardRoutes);
 app.use("/api/notes", noteRoutes);
 app.use("/api/students", studentRoutes);
+app.use("/api/notifications", notificationRoutes);
 app.use("/api/game", gameRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/push", pushRoutes);
@@ -194,32 +196,37 @@ async function start() {
     }
   });
 
-  // Daily reminder scheduler: only enable when explicitly requested via
-  // ENABLE_REMINDERS=true in the environment. This prevents intermittent
-  // crashes during development when external services (push tokens, network)
-  // might be unavailable.
+  // Check once per minute because each student can choose a different reminder
+  // time and timezone. Set ENABLE_REMINDERS=false only for worker instances
+  // that should not send notifications.
   let reminderInterval;
-  if (String(process.env.ENABLE_REMINDERS).toLowerCase() === 'true') {
-    reminderInterval = setInterval(async () => {
+  let reminderTimeout;
+  let reminderRunActive = false;
+  if (String(process.env.ENABLE_REMINDERS || "true").toLowerCase() !== "false") {
+    const runReminderCheck = async () => {
+      if (reminderRunActive) return;
+      reminderRunActive = true;
       try {
-        const now = new Date();
-        const hour = String(now.getHours()).padStart(2, "0");
-        const minute = String(now.getMinutes()).padStart(2, "0");
-        const currentTime = `${hour}:${minute}`;
-        if (currentTime === "09:00" || currentTime === "18:00") {
-          const result = await sendDailyReminders();
-          console.log(`Daily reminders sent: ${result.sent} to ${result.checked} user(s)`);
+        const result = await sendDailyReminders();
+        if (result.due > 0) {
+          console.log(`Daily reminders accepted: ${result.sent}/${result.due} due device(s)`);
         }
       } catch (err) {
         console.error("Reminder scheduler error:", err && err.message ? err.message : err);
+      } finally {
+        reminderRunActive = false;
       }
-    }, 60 * 1000);
+    };
+    reminderTimeout = setTimeout(runReminderCheck, 5000);
+    reminderInterval = setInterval(runReminderCheck, 60 * 1000);
+    console.log("Reminder scheduler enabled (timezone-aware, every minute)");
   } else {
-    console.log('Reminder scheduler disabled (ENABLE_REMINDERS not true)');
+    console.log("Reminder scheduler disabled (ENABLE_REMINDERS=false)");
   }
 
   // Allow clean shutdown.
   process.on("SIGINT", () => {
+    if (reminderTimeout) clearTimeout(reminderTimeout);
     if (reminderInterval) clearInterval(reminderInterval);
     process.exit(0);
   });

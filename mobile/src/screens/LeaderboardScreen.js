@@ -15,6 +15,7 @@ import { Screen } from "../components/Screen";
 import { useTheme } from "../context/ThemeContext";
 import client from "../api/client";
 import { RADIUS, SPACING } from "../theme/theme";
+import { getStreakLevel } from "../lib/streakLevels";
 
 const MEDALS = {
   1: { icon: "trophy", color: "#FFC15E" },
@@ -84,6 +85,7 @@ export default function LeaderboardScreen({ navigation }) {
 
   const renderItem = ({ item }) => {
     const isMe = item.isMe;
+    const streakLevel = getStreakLevel(item.streakCount || 0);
     return (
       <Pressable
         onPress={() => openProfile(item)}
@@ -107,8 +109,10 @@ export default function LeaderboardScreen({ navigation }) {
           </Text>
           <View style={styles.nameMeta}>
             {isMe && <Text style={styles.youBadge}>YOU</Text>}
-            <Ionicons name="flame" size={12} color={colors.tomato} />
-            <Text style={styles.sub}>{item.streakCount || 0} day streak</Text>
+            <Ionicons name="flame" size={12} color={streakLevel.color} />
+            <Text style={[styles.sub, { color: streakLevel.color }]}>
+              {item.streakCount || 0} day · {streakLevel.name}
+            </Text>
           </View>
         </View>
         <View style={styles.statsCell}>
@@ -136,6 +140,7 @@ export default function LeaderboardScreen({ navigation }) {
 
   const leaderboard = data?.leaderboard || [];
   const me = data?.me || {};
+  const myStreakLevel = getStreakLevel(me.streakCount || 0);
 
   return (
     <Screen>
@@ -215,11 +220,13 @@ export default function LeaderboardScreen({ navigation }) {
                     const isGold = offset === 0;
                     const medal = medalFor(entry.rank);
                     return (
-                      <View
+                      <Pressable
                         key={entry.id}
-                        style={[styles.podiumCard, isGold && styles.podiumCardGold]}
+                        onPress={() => openProfile(entry)}
+                        style={({ pressed }) => [styles.podiumCard, isGold && styles.podiumCardGold, pressed && styles.pressed]}
                         accessible
-                        accessibilityLabel={`Position ${entry.rank}, ${entry.name}, ${formatXp(entry.xp)} XP`}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Position ${entry.rank}, ${entry.name}, ${formatXp(entry.xp)} XP. Open profile.`}
                       >
                         <View style={[styles.podiumRankBadge, isGold && styles.podiumRankBadgeGold]}>
                           <Ionicons name={medal.icon} size={isGold ? 19 : 16} color={medal.color} />
@@ -237,7 +244,7 @@ export default function LeaderboardScreen({ navigation }) {
                           <Ionicons name="flash" size={12} color={colors.amber} />
                           <Text style={styles.podiumXpText}>{formatXp(entry.xp)} XP</Text>
                         </View>
-                      </View>
+                      </Pressable>
                     );
                   })}
                 </View>
@@ -246,13 +253,18 @@ export default function LeaderboardScreen({ navigation }) {
 
             {/* My rank summary */}
             {me && me.rank ? (
-              <View style={styles.myRankCard}>
+              <Pressable
+                onPress={() => openProfile({ id: me.id, name: me.name })}
+                style={({ pressed }) => [styles.myRankCard, pressed && styles.pressed]}
+                accessibilityRole="button"
+                accessibilityLabel={`Your position, rank ${me.rank}. Open your public profile.`}
+              >
                 <View style={styles.myRankBadge}>
                   <Text style={styles.myRankNumber}>#{me.rank}</Text>
                 </View>
                 <View style={styles.myRankCopy}>
                   <Text style={styles.myRankLabel}>YOUR POSITION</Text>
-                  <Text style={styles.myRankValue}>Keep building your momentum</Text>
+                  <Text style={styles.myRankValue}>View your public profile</Text>
                 </View>
                 <View style={styles.myRankStats}>
                   <View style={styles.myRankStat}>
@@ -260,11 +272,13 @@ export default function LeaderboardScreen({ navigation }) {
                     <Text style={styles.myRankXp}>{formatXp(me.xp)} XP</Text>
                   </View>
                   <View style={styles.myRankStat}>
-                    <Ionicons name="flame" size={15} color={colors.tomato} />
-                    <Text style={styles.myRankStreakText}>{me.streakCount || 0} days</Text>
+                    <Ionicons name="flame" size={15} color={myStreakLevel.color} />
+                    <Text style={[styles.myRankStreakText, { color: myStreakLevel.color }]}>
+                      {me.streakCount || 0} days
+                    </Text>
                   </View>
                 </View>
-              </View>
+              </Pressable>
             ) : null}
 
             {error ? (

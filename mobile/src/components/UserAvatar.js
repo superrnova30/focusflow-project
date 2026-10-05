@@ -59,5 +59,5 @@ export default function UserAvatar({ user, size = 44, style, ringColor }) {
 
 const styles = StyleSheet.create({
   fallback: { alignItems: "center", justifyContent: "center" },
-  initials: { fontWeight: "800", letterSpacing: 0.3 },
+  initials: { fontWeight: "800" },
 });

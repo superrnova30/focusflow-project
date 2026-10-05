@@ -196,14 +196,18 @@ export default function AdminUsersScreen({ navigation }) {
   };
 
   const resetPassword = (user) => {
+    if (user.role !== "STUDENT") {
+      showInfo("Reset password", "Password reset emails can only be sent to student accounts.");
+      return;
+    }
     confirmAction({
-      title: "Reset password?",
-      message: `Generate a temporary password for ${user.name}?`,
-      confirmText: "Reset",
+      title: "Send password reset email?",
+      message: `We'll email a verification code to ${user.email}. ${user.name} can use it in Forgot password to create a new password. Their current password stays active until they finish.`,
+      confirmText: "Send email",
       onConfirm: async () => {
         try {
           const { data } = await client.post(`/admin/users/${user.id}/reset-password`);
-          showInfo("Temporary password", `Temporary password for ${user.name}: ${data.tempPassword}`);
+          showInfo("Reset email sent", data.message || `A password reset email was sent to ${user.email}.`);
         } catch (e) {
           showInfo("Error", e.message);
         }

@@ -23,6 +23,7 @@ import { useTheme } from "../context/ThemeContext";
 import { deckAccent, DECK_COLOR_IDS } from "../lib/deckColors";
 import client from "../api/client";
 import { RADIUS, SPACING } from "../theme/theme";
+import { startDeckQuiz } from "../lib/publicStudy";
 
 function StatPill({ icon, label, value, color, soft, colors, styles }) {
   return (
@@ -65,6 +66,7 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
   const [editName, setEditName] = useState("");
   const [editColor, setEditColor] = useState("violet");
   const [savingEdit, setSavingEdit] = useState(false);
+  const [quizBusy, setQuizBusy] = useState(false);
   const readOnly = readOnlyParam || !isOwner;
 
   const accent = deckAccent(collection?.color, colors);
@@ -185,6 +187,13 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
     });
   };
 
+  const goQuiz = () => {
+    startDeckQuiz(navigation, { ...collection, flashcards: cards, cardCount: cards.length, _count: { flashcards: cards.length } }, {
+      onStart: () => setQuizBusy(true),
+      onFinish: () => setQuizBusy(false),
+    });
+  };
+
   const renderCard = ({ item, index }) => (
     <View style={styles.cardWrap}>
       <Pressable
@@ -226,7 +235,7 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
                 </Pressable>
               </View>
             ) : (
-              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+              <VisibilityBadge isPublic colors={colors} />
             )}
           </View>
 
@@ -317,6 +326,29 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
         colors={colors}
         style={styles.studyDeckCta}
       />
+      <Pressable
+        onPress={goQuiz}
+        disabled={!hasCards || quizBusy}
+        style={({ pressed }) => [
+          styles.quizCta,
+          { borderColor: colors.violet, backgroundColor: colors.violetSoft },
+          (!hasCards || quizBusy) && styles.btnDisabled,
+          pressed && hasCards && styles.pressed,
+        ]}
+      >
+        {quizBusy ? (
+          <ActivityIndicator color={colors.violet} size="small" />
+        ) : (
+          <Ionicons name="help-circle-outline" size={18} color={colors.violet} />
+        )}
+        <View style={{ flex: 1 }}>
+          <Text style={[styles.quizCtaTitle, { color: colors.violet }]}>Take quiz</Text>
+          <Text style={styles.quizCtaHint}>
+            {readOnly ? "Quiz yourself on this shared deck" : "Quick multiple-choice from these cards"}
+          </Text>
+        </View>
+        <Ionicons name="arrow-forward" size={16} color={colors.violet} />
+      </Pressable>
 
       {!readOnly ? (
         <View style={styles.actionRow}>
@@ -410,7 +442,11 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
         <Ionicons name="document-text-outline" size={32} color={accent.color} />
       </View>
       <Text style={styles.emptyTitle}>No cards yet</Text>
-      <Text style={styles.emptyText}>Add a card manually or use Magic Import to fill this deck.</Text>
+      <Text style={styles.emptyText}>
+        {readOnly
+          ? "This public deck does not have flashcards yet."
+          : "Add a card manually or use Magic Import to fill this deck."}
+      </Text>
       {!readOnly ? (
         <View style={[styles.emptyActions, isWide && styles.emptyActionsWide]}>
           <Pressable
@@ -659,6 +695,27 @@ const createStyles = (colors, isWide, isLarge, compact, cardColumns) =>
     },
     studyDeckCta: {
       marginBottom: SPACING.sm,
+    },
+    quizCta: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      minHeight: 54,
+      borderWidth: 1,
+      borderRadius: RADIUS.lg,
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      marginBottom: SPACING.sm,
+    },
+    quizCtaTitle: {
+      fontSize: 14,
+      fontWeight: "900",
+    },
+    quizCtaHint: {
+      color: colors.textMuted,
+      fontSize: 11,
+      fontWeight: "600",
+      marginTop: 1,
     },
     actionRow: {
       flexDirection: "row",

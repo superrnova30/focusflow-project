@@ -18,9 +18,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { Screen } from '../components/Screen';
 import { useTheme } from '../context/ThemeContext';
 import { useAIHistory, bucketForDate, relativeTime } from '../context/AIHistoryContext';
+import { useAIChat } from '../context/AIChatContext';
 import { RADIUS, SPACING } from '../theme/theme';
-
 const BUCKET_ORDER = ['Today', 'Yesterday', 'Earlier this week', 'Older'];
+
+const ACCENT_CYCLE = ['violet', 'mint', 'amber', 'tomato'];
 
 // Intent buckets double as the filter row and as per-row badges. Each gets its
 // own accent so a long list stays visually rhythmic at a glance.
@@ -39,23 +41,7 @@ function useIntentMeta(colors) {
   }), [colors]);
 }
 
-function StatTile({ icon, value, label, color, soft, colors, compact }) {
-  return (
-    <View style={[styles.statTile, { backgroundColor: colors.surface, borderColor: colors.border }, compact && styles.statTileCompact]}>
-      <View style={[styles.statIconWrap, compact && styles.statIconWrapCompact, { backgroundColor: soft }]}>
-        <Ionicons name={icon} size={17} color={color} />
-      </View>
-      <Text style={[styles.statValue, { color: colors.text }]} numberOfLines={1}>
-        {value}
-      </Text>
-      <Text style={[styles.statLabel, { color: colors.textMuted }]} numberOfLines={1}>
-        {label}
-      </Text>
-    </View>
-  );
-}
-
-function ConversationRow({ item, meta, colors, onOpen, onPin, onDelete, isWide, compact }) {
+function ConversationRow({ item, meta, colors, onOpen, onPin, onDelete, compact, accentColor }) {
   const scale = useRef(new Animated.Value(1)).current;
   const info = meta[item.intent] || meta.other;
 
@@ -75,44 +61,36 @@ function ConversationRow({ item, meta, colors, onOpen, onPin, onDelete, isWide, 
           {
             backgroundColor: colors.surface,
             borderColor: item.pinned ? info.color : colors.border,
-            borderWidth: item.pinned ? 1.5 : 1,
-            opacity: pressed ? 0.94 : 1,
+            opacity: pressed ? 0.92 : 1,
           },
-          isWide && styles.rowWide,
           compact && styles.rowCompact,
         ]}
       >
+        <View style={[styles.rowAccent, { backgroundColor: accentColor || info.color }]} />
         <View style={[styles.rowIcon, { backgroundColor: info.soft }]}>
-          <Ionicons name={info.icon} size={20} color={info.color} />
+          <Ionicons name="chatbubble-ellipses-outline" size={17} color={info.color} />
         </View>
 
         <View style={styles.rowBody}>
           <View style={styles.rowTitleLine}>
-            {item.pinned && <Ionicons name="pin" size={12} color={info.color} style={{ marginRight: 4 }} />}
+            {item.pinned ? <Ionicons name="pin" size={11} color={info.color} style={{ marginRight: 4 }} /> : null}
             <Text style={[styles.rowTitle, { color: colors.text }]} numberOfLines={1}>
               {item.title || 'Untitled conversation'}
             </Text>
           </View>
 
-          {!!item.preview && !compact && (
-            <Text style={[styles.rowPreview, { color: colors.textMuted }]} numberOfLines={2}>
+          {!!item.preview && (
+            <Text style={[styles.rowPreview, { color: colors.textMuted }]} numberOfLines={compact ? 1 : 2}>
               {item.preview}
             </Text>
           )}
 
           <View style={styles.rowMetaLine}>
-            <View style={[styles.badge, { backgroundColor: info.soft }]}>
-              <Text style={[styles.badgeText, { color: info.color }]}>{info.label.toUpperCase()}</Text>
-            </View>
-            {!compact && (
-              <>
-                <Text style={[styles.rowMetaText, { color: colors.textMuted }]}>
-                  {item.messageCount || 0} messages
-                </Text>
-                <Text style={[styles.rowMetaDot, { color: colors.textMuted }]}>•</Text>
-              </>
-            )}
-            <Text style={[styles.rowMetaText, { color: colors.textMuted }]}>{relativeTime(item.updatedAt)}</Text>
+            <Text style={[styles.rowMetaText, { color: colors.textMuted }]}>
+              {info.label}
+              {!compact ? ` · ${item.messageCount || 0} messages` : ''}
+              {` · ${relativeTime(item.updatedAt)}`}
+            </Text>
           </View>
         </View>
 
@@ -155,6 +133,7 @@ export default function AIHistoryScreen({ navigation }) {
     () => createStyles(colors, isWide, compact),
     [colors, isWide, compact]
   );
+  const { clear: startNewChat } = useAIChat();
 
   const {
     conversations,
@@ -226,13 +205,28 @@ export default function AIHistoryScreen({ navigation }) {
   }, [conversations]);
 
   const flatRows = useMemo(() => {
+    let itemIndex = 0;
     const rows = [];
     sections.forEach((section) => {
       rows.push({ type: 'heading', key: `h-${section.key}`, title: section.title, count: section.data.length });
-      section.data.forEach((c) => rows.push({ type: 'item', key: c.id, conversation: c }));
+      section.data.forEach((c) => {
+        rows.push({ type: 'item', key: c.id, conversation: c, accentIndex: itemIndex });
+        itemIndex += 1;
+      });
     });
     return rows;
   }, [sections]);
+
+  const accentForIndex = useCallback(
+    (index) => {
+      const key = ACCENT_CYCLE[index % ACCENT_CYCLE.length];
+      if (key === 'mint') return colors.mint;
+      if (key === 'amber') return colors.amber;
+      if (key === 'tomato') return colors.tomato;
+      return colors.violet;
+    },
+    [colors]
+  );
 
   const confirmDelete = useCallback((conversation) => {
     const doDelete = async () => {
@@ -287,9 +281,10 @@ export default function AIHistoryScreen({ navigation }) {
     if (item.type === 'heading') {
       return (
         <View style={styles2.sectionHead}>
-          <Text style={[styles2.sectionTitle, { color: colors.textMuted }]}>{item.title}</Text>
-          <View style={[styles2.sectionRule, { backgroundColor: colors.border }]} />
-          <Text style={[styles2.sectionCount, { color: colors.textMuted }]}>{item.count}</Text>
+          <Text style={[styles2.sectionTitle, { color: colors.text }]}>{item.title}</Text>
+          <View style={[styles2.sectionCountPill, { backgroundColor: colors.bg, borderColor: colors.border }]}>
+            <Text style={[styles2.sectionCount, { color: colors.textMuted }]}>{item.count}</Text>
+          </View>
         </View>
       );
     }
@@ -300,9 +295,17 @@ export default function AIHistoryScreen({ navigation }) {
         item={conversation}
         meta={meta}
         colors={colors}
-        isWide={isWide}
         compact={compact}
-        onOpen={() => navigation.navigate('AIHistoryDetail', { conversationId: conversation.id, title: conversation.title })}
+        accentColor={accentForIndex(item.accentIndex)}
+        onOpen={() => {
+          const params = { conversationId: conversation.id, title: conversation.title };
+          const routeNames = navigation.getState?.()?.routeNames || [];
+          if (routeNames.includes('AIHistoryDetail')) {
+            navigation.navigate('AIHistoryDetail', params);
+          } else {
+            navigation.navigate('Study', { screen: 'AIHistoryDetail', params });
+          }
+        }}
         onPin={() => togglePin(conversation.id)}
         onDelete={() => confirmDelete(conversation)}
       />
@@ -312,140 +315,119 @@ export default function AIHistoryScreen({ navigation }) {
   const filters = ['all', 'study', 'casual', 'other'];
 
   const startConversation = useCallback(() => {
+    startNewChat();
     const routeNames = navigation.getState?.()?.routeNames || [];
     if (routeNames.includes('StudyChat')) {
       navigation.navigate('StudyChat');
       return;
     }
     navigation.navigate('Study', { screen: 'StudyChat' });
-  }, [navigation]);
+  }, [navigation, startNewChat]);
 
   return (
     <Screen>
       <FlatList
+        style={styles2.list}
         data={flatRows}
         keyExtractor={(row) => row.key}
         renderItem={renderRow}
         showsVerticalScrollIndicator={false}
+        bounces={false}
+        overScrollMode="never"
         contentContainerStyle={styles2.page}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.violet} colors={[colors.violet]} />
         }
         ListHeaderComponent={
           <Animated.View style={{ opacity: heroOpacity, transform: [{ translateY: heroShift }] }}>
-            {/* Hero */}
-            <View style={styles2.hero}>
-              <View style={styles2.heroTop}>
-                <View style={styles2.heroBadge}>
-                  <Ionicons name="sparkles" size={22} color={colors.violet} />
-                </View>
-                <View style={styles2.heroCopy}>
-                  <Text style={styles2.heroEyebrow}>YOUR AI WORKSPACE</Text>
-                  <Text style={styles2.heroTitle}>Conversation history</Text>
-                  <Text style={styles2.heroSubtitle}>
-                    Revisit explanations, continue learning, and keep useful answers close.
-                  </Text>
-                </View>
+            <View style={styles2.pageHeader}>
+              {navigation.canGoBack?.() ? (
                 <Pressable
-                  onPress={startConversation}
+                  onPress={() => navigation.goBack()}
+                  style={({ pressed }) => [styles2.backBtn, { borderColor: colors.border, backgroundColor: colors.surface }, pressed && styles2.pressed]}
                   accessibilityRole="button"
-                  accessibilityLabel="Start a new AI conversation"
-                  style={({ pressed }) => [styles2.newChatBtn, pressed && styles2.pressed]}
-                  hitSlop={6}
+                  accessibilityLabel="Go back"
                 >
-                  <Ionicons name="add" size={18} color="#fff" />
-                  {!compact && <Text style={styles2.newChatText}>New chat</Text>}
+                  <Ionicons name="chevron-back" size={20} color={colors.text} />
                 </Pressable>
+              ) : (
+                <View style={styles2.backSpacer} />
+              )}
+              <View style={styles2.pageHeaderCopy}>
+                <Text style={[styles2.pageTitle, { color: colors.text }]}>AI History</Text>
+                <Text style={[styles2.pageMeta, { color: colors.textMuted }]} numberOfLines={1}>
+                  {loading
+                    ? 'Loading…'
+                    : `${stats.totalConversations || 0} chat${(stats.totalConversations || 0) === 1 ? '' : 's'} · ${stats.totalMessages || 0} messages`}
+                </Text>
               </View>
-
-              {/* Stats */}
-              <View style={styles2.statRow}>
-                <StatTile
-                  compact={isWide}
-                  icon="chatbubbles"
-                  value={stats.totalConversations || 0}
-                  label="Conversations"
-                  color={colors.violet}
-                  soft={colors.surface}
-                  colors={colors}
-                />
-                <StatTile
-                  compact={isWide}
-                  icon="swap-horizontal"
-                  value={stats.totalExchanges || 0}
-                  label="Exchanges"
-                  color={colors.mint}
-                  soft={colors.surface}
-                  colors={colors}
-                />
-                <StatTile
-                  compact={isWide}
-                  icon="layers"
-                  value={stats.totalMessages || 0}
-                  label="Messages"
-                  color={colors.amber}
-                  soft={colors.surface}
-                  colors={colors}
-                />
-              </View>
+              <Pressable
+                onPress={startConversation}
+                accessibilityRole="button"
+                accessibilityLabel="Start a new AI conversation"
+                style={({ pressed }) => [styles2.newChatBtn, pressed && styles2.pressed]}
+              >
+                <Ionicons name="add" size={18} color="#fff" />
+                {!compact && <Text style={styles2.newChatText}>New</Text>}
+              </Pressable>
             </View>
 
-            {/* Search */}
-              <View style={styles2.searchWrap}>
-                <View style={styles2.searchIcon}>
-                <Ionicons name="search" size={17} color={colors.textMuted} />
-                </View>
-                <TextInput
-                  value={localSearch}
-                  onChangeText={(t) => { setLocalSearch(t); runSearch(t); }}
-                  placeholder="Search titles, topics, or answers…"
-                  placeholderTextColor={colors.textMuted}
-                  style={styles2.searchInput}
-                  returnKeyType="search"
-                  onSubmitEditing={() => load({ searchTerm: localSearch })}
-                  accessibilityLabel="Search AI conversation history"
-                />
-                {!!localSearch && (
-                  <Pressable
-                    onPress={() => { setLocalSearch(''); runSearch(''); }}
-                    hitSlop={8}
-                    accessibilityRole="button"
-                    accessibilityLabel="Clear search"
-                    style={styles2.clearSearchBtn}
-                  >
-                    <Ionicons name="close-circle" size={17} color={colors.textMuted} />
-                  </Pressable>
-                )}
-              </View>
+            <View style={[styles2.searchWrap, { borderColor: colors.border, backgroundColor: colors.surface }]}>
+              <Ionicons name="search" size={17} color={colors.textMuted} style={styles2.searchLeading} />
+              <TextInput
+                value={localSearch}
+                onChangeText={(t) => { setLocalSearch(t); runSearch(t); }}
+                placeholder="Search conversations…"
+                placeholderTextColor={colors.textMuted}
+                style={[styles2.searchInput, { color: colors.text }]}
+                returnKeyType="search"
+                onSubmitEditing={() => load({ searchTerm: localSearch })}
+                accessibilityLabel="Search AI conversation history"
+              />
+              {!!localSearch && (
+                <Pressable
+                  onPress={() => { setLocalSearch(''); runSearch(''); }}
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Clear search"
+                  style={styles2.clearSearchBtn}
+                >
+                  <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+                </Pressable>
+              )}
+            </View>
 
-            {/* Filters */}
-            <View style={styles2.controlsRow}>
-              <View style={styles2.filterRow}>
-                {filters.map((key) => {
-                  const active = intentFilter === key;
-                  const info = key === 'all' ? INTENT_META.all : meta[key];
-                  const accent = key === 'all' ? colors.tomato : info.color;
-                  return (
-                    <Pressable
-                      key={key}
-                      onPress={() => changeIntent(key)}
-                      accessibilityRole="button"
-                      accessibilityState={{ selected: active }}
-                      style={[
-                        styles2.chip,
-                        {
-                          backgroundColor: active ? accent : colors.surface,
-                          borderColor: active ? accent : colors.border,
-                        },
-                      ]}
-                    >
-                      <Ionicons name={info.icon} size={14} color={active ? '#fff' : accent} />
-                      <Text style={[styles2.chipText, { color: active ? '#fff' : colors.text }]}>{info.label}</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-              {conversations.length > 0 && (
+            <View style={[styles2.filterBar, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+              {filters.map((key) => {
+                const active = intentFilter === key;
+                const info = key === 'all' ? INTENT_META.all : meta[key];
+                const accent = key === 'all' ? colors.violet : info.color;
+                return (
+                  <Pressable
+                    key={key}
+                    onPress={() => changeIntent(key)}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: active }}
+                    style={[styles2.filterTab, active && { backgroundColor: colors.violetSoft }]}
+                  >
+                    <Ionicons name={info.icon} size={13} color={active ? accent : colors.textMuted} />
+                    <Text style={[styles2.filterTabText, { color: active ? accent : colors.textMuted }]}>
+                      {info.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <View style={styles2.toolsRow}>
+              {!!search.trim() && !loading ? (
+                <Text style={[styles2.resultNote, { color: colors.textMuted }]}>
+                  {total} result{total === 1 ? '' : 's'}
+                </Text>
+              ) : (
+                <View style={{ flex: 1 }} />
+              )}
+              {conversations.length > 0 ? (
                 <Pressable
                   onPress={confirmClearAll}
                   accessibilityRole="button"
@@ -453,19 +435,12 @@ export default function AIHistoryScreen({ navigation }) {
                   style={({ pressed }) => [styles2.clearAllBtn, pressed && styles2.pressed]}
                 >
                   <Ionicons name="trash-outline" size={14} color={colors.textMuted} />
-                  <Text style={styles2.clearAllText}>Clear history</Text>
+                  <Text style={[styles2.clearAllText, { color: colors.textMuted }]}>Clear all</Text>
                 </Pressable>
-              )}
+              ) : null}
             </View>
 
-            {/* Result summary */}
-            {!!search.trim() && !loading && (
-              <Text style={[styles2.resultNote, { color: colors.textMuted }]}>
-                {total} result{total === 1 ? '' : 's'} for "{search.trim()}"
-              </Text>
-            )}
-
-            {error && (
+            {error ? (
               <View style={[styles2.errorBox, { borderColor: colors.tomato, backgroundColor: colors.surface }]}>
                 <Ionicons name="cloud-offline-outline" size={18} color={colors.tomato} />
                 <Text style={[styles2.errorText, { color: colors.text }]}>{error}</Text>
@@ -478,7 +453,7 @@ export default function AIHistoryScreen({ navigation }) {
                   <Text style={styles2.retryText}>Retry</Text>
                 </Pressable>
               </View>
-            )}
+            ) : null}
           </Animated.View>
         }
         ListEmptyComponent={
@@ -519,181 +494,127 @@ export default function AIHistoryScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  statTile: {
-    flex: 1,
-    borderWidth: 1,
-    borderRadius: RADIUS.lg,
-    paddingVertical: 11,
-    paddingHorizontal: 11,
-    alignItems: 'flex-start',
-    minWidth: 0,
-  },
-  statTileCompact: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  statIconWrap: { width: 31, height: 31, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginBottom: 7 },
-  statIconWrapCompact: { marginBottom: 0 },
-  statValue: { fontSize: 18, fontWeight: '900', letterSpacing: -0.3 },
-  statLabel: { fontSize: 10, fontWeight: '700', marginTop: 1 },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     borderRadius: RADIUS.lg,
-    padding: 14,
-    marginBottom: 8,
+    borderWidth: 1,
+    paddingVertical: 10,
+    paddingRight: 8,
+    paddingLeft: 0,
+    marginBottom: 6,
+    overflow: 'hidden',
   },
-  rowWide: { paddingHorizontal: 16 },
-  rowCompact: { paddingHorizontal: 10, paddingVertical: 11 },
-  rowIcon: { width: 44, height: 44, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginRight: 12, flexShrink: 0 },
-  rowBody: { flex: 1, minWidth: 0 },
+  rowCompact: { paddingVertical: 9 },
+  rowAccent: { width: 4, alignSelf: 'stretch', borderTopLeftRadius: RADIUS.lg, borderBottomLeftRadius: RADIUS.lg, marginRight: 8 },
+  rowIcon: { width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginRight: 10, flexShrink: 0 },
+  rowBody: { flex: 1, minWidth: 0, paddingVertical: 2 },
   rowTitleLine: { flexDirection: 'row', alignItems: 'center' },
   rowTitle: { fontSize: 14, fontWeight: '800', flexShrink: 1 },
-  rowPreview: { fontSize: 12, lineHeight: 17, marginTop: 3 },
-  rowMetaLine: { flexDirection: 'row', alignItems: 'center', marginTop: 7, gap: 6 },
-  badge: { paddingHorizontal: 7, paddingVertical: 3, borderRadius: 7 },
-  badgeText: { fontSize: 8.5, fontWeight: '800', letterSpacing: 0.5 },
-  rowMetaText: { fontSize: 10.5, fontWeight: '600' },
-  rowMetaDot: { fontSize: 10 },
-  rowActions: { flexDirection: 'row', alignItems: 'center', gap: 1, marginLeft: 5 },
-  iconBtn: { width: 31, height: 31, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  rowPreview: { fontSize: 12, lineHeight: 16, marginTop: 2 },
+  rowMetaLine: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
+  rowMetaText: { fontSize: 11, fontWeight: '600', flexShrink: 1 },
+  rowActions: { flexDirection: 'row', alignItems: 'center', marginLeft: 4 },
+  iconBtn: { width: 32, height: 32, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
 });
 
 const createStyles = (colors, isWide, compact) =>
   StyleSheet.create({
+    list: {
+      flex: 1,
+    },
     page: {
       width: '100%',
-      maxWidth: 1040,
+      maxWidth: isWide ? 720 : '100%',
       alignSelf: 'center',
-      paddingTop: SPACING.md,
-      paddingBottom: 120,
+      paddingTop: compact ? 8 : 10,
+      paddingBottom: SPACING.md,
+      paddingHorizontal: compact ? 12 : 14,
     },
     pressed: { opacity: 0.72, transform: [{ scale: 0.98 }] },
-    hero: {
-      backgroundColor: colors.violetSoft,
-      borderWidth: 1,
-      borderColor: colors.border,
-      borderRadius: RADIUS.xl,
-      padding: compact ? 14 : isWide ? 22 : 18,
+    pageHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
       marginBottom: 12,
-      shadowColor: '#0F172A',
-      shadowOpacity: 0.06,
-      shadowRadius: 14,
-      shadowOffset: { width: 0, height: 6 },
-      elevation: 2,
     },
-    heroTop: { flexDirection: 'row', alignItems: 'flex-start', gap: compact ? 9 : 12 },
-    heroBadge: {
-      width: compact ? 40 : 48,
-      height: compact ? 40 : 48,
-      borderRadius: compact ? 13 : 16,
+    backBtn: {
+      width: 40,
+      height: 40,
+      borderRadius: 14,
+      borderWidth: 1,
       alignItems: 'center',
       justifyContent: 'center',
-      backgroundColor: colors.surface,
       flexShrink: 0,
     },
-    heroCopy: { flex: 1, minWidth: 0 },
-    heroEyebrow: {
-      color: colors.violet,
-      fontSize: 8,
-      fontWeight: '900',
-      letterSpacing: 0.9,
-      marginBottom: 2,
-    },
-    heroTitle: {
-      color: colors.text,
-      fontSize: compact ? 19 : isWide ? 27 : 23,
-      lineHeight: compact ? 24 : isWide ? 33 : 29,
-      fontWeight: '900',
-      letterSpacing: -0.5,
-    },
-    heroSubtitle: {
-      color: colors.textMuted,
-      fontSize: compact ? 11.5 : 12.5,
-      lineHeight: 18,
-      marginTop: 3,
-      maxWidth: 560,
-    },
+    backSpacer: { width: 40 },
+    pageHeaderCopy: { flex: 1, minWidth: 0 },
+    pageTitle: { fontSize: compact ? 18 : 20, fontWeight: '900', letterSpacing: -0.3 },
+    pageMeta: { fontSize: 11.5, fontWeight: '600', marginTop: 2 },
     newChatBtn: {
-      height: compact ? 40 : 43,
-      minWidth: compact ? 40 : 104,
+      height: 40,
+      minWidth: compact ? 40 : 72,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
-      gap: 6,
-      borderRadius: 13,
-      paddingHorizontal: compact ? 10 : 14,
+      gap: 4,
+      borderRadius: 14,
+      paddingHorizontal: compact ? 0 : 12,
       backgroundColor: colors.tomato,
       flexShrink: 0,
-      shadowColor: colors.tomato,
-      shadowOpacity: 0.22,
-      shadowRadius: 9,
-      shadowOffset: { width: 0, height: 4 },
-      elevation: 3,
     },
-    newChatText: { color: '#fff', fontSize: 12, fontWeight: '900' },
-    statRow: { flexDirection: 'row', gap: compact ? 6 : 9, marginTop: compact ? 14 : 18 },
+    newChatText: { color: '#fff', fontSize: 12, fontWeight: '800' },
     searchWrap: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 8,
       borderWidth: 1,
-      borderColor: colors.border,
-      backgroundColor: colors.surface,
       borderRadius: RADIUS.lg,
-      paddingHorizontal: 8,
-      paddingVertical: 4,
-      marginBottom: 10,
+      paddingHorizontal: 12,
+      marginBottom: 8,
+      minHeight: 44,
     },
-    searchIcon: {
-      width: 34,
-      height: 34,
-      borderRadius: 11,
-      alignItems: 'center',
-      justifyContent: 'center',
-      backgroundColor: colors.violetSoft,
-    },
+    searchLeading: { marginRight: 8 },
     searchInput: {
       flex: 1,
-      color: colors.text,
-      fontSize: compact ? 12.5 : 14,
-      paddingVertical: 10,
+      fontSize: 14,
+      paddingVertical: Platform.OS === 'ios' ? 10 : 8,
       minWidth: 0,
     },
     clearSearchBtn: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
-    controlsRow: {
-      flexDirection: isWide ? 'row' : 'column',
-      alignItems: isWide ? 'center' : 'stretch',
-      justifyContent: 'space-between',
-      gap: 8,
-      marginBottom: 12,
+    filterBar: {
+      flexDirection: 'row',
+      borderWidth: 1,
+      borderRadius: 12,
+      padding: 3,
+      marginBottom: 8,
+      gap: 2,
     },
-    filterRow: { flexDirection: 'row', alignItems: 'center', gap: compact ? 5 : 7, flexWrap: 'wrap' },
-    chip: {
-      flex: compact ? 1 : undefined,
+    filterTab: {
+      flex: 1,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
-      gap: 5,
-      borderWidth: 1,
-      borderRadius: RADIUS.pill,
-      paddingHorizontal: compact ? 8 : 12,
-      paddingVertical: 8,
-      minWidth: compact ? 0 : 72,
+      gap: 4,
+      paddingVertical: 7,
+      borderRadius: 9,
     },
-    chipText: { fontSize: compact ? 10.5 : 12, fontWeight: '800' },
+    filterTabText: { fontSize: compact ? 10.5 : 11.5, fontWeight: '800' },
+    toolsRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 6,
+      minHeight: 28,
+    },
     clearAllBtn: {
       flexDirection: 'row',
       alignItems: 'center',
-      justifyContent: 'center',
-      gap: 5,
-      alignSelf: isWide ? 'auto' : 'flex-end',
-      borderWidth: 1,
-      borderColor: colors.border,
-      borderRadius: RADIUS.pill,
-      backgroundColor: colors.surface,
-      paddingHorizontal: 12,
-      paddingVertical: 8,
+      gap: 4,
+      paddingVertical: 4,
+      paddingHorizontal: 6,
     },
-    clearAllText: { color: colors.textMuted, fontSize: 11, fontWeight: '800' },
-    resultNote: { fontSize: 11.5, fontWeight: '600', marginBottom: 10 },
+    clearAllText: { fontSize: 11, fontWeight: '700' },
+    resultNote: { fontSize: 11.5, fontWeight: '600' },
     errorBox: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -706,17 +627,31 @@ const createStyles = (colors, isWide, compact) =>
     errorText: { flex: 1, fontSize: 12.5, lineHeight: 18 },
     retryBtn: { paddingVertical: 6, paddingHorizontal: 8 },
     retryText: { color: colors.tomato, fontSize: 11, fontWeight: '900' },
-    sectionHead: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 10, marginBottom: 9 },
-    sectionTitle: { fontSize: 10.5, fontWeight: '900', letterSpacing: 0.8, textTransform: 'uppercase' },
-    sectionRule: { flex: 1, height: 1 },
-    sectionCount: { fontSize: 11, fontWeight: '700' },
+    sectionHead: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginTop: 8,
+      marginBottom: 6,
+    },
+    sectionTitle: { fontSize: 13, fontWeight: '800' },
+    sectionCountPill: {
+      minWidth: 24,
+      height: 22,
+      paddingHorizontal: 8,
+      borderRadius: 999,
+      borderWidth: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    sectionCount: { fontSize: 11, fontWeight: '800' },
     emptyWrap: {
       alignItems: 'center',
       backgroundColor: colors.surface,
       borderWidth: 1,
       borderColor: colors.border,
-      borderRadius: RADIUS.xl,
-      paddingVertical: 42,
+      borderRadius: RADIUS.lg,
+      paddingVertical: 32,
       paddingHorizontal: 20,
       marginTop: 4,
     },

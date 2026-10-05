@@ -35,6 +35,28 @@ export default function TaskDescriptionEditor({ value = [], onChange, compact = 
     setExpanded(false);
   };
 
+  if (inModal) {
+    return (
+      <View>
+        <View style={styles.fieldHead}>
+          <Text style={styles.fieldTitle}>Description</Text>
+          <Text style={styles.optional}>Optional</Text>
+        </View>
+        <View style={styles.editorBox}>
+          <RichTextEditor
+            simple
+            embedded
+            compact
+            scrollable
+            value={value}
+            onChange={onChange}
+            placeholder="Notes, steps, or reminders"
+          />
+        </View>
+      </View>
+    );
+  }
+
   if (!expanded) {
     return (
       <Pressable
@@ -66,7 +88,7 @@ export default function TaskDescriptionEditor({ value = [], onChange, compact = 
           </View>
           <View style={{ flex: 1, minWidth: 0 }}>
             <Text style={styles.panelTitle}>Description</Text>
-            <Text style={styles.panelSubtitle}>Optional · formatting supported</Text>
+            <Text style={styles.panelSubtitle}>Optional notes or steps</Text>
           </View>
         </View>
         <Pressable
@@ -81,6 +103,7 @@ export default function TaskDescriptionEditor({ value = [], onChange, compact = 
 
       <View style={[styles.editorShell, { backgroundColor: colors.bg, borderColor: colors.border }]}>
         <RichTextEditor
+          simple
           embedded
           compact={compact || inModal}
           scrollable={inModal}
@@ -95,6 +118,58 @@ export default function TaskDescriptionEditor({ value = [], onChange, compact = 
 
 const createStyles = (colors, compact, inModal) =>
   StyleSheet.create({
+    fieldHead: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      marginBottom: 8,
+    },
+    fieldTitle: {
+      color: colors.text,
+      fontSize: 13,
+      fontWeight: "700",
+    },
+    optional: {
+      color: colors.textMuted,
+      fontSize: 12,
+      fontWeight: "600",
+    },
+    collapseLink: {
+      marginLeft: "auto",
+      paddingVertical: 4,
+      paddingHorizontal: 2,
+    },
+    collapseLinkText: {
+      color: colors.violet,
+      fontSize: 12,
+      fontWeight: "700",
+    },
+    editorBox: {
+      borderRadius: RADIUS.md,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.bg,
+      overflow: "hidden",
+      minHeight: 128,
+      maxHeight: compact ? 196 : 230,
+    },
+    addRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      minHeight: 46,
+      paddingHorizontal: 12,
+      borderRadius: RADIUS.md,
+      borderWidth: 1,
+      borderStyle: "dashed",
+      borderColor: colors.border,
+      backgroundColor: colors.bg,
+    },
+    addRowText: {
+      color: colors.textMuted,
+      fontSize: 13,
+      fontWeight: "600",
+    },
     collapsedCard: {
       flexDirection: "row",
       alignItems: "center",

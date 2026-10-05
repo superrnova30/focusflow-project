@@ -2,9 +2,9 @@ const express = require("express");
 const prisma = require("../lib/prisma");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { generateFlashcards, generateDeckTutorLesson } = require("../lib/ai");
-const { loadUserGamification, bumpStreak, xpWithinLevel, xpForNextLevel, LEVEL_XP_STEP } = require("../lib/gamification");
+const { loadUserGamification, bumpStreak, xpWithinLevel, xpForNextLevel, LEVEL_XP_STEP, heartsDepletedPayload, heartsRefillAtFrom, loseHeart, awardCorrectAnswer } = require("../lib/gamification");
 const { isPremiumActive } = require("../lib/premium");
-const { enforcePromptLimit, enforceTutorLimit, buildLimitsPayload } = require("../lib/featureLimits");
+const { enforcePromptLimit, enforceTutorLimit, buildLimitsPayload, consumeHint } = require("../lib/featureLimits");
 const {
   XP_PER_CORRECT,
   HALF_XP_WITH_HINT3,
@@ -97,6 +97,32 @@ async function getOwnedCollection(userId, collectionId) {
   });
 }
 
+async function getAccessibleCollection(userId, collectionId) {
+  const collection = await prisma.flashcardCollection.findUnique({
+    where: { id: collectionId },
+    include: { flashcards: true },
+  });
+  if (!collection) return null;
+  if (collection.userId === userId || collection.isPublic) return collection;
+  return null;
+}
+
+function toPublicQuizPayload(collection, questions) {
+  const publicQuestions = questions.map(({ answer, ...q }) => q);
+  return {
+    topic: collection.name,
+    collection: {
+      id: collection.id,
+      name: collection.name,
+      color: collection.color,
+      cardCount: collection.flashcards.length,
+      isPublic: collection.isPublic,
+    },
+    questions: publicQuestions,
+    answerKey: questions.map((q) => q.answer),
+  };
+}
+
 function getUserFriendlyAiError(err) {
   if (err?.message) return err.message;
   return "AI generation is temporarily unavailable. Please try again in a moment.";
@@ -119,10 +145,15 @@ function safe(handler) {
 
 // List the current user's flashcard collections with card counts.
 router.get("/collections", safe(async (req, res) => {
+  const publicScope = String(req.query.scope || "").toLowerCase() === "public";
   const collections = await prisma.flashcardCollection.findMany({
-    where: { userId: req.user.id },
-    include: { _count: { select: { flashcards: true } } },
+    where: publicScope ? { isPublic: true } : { userId: req.user.id },
+    include: {
+      _count: { select: { flashcards: true } },
+      ...(publicScope ? { user: { select: { id: true, name: true, profilePicture: true, school: true } } } : {}),
+    },
     orderBy: { createdAt: "desc" },
+    take: publicScope ? 80 : undefined,
   });
   res.json({ collections });
 }));
@@ -142,6 +173,10 @@ router.post("/collections", safe(async (req, res) => {
     },
     include: { _count: { select: { flashcards: true } } },
   });
+  if (collection.isPublic) {
+    const { recordPublicContentActivity } = require("../lib/social");
+    recordPublicContentActivity(req.user.id, "deck", collection).catch(() => {});
+  }
   res.status(201).json({ collection });
 }));
 
@@ -166,6 +201,10 @@ router.patch("/collections/:id", safe(async (req, res) => {
     where: { id: req.params.id },
     include: { _count: { select: { flashcards: true } } },
   });
+  if (typeof isPublic === "boolean" && isPublic) {
+    const { recordPublicContentActivity } = require("../lib/social");
+    recordPublicContentActivity(req.user.id, "deck", collection).catch(() => {});
+  }
   res.json({ collection });
 }));
 
@@ -191,31 +230,40 @@ router.get("/collections/:id", safe(async (req, res) => {
     return res.status(404).json({ error: "Collection not found" });
   }
 
-  res.json({ collection, isOwner });
+  const owner = await prisma.user.findUnique({
+    where: { id: collection.userId },
+    select: { id: true, name: true },
+  });
+
+  res.json({ collection, isOwner, owner });
 }));
 
 // ---- Deck study modes ----
 
 router.get("/collections/:id/study/progress", safe(async (req, res) => {
-  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  const collection = await getAccessibleCollection(req.user.id, req.params.id);
   if (!collection) return res.status(404).json({ error: "Collection not found" });
 
   const progress = await getOrCreateProgress(req.user.id, collection.id);
+  const isOwner = collection.userId === req.user.id;
   res.json({
     progress,
     target: PRACTICE_UNLOCK_TARGET,
     cardCount: collection.flashcards.length,
+    isOwner,
+    unlocked: progress.practiceUnlocked || (!isOwner && collection.isPublic),
     collection: {
       id: collection.id,
       name: collection.name,
       color: collection.color,
       cardCount: collection.flashcards.length,
+      isPublic: collection.isPublic,
     },
   });
 }));
 
 router.get("/collections/:id/study/memorize", safe(async (req, res) => {
-  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  const collection = await getAccessibleCollection(req.user.id, req.params.id);
   if (!collection) return res.status(404).json({ error: "Collection not found" });
   if (!collection.flashcards.length) {
     return res.status(400).json({ error: "Add cards to this deck before studying." });
@@ -241,7 +289,7 @@ router.get("/collections/:id/study/memorize", safe(async (req, res) => {
 }));
 
 router.post("/collections/:id/study/memorize/hint", safe(async (req, res) => {
-  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  const collection = await getAccessibleCollection(req.user.id, req.params.id);
   if (!collection) return res.status(404).json({ error: "Collection not found" });
 
   const { cardId, hintType, options = [] } = req.body || {};
@@ -250,23 +298,21 @@ router.post("/collections/:id/study/memorize/hint", safe(async (req, res) => {
 
   const user = await loadUserGamification(req.user.id);
   const premium = isPremiumActive(user);
-  let hintsRemaining = premium ? 999 : user.hints;
+  let hintsRemaining = premium ? 999 : (user.hints || 0) + (user.bonusHints || 0);
 
   if (!premium) {
-    if (user.hints <= 0) {
+    try {
+      const result = await consumeHint(req.user.id);
+      hintsRemaining = result.hints;
+    } catch (err) {
+      if (err.code !== "NO_HINTS_REMAINING") throw err;
       return res.status(403).json({
-        error: "No hints remaining today. Upgrade to Go Unlimited for unlimited hints.",
+        error: "No hints remaining. Earn coins from streak levels or upgrade for unlimited hints.",
         code: "HINTS_DEPLETED",
         upgradeRequired: true,
-        limits: buildLimitsPayload(user),
+        limits: err.limits || buildLimitsPayload(user),
       });
     }
-    const updated = await prisma.user.update({
-      where: { id: req.user.id },
-      data: { hints: { decrement: 1 } },
-      select: { hints: true },
-    });
-    hintsRemaining = updated.hints;
     await prisma.activityLog.create({
       data: { userId: req.user.id, action: "hint_used", meta: { cardId, hintType, collectionId: collection.id } },
     });
@@ -293,7 +339,7 @@ router.post("/collections/:id/study/memorize/hint", safe(async (req, res) => {
 }));
 
 router.post("/collections/:id/study/memorize/answer", safe(async (req, res) => {
-  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  const collection = await getAccessibleCollection(req.user.id, req.params.id);
   if (!collection) return res.status(404).json({ error: "Collection not found" });
 
   const {
@@ -314,15 +360,8 @@ router.post("/collections/:id/study/memorize/answer", safe(async (req, res) => {
   const settings = buildGameState(user, premium).settings;
 
   if (!premium && user.hearts <= 0) {
-    const heartsRefillAt = user.heartsDepletedAt
-      ? new Date(new Date(user.heartsDepletedAt).getTime() + 24 * 60 * 60 * 1000).toISOString()
-      : null;
     return res.status(403).json({
-      error: "You are out of hearts. Wait 24 hours for a refill, or upgrade to Go Unlimited for unlimited hearts.",
-      code: "HEARTS_DEPLETED",
-      gameOver: true,
-      upgradeRequired: true,
-      heartsRefillAt,
+      ...heartsDepletedPayload(user, { game: buildGameState(user, premium) }),
       limits: buildLimitsPayload(user),
     });
   }
@@ -352,6 +391,9 @@ router.post("/collections/:id/study/memorize/answer", safe(async (req, res) => {
   let leveledUp = false;
   let gameOver = false;
   let heartsRefillAt = null;
+  let comboHit = false;
+  let coinsEarned = 0;
+  let bonusXp = 0;
 
   if (isCorrect && !usedHint3) {
     xpAwarded = XP_PER_CORRECT;
@@ -361,43 +403,27 @@ router.post("/collections/:id/study/memorize/answer", safe(async (req, res) => {
 
   if (isCorrect && xpAwarded > 0) {
     const beforeLevel = user.currentLevel;
-    await prisma.user.update({
-      where: { id: req.user.id },
-      data: {
-        xp: { increment: xpAwarded },
-        totalXpEarned: { increment: xpAwarded },
-        correctAnswers: { increment: 1 },
-      },
-    });
-    await bumpStreak(req.user.id);
-    await prisma.activityLog.create({
-      data: { userId: req.user.id, action: "xp_gain", meta: { amount: xpAwarded, source: "memorize", cardId } },
-    });
-    user = await loadUserGamification(req.user.id);
+    const reward = await awardCorrectAnswer(req.user.id, { baseXp: xpAwarded });
+    user = reward.user;
+    xpAwarded = reward.xpAwarded;
+    comboHit = reward.comboHit;
+    coinsEarned = reward.coinsEarned;
+    bonusXp = reward.bonusXp;
     leveledUp = user.currentLevel > beforeLevel;
   } else if (!isCorrect) {
-    if (!premium) {
-      const beforeHearts = user.hearts;
-      const nextHearts = Math.max(0, beforeHearts - 1);
-      const heartData = { hearts: nextHearts };
-      if (nextHearts <= 0) heartData.heartsDepletedAt = new Date();
-      user = await prisma.user.update({
-        where: { id: req.user.id },
-        data: { ...heartData, wrongAnswers: { increment: 1 } },
-      });
-      gameOver = nextHearts <= 0;
-      if (gameOver && user.heartsDepletedAt) {
-        heartsRefillAt = new Date(new Date(user.heartsDepletedAt).getTime() + 24 * 60 * 60 * 1000).toISOString();
+    try {
+      const lost = await loseHeart(req.user.id, "memorize");
+      user = lost.user;
+      gameOver = lost.gameOver;
+      heartsRefillAt = lost.heartsRefillAt;
+    } catch (err) {
+      if (err.status === 403 && err.payload) {
+        return res.status(403).json({
+          ...err.payload,
+          limits: buildLimitsPayload(user),
+        });
       }
-      await prisma.activityLog.create({
-        data: { userId: req.user.id, action: "hearts_change", meta: { from: beforeHearts, to: nextHearts, source: "memorize" } },
-      });
-    } else {
-      await prisma.user.update({
-        where: { id: req.user.id },
-        data: { wrongAnswers: { increment: 1 } },
-      });
-      user = await loadUserGamification(req.user.id);
+      throw err;
     }
   }
 
@@ -408,6 +434,9 @@ router.post("/collections/:id/study/memorize/answer", safe(async (req, res) => {
   res.json({
     correct: isCorrect,
     xpAwarded,
+    comboHit,
+    coinsEarned,
+    bonusXp,
     leveledUp,
     gameOver,
     heartsRefillAt,
@@ -417,7 +446,7 @@ router.post("/collections/:id/study/memorize/answer", safe(async (req, res) => {
 }));
 
 router.post("/collections/:id/study/memorize/complete", safe(async (req, res) => {
-  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  const collection = await getAccessibleCollection(req.user.id, req.params.id);
   if (!collection) return res.status(404).json({ error: "Collection not found" });
 
   const { correct = 0, total = 0, xpEarned = 0 } = req.body || {};
@@ -439,7 +468,7 @@ router.post("/collections/:id/study/memorize/complete", safe(async (req, res) =>
 }));
 
 router.post("/collections/:id/study/tutor-lesson", safe(async (req, res) => {
-  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  const collection = await getAccessibleCollection(req.user.id, req.params.id);
   if (!collection) return res.status(404).json({ error: "Collection not found" });
   if (!collection.flashcards.length) {
     return res.status(400).json({ error: "Add cards to this deck before starting a tutor lesson." });
@@ -457,7 +486,7 @@ router.post("/collections/:id/study/tutor-lesson", safe(async (req, res) => {
 }));
 
 router.post("/collections/:id/study/tutor-lesson/complete", safe(async (req, res) => {
-  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  const collection = await getAccessibleCollection(req.user.id, req.params.id);
   if (!collection) return res.status(404).json({ error: "Collection not found" });
 
   const progress = await prisma.deckStudyProgress.upsert({
@@ -470,27 +499,60 @@ router.post("/collections/:id/study/tutor-lesson/complete", safe(async (req, res
 }));
 
 router.get("/collections/:id/study/practice/questions", safe(async (req, res) => {
-  const collection = await getOwnedCollection(req.user.id, req.params.id);
+  const collection = await getAccessibleCollection(req.user.id, req.params.id);
   if (!collection) return res.status(404).json({ error: "Collection not found" });
   if (!collection.flashcards.length) {
     return res.status(400).json({ error: "Add cards to this deck before taking a practice test." });
   }
 
+  const player = await loadUserGamification(req.user.id);
+  if (player && !isPremiumActive(player) && player.hearts <= 0) {
+    return res.status(403).json(heartsDepletedPayload(player));
+  }
+
   const progress = await getOrCreateProgress(req.user.id, collection.id);
   const batchSize = Math.min(Number(req.query.count) || 10, 20);
   const questions = buildPracticeQuestions(collection.flashcards, batchSize);
+  const isOwner = collection.userId === req.user.id;
 
   res.json({
     questions,
     progress,
     target: PRACTICE_UNLOCK_TARGET,
-    unlocked: progress.practiceUnlocked,
+    unlocked: progress.practiceUnlocked || (!isOwner && collection.isPublic),
   });
 }));
 
-router.post("/collections/:id/study/practice/answer", safe(async (req, res) => {
-  const collection = await getOwnedCollection(req.user.id, req.params.id);
+// Instant quiz from a public (or owned) deck — no practice-unlock gate.
+router.get("/collections/:id/study/quiz", safe(async (req, res) => {
+  const collection = await getAccessibleCollection(req.user.id, req.params.id);
   if (!collection) return res.status(404).json({ error: "Collection not found" });
+  if (!collection.flashcards.length) {
+    return res.status(400).json({ error: "This deck has no cards to quiz yet." });
+  }
+
+  const player = await loadUserGamification(req.user.id);
+  if (player && !isPremiumActive(player) && player.hearts <= 0) {
+    return res.status(403).json(heartsDepletedPayload(player));
+  }
+
+  const count = Math.min(Number(req.query.count) || 10, 20);
+  const questions = buildPracticeQuestions(collection.flashcards, count);
+  if (!questions.length) {
+    return res.status(400).json({ error: "Could not build a quiz from this deck." });
+  }
+
+  res.json(toPublicQuizPayload(collection, questions));
+}));
+
+router.post("/collections/:id/study/practice/answer", safe(async (req, res) => {
+  const collection = await getAccessibleCollection(req.user.id, req.params.id);
+  if (!collection) return res.status(404).json({ error: "Collection not found" });
+
+  const player = await loadUserGamification(req.user.id);
+  if (player && !isPremiumActive(player) && player.hearts <= 0) {
+    return res.status(403).json(heartsDepletedPayload(player));
+  }
 
   const { correct } = req.body || {};
   const progress = await getOrCreateProgress(req.user.id, collection.id);
@@ -586,12 +648,79 @@ router.delete("/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
+async function resolveUserCollection(userId, { collectionId, collectionName }) {
+  if (collectionId) {
+    return prisma.flashcardCollection.findFirst({
+      where: { id: collectionId, userId },
+    });
+  }
+  const trimmed = collectionName && String(collectionName).trim();
+  if (!trimmed) return null;
+  const existing = await prisma.flashcardCollection.findFirst({
+    where: { userId, name: trimmed },
+  });
+  if (existing) return existing;
+  return prisma.flashcardCollection.create({
+    data: { userId, name: trimmed },
+  });
+}
+
+async function saveCardsToCollection(userId, collection, validCards, materialId = null) {
+  const saved = await prisma.flashcard.createMany({
+    data: validCards.map((c) => ({
+      front: c.front,
+      back: c.back,
+      collectionId: collection.id,
+      materialId: materialId || null,
+    })),
+  });
+  await prisma.activityLog.create({ data: { userId, action: "magic_import" } });
+  const withCount = await prisma.flashcardCollection.findUnique({
+    where: { id: collection.id },
+    include: { _count: { select: { flashcards: true } } },
+  });
+  return {
+    savedCount: saved.count,
+    collection: withCount
+      ? { id: withCount.id, name: withCount.name, _count: withCount._count }
+      : { id: collection.id, name: collection.name },
+  };
+}
+
 // ---- Magic Import (AI) ----
 // Generates flashcards from a topic, pasted notes, an AI study pack, or an
 // uploaded PDF. Requires a target collection (or creates one).
 router.post("/magic-import", requireRole("STUDENT"), async (req, res) => {
   try {
-    const { topic, notes, materialId, collectionName, collectionId } = req.body;
+    const { topic, notes, materialId, collectionName, collectionId, cards: providedCards } = req.body;
+
+    if (Array.isArray(providedCards) && providedCards.length > 0) {
+      const validCards = providedCards
+        .map((c) => ({
+          front: String(c.front || "").trim(),
+          back: String(c.back || "").trim(),
+        }))
+        .filter((c) => c.front && c.back);
+      if (validCards.length === 0) {
+        return res.status(400).json({ error: "Add at least one valid card to save." });
+      }
+      const collection = await resolveUserCollection(req.user.id, { collectionId, collectionName });
+      if (!collection) {
+        return res.status(400).json({ error: "Choose a deck or enter a new deck name." });
+      }
+      const { savedCount, collection: savedCollection } = await saveCardsToCollection(
+        req.user.id,
+        collection,
+        validCards,
+        materialId || null
+      );
+      return res.status(201).json({
+        flashcards: validCards,
+        savedCount,
+        collection: savedCollection,
+      });
+    }
+
     const hasTopic = topic && String(topic).trim().length > 0;
     const hasNotes = notes && String(notes).trim().length > 0;
 
@@ -622,22 +751,9 @@ router.post("/magic-import", requireRole("STUDENT"), async (req, res) => {
 
     if (!(await enforcePromptLimit(req, res))) return;
 
-    // Determine target collection: prefer collectionId, then collectionName.
-    let collection = null;
-    if (collectionId) {
-      collection = await prisma.flashcardCollection.findFirst({
-        where: { id: collectionId, userId: req.user.id },
-      });
-      if (!collection) return res.status(404).json({ error: "Collection not found" });
-    } else if (collectionName && String(collectionName).trim()) {
-      const existing = await prisma.flashcardCollection.findFirst({
-        where: { userId: req.user.id, name: String(collectionName).trim() },
-      });
-      collection =
-        existing ||
-        (await prisma.flashcardCollection.create({
-          data: { userId: req.user.id, name: String(collectionName).trim() },
-        }));
+    const collection = await resolveUserCollection(req.user.id, { collectionId, collectionName });
+    if ((collectionId || collectionName) && !collection) {
+      return res.status(404).json({ error: "Collection not found" });
     }
 
     const pack = await generateFlashcards(sourceTitle, sourceText);
@@ -651,24 +767,24 @@ router.post("/magic-import", requireRole("STUDENT"), async (req, res) => {
       return res.status(502).json({ error: "The AI didn't return any flashcards. Please try again." });
     }
 
-    let saved = null;
     if (collection) {
-      saved = await prisma.flashcard.createMany({
-        data: validCards.map((c) => ({
-          front: c.front,
-          back: c.back,
-          collectionId: collection.id,
-          materialId: materialId || null,
-        })),
+      const { savedCount, collection: savedCollection } = await saveCardsToCollection(
+        req.user.id,
+        collection,
+        validCards,
+        materialId || null
+      );
+      return res.status(201).json({
+        flashcards: validCards,
+        savedCount,
+        collection: savedCollection,
       });
     }
 
-    await prisma.activityLog.create({ data: { userId: req.user.id, action: "magic_import" } });
-
     res.status(201).json({
       flashcards: validCards,
-      savedCount: saved ? saved.count : 0,
-      collection: collection ? { id: collection.id, name: collection.name } : null,
+      savedCount: 0,
+      collection: null,
     });
   } catch (err) {
     console.error(err);

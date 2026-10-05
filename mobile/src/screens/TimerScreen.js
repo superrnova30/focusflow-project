@@ -23,6 +23,9 @@ import { loadAlarmPrefs, getAlarmSound, saveAlarmPrefs, ALARM_SOUNDS } from "../
 import { playAlarm, stopAlarm, previewAlarm } from "../lib/alarmPlayer";
 import client, { queueRequest } from "../api/client";
 import { RADIUS, SPACING } from "../theme/theme";
+import StreakBalance from "../components/StreakBalance";
+import NotificationBell from "../components/NotificationBell";
+import { isSelectableTask, subscribeTasksChanged } from "../lib/tasks";
 
 const fmtClock = (secs) => {
   const m = Math.floor(secs / 60).toString().padStart(2, "0");
@@ -142,6 +145,7 @@ export default function TimerScreen() {
   const [activeTaskId, setActiveTaskId] = useState(null);
   const [activeSubjectId, setActiveSubjectId] = useState(null);
   const [alarmVisible, setAlarmVisible] = useState(false);
+  const [finishedMode, setFinishedMode] = useState("focus");
   const [alarmPrefs, setAlarmPrefs] = useState({ enabled: true, soundId: "chime", volume: 0.8 });
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [editFocus, setEditFocus] = useState(String(user?.focusMinutes ?? 25));
@@ -153,6 +157,7 @@ export default function TimerScreen() {
   const [editAlarmVolume, setEditAlarmVolume] = useState(0.8);
 
   const intervalRef = useRef(null);
+  const completingRef = useRef(false);
 
 useEffect(() => {
     if (NotificationsModule) {
@@ -177,56 +182,104 @@ useEffect(() => {
     });
   }, [navigation, colors.text]);
 
-  // Refetch tasks AND subjects whenever the screen gains focus so newly
-  // added/deleted subjects and tasks from the Tasks / Study tabs appear
-  // immediately — no manual refresh or app restart required.
-  useFocusEffect(
-    useCallback(() => {
-      fetchTasks();
-      fetchSubjects();
-    }, [])
-  );
-
-  const fetchTasks = async () => {
+  const fetchTasks = useCallback(async () => {
     try {
-      const { data } = await client.get("/tasks");
-      const open = data.tasks.filter((t) => !t.completed);
+      const { data } = await client.get("/tasks?archived=false");
+      const open = (data.tasks || []).filter(isSelectableTask);
       setTasks(open);
-      // Clear a stale selected task if it was deleted or completed.
       setActiveTaskId((current) =>
         current && !open.some((t) => t.id === current) ? null : current
       );
     } catch (e) {
       // Non-fatal — timer still works without task assignment
     }
-  };
+  }, []);
 
-  const fetchSubjects = async () => {
+  const fetchSubjects = useCallback(async () => {
     try {
       const { data } = await client.get("/subjects");
       // Filter out the legacy "Data Structures" subject so it does not
       // appear in the Timer section UI.
-      const filtered = data.subjects.filter(
-        (s) => (s.name || "").toLowerCase().trim() !== "data structures"
+      const filtered = (data.subjects || []).filter(
+        (s) => !s.archived && (s.name || "").toLowerCase().trim() !== "data structures"
       );
       setSubjects(filtered);
-      // Clear a stale selected subject if it was archived, deleted, or filtered out.
       setActiveSubjectId((current) =>
         current && !filtered.some((s) => s.id === current) ? null : current
       );
     } catch (e) {
       // Non-fatal
     }
-  };
+  }, []);
 
-  const durationFor = useCallback((m) => durations[m], [user]);
+  // Refetch tasks AND subjects whenever the screen gains focus so newly
+  // added/archived/deleted items from the Tasks / Study tabs appear
+  // immediately — no manual refresh or app restart required.
+  useFocusEffect(
+    useCallback(() => {
+      fetchTasks();
+      fetchSubjects();
+    }, [fetchTasks, fetchSubjects])
+  );
+
+  useEffect(() => {
+    return subscribeTasksChanged((change) => {
+      if (change?.removedTaskId) {
+        setTasks((current) => current.filter((task) => task.id !== change.removedTaskId));
+        setActiveTaskId((current) => (current === change.removedTaskId ? null : current));
+      }
+      fetchTasks();
+      fetchSubjects();
+    });
+  }, [fetchTasks, fetchSubjects]);
+
+  const openTasks = useMemo(() => tasks.filter(isSelectableTask), [tasks]);
+  const selectedTask = openTasks.find((task) => task.id === activeTaskId);
+
+  const focusMinutesForTask = useMemo(() => {
+    const minutes = Number(selectedTask?.estMinutes);
+    if (Number.isFinite(minutes) && minutes > 0) return Math.max(1, Math.round(minutes));
+    return user?.focusMinutes ?? 25;
+  }, [selectedTask?.estMinutes, user?.focusMinutes]);
+
+  const durationFor = useCallback(
+    (m) => {
+      if (m === "focus") return focusMinutesForTask;
+      if (m === "short") return user?.shortBreakMinutes ?? 5;
+      return user?.longBreakMinutes ?? 15;
+    },
+    [focusMinutesForTask, user]
+  );
+
+  // Only subjects that still have an open, non-archived task. Archiving the
+  // last task for a subject removes that chip from Timer immediately.
+  const visibleSubjects = useMemo(() => {
+    const byId = new Map();
+    openTasks.forEach((task) => {
+      if (!task.subjectId || task.subject?.archived) return;
+      const subject = task.subject || subjects.find((item) => item.id === task.subjectId);
+      if (subject && !subject.archived) byId.set(subject.id, subject);
+    });
+    return Array.from(byId.values());
+  }, [openTasks, subjects]);
 
   // When a subject is selected, only show tasks assigned to that subject.
   // Otherwise show all open tasks so every task is reachable.
   const visibleTasks = useMemo(() => {
-    if (!activeSubjectId) return tasks;
-    return tasks.filter((t) => t.subjectId === activeSubjectId);
-  }, [tasks, activeSubjectId]);
+    if (!activeSubjectId) return openTasks;
+    return openTasks.filter((t) => t.subjectId === activeSubjectId);
+  }, [openTasks, activeSubjectId]);
+
+  useEffect(() => {
+    setActiveSubjectId((current) =>
+      current && !visibleSubjects.some((subject) => subject.id === current) ? null : current
+    );
+  }, [visibleSubjects]);
+
+  useEffect(() => {
+    if (running || mode !== "focus") return;
+    setSecondsLeft(focusMinutesForTask * 60);
+  }, [activeTaskId, focusMinutesForTask, running, mode]);
 
   const dismissAlarm = useCallback(() => {
     setAlarmVisible(false);
@@ -273,15 +326,23 @@ useEffect(() => {
   };
 
   const handleSessionComplete = useCallback(async () => {
+    if (completingRef.current) return;
+    completingRef.current = true;
     setRunning(false);
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
 
-    // Play the alarm sound + show popup when a focus session completes.
-    if (mode === "focus" && alarmPrefs.enabled) {
+    const endedMode = mode;
+    setFinishedMode(endedMode);
+
+    if (alarmPrefs.enabled) {
       try {
         await playAlarm(alarmPrefs.soundId, alarmPrefs.volume);
         setAlarmVisible(true);
       } catch (e) {
-        // alarm playback is non-fatal
+        setAlarmVisible(true);
       }
     }
 
@@ -289,33 +350,31 @@ useEffect(() => {
       try {
         await NotificationsModule.scheduleNotificationAsync({
           content: {
-            title: mode === "focus" ? "Focus session complete" : "Break's over",
-            body: mode === "focus" ? "Nice work. Time for a break." : "Let's start the next focus block.",
+            title: endedMode === "focus" ? "Focus session complete" : endedMode === "long" ? "Long break is over" : "Short break is over",
+            body: endedMode === "focus" ? "Nice work. Time for a break." : "Let's start the next focus block.",
           },
           trigger: null,
         });
       } catch (e) {}
     }
 
-try {
+    try {
       await client.post("/sessions", {
-        type: mode,
-        minutes: durationFor(mode),
-        taskId: mode === "focus" ? activeTaskId : null,
+        type: endedMode,
+        minutes: durationFor(endedMode),
+        taskId: endedMode === "focus" ? activeTaskId : null,
         subjectId: activeSubjectId,
       });
     } catch (e) {
-      // If this fails (e.g. offline), queue the session so it gets replayed
-      // once connectivity returns instead of being silently dropped.
       await queueRequest("POST", "/sessions", {
-        type: mode,
-        minutes: durationFor(mode),
-        taskId: mode === "focus" ? activeTaskId : null,
+        type: endedMode,
+        minutes: durationFor(endedMode),
+        taskId: endedMode === "focus" ? activeTaskId : null,
         subjectId: activeSubjectId,
       });
     }
 
-    if (mode === "focus") {
+    if (endedMode === "focus") {
       const nextCycles = cyclesDone + 1;
       setCyclesDone(nextCycles);
       const nextMode = nextCycles % sessionsBeforeLongBreak === 0 ? "long" : "short";
@@ -325,7 +384,8 @@ try {
       setMode("focus");
       setSecondsLeft(durationFor("focus") * 60);
     }
-  }, [mode, activeTaskId, cyclesDone, durationFor, sessionsBeforeLongBreak, alarmPrefs]);
+    completingRef.current = false;
+  }, [mode, activeTaskId, activeSubjectId, cyclesDone, durationFor, sessionsBeforeLongBreak, alarmPrefs, NotificationsModule]);
 
   const completeRef = useRef(handleSessionComplete);
   useEffect(() => {
@@ -337,7 +397,11 @@ try {
       intervalRef.current = setInterval(() => {
         setSecondsLeft((prev) => {
           if (prev <= 1) {
-            completeRef.current();
+            if (intervalRef.current) {
+              clearInterval(intervalRef.current);
+              intervalRef.current = null;
+            }
+            setTimeout(() => completeRef.current(), 0);
             return 0;
           }
           return prev - 1;
@@ -356,16 +420,15 @@ try {
   };
 
   const modeColor = MODES[mode].color;
+  const alarmModeColor = MODES[finishedMode]?.color || modeColor;
   const alarmSound = getAlarmSound(alarmPrefs.soundId);
-  const selectedTask = tasks.find((task) => task.id === activeTaskId);
-  const selectedSubject = subjects.find((subject) => subject.id === activeSubjectId);
+  const selectedSubject = visibleSubjects.find((subject) => subject.id === activeSubjectId);
   const totalSeconds = Math.max(1, durationFor(mode) * 60);
   const remainingProgress = secondsLeft / totalSeconds;
   const ringSize = wide ? 292 : compact ? 218 : 258;
   const cycleProgress = cyclesDone % sessionsBeforeLongBreak;
   const nextBreakLabel =
     (cyclesDone + 1) % sessionsBeforeLongBreak === 0 ? "Long break" : "Short break";
-
   return (
     <Screen>
       <ScrollView
@@ -373,26 +436,21 @@ try {
         contentContainerStyle={styles.page}
       >
         <View style={styles.header}>
-          <View style={styles.headerIdentity}>
-            <View style={styles.logoWrap}>
-              <Image source={require("../theme/logo.png")} style={styles.logo} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.eyebrow}>FOCUS TIMER</Text>
-              <Text style={styles.greeting}>
-                Ready to focus, {user?.name?.split(" ")[0] || "student"}?
-              </Text>
-              <Text style={styles.headerSubtitle}>Choose a task, start the timer, and stay in the zone.</Text>
-            </View>
+          <View style={styles.logoWrap}>
+            <Image source={require("../theme/logo.png")} style={styles.logo} />
           </View>
-          <Pressable
-            onPress={() => setSettingsVisible(true)}
-            accessibilityRole="button"
-            accessibilityLabel="Open timer settings"
-            style={({ pressed }) => [styles.settingsButton, pressed && styles.pressed]}
-          >
-            <Ionicons name="options-outline" size={21} color={colors.text} />
-          </Pressable>
+          <View style={styles.headerActions}>
+            <StreakBalance compact={compact} />
+            <NotificationBell />
+            <Pressable
+              onPress={() => setSettingsVisible(true)}
+              accessibilityRole="button"
+              accessibilityLabel="Open timer settings"
+              style={({ pressed }) => [styles.settingsButton, pressed && styles.pressed]}
+            >
+              <Ionicons name="options-outline" size={21} color={colors.text} />
+            </Pressable>
+          </View>
         </View>
 
         <View style={styles.layout}>
@@ -546,11 +604,11 @@ try {
                 )}
               </View>
 
-              {subjects.length > 0 && (
+              {visibleSubjects.length > 0 && (
                 <View style={styles.contextSection}>
                   <Text style={styles.sectionLabel}>SUBJECT</Text>
                   <View style={styles.chipWrap}>
-                    {subjects.map((subject) => {
+                    {visibleSubjects.map((subject) => {
                       const selected = activeSubjectId === subject.id;
                       return (
                         <Pressable
@@ -647,7 +705,9 @@ try {
                               {task.title}
                             </Text>
                             <Text style={styles.taskMeta}>
-                              {subjects.find((subject) => subject.id === task.subjectId)?.name || "General"}
+                              {task.subject?.name ||
+                                visibleSubjects.find((subject) => subject.id === task.subjectId)?.name ||
+                                "General"}
                             </Text>
                           </View>
                           {task.estMinutes ? (
@@ -687,19 +747,27 @@ try {
       >
         <View style={styles.modalOverlay}>
           <View style={styles.alarmCard}>
-            <View style={[styles.alarmIcon, { backgroundColor: modeColor + "18" }]}>
-              <Ionicons name="alarm-outline" size={32} color={modeColor} />
+            <View style={[styles.alarmIcon, { backgroundColor: alarmModeColor + "18" }]}>
+              <Ionicons name="alarm-outline" size={32} color={alarmModeColor} />
             </View>
-            <Text style={styles.modalTitle}>Time's up!</Text>
+            <Text style={styles.modalTitle}>
+              {finishedMode === "focus"
+                ? "Focus session complete"
+                : finishedMode === "long"
+                  ? "Long break is over"
+                  : "Short break is over"}
+            </Text>
             <Text style={styles.modalBody}>
-              {mode === "focus" ? "Focus session complete. Nice work!" : "Break's over — let's keep going."}
+              {finishedMode === "focus"
+                ? "Nice work. Time for a break."
+                : "Break's over — let's start the next focus block."}
             </Text>
             <View style={styles.soundBadge}>
               <Ionicons name="volume-high-outline" size={14} color={colors.textMuted} />
               <Text style={styles.modalSound}>{alarmSound.label}</Text>
             </View>
             <Pressable
-              style={[styles.modalButton, { backgroundColor: modeColor }]}
+              style={[styles.modalButton, { backgroundColor: alarmModeColor }]}
               onPress={dismissAlarm}
             >
               <Text style={styles.modalButtonText}>Dismiss alarm</Text>
@@ -872,42 +940,29 @@ const createStyles = (colors, wide, compact) =>
       gap: SPACING.md,
       marginBottom: SPACING.lg,
     },
-    headerIdentity: { flex: 1, flexDirection: "row", alignItems: "center", gap: 13 },
+    headerActions: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "flex-end",
+      gap: 8,
+      flexShrink: 0,
+    },
     logoWrap: {
-      width: compact ? 46 : 52,
-      height: compact ? 46 : 52,
-      borderRadius: 16,
+      width: compact ? 48 : 54,
+      height: compact ? 48 : 54,
+      borderRadius: 18,
       alignItems: "center",
       justifyContent: "center",
       backgroundColor: colors.violetSoft,
       borderWidth: 1,
       borderColor: colors.border,
+      flexShrink: 0,
     },
     logo: { width: compact ? 36 : 42, height: compact ? 36 : 42 },
-    eyebrow: {
-      color: colors.violet,
-      fontSize: 9,
-      fontWeight: "900",
-      letterSpacing: 1.1,
-      marginBottom: 3,
-    },
-    greeting: {
-      color: colors.text,
-      fontSize: compact ? 18 : 21,
-      lineHeight: compact ? 23 : 27,
-      fontWeight: "900",
-      letterSpacing: -0.4,
-    },
-    headerSubtitle: {
-      color: colors.textMuted,
-      fontSize: 11.5,
-      lineHeight: 17,
-      marginTop: 2,
-    },
     settingsButton: {
-      width: 44,
-      height: 44,
-      borderRadius: 14,
+      width: 42,
+      height: 42,
+      borderRadius: 16,
       alignItems: "center",
       justifyContent: "center",
       backgroundColor: colors.surface,

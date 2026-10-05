@@ -24,12 +24,16 @@ model User {
   emailVerified          Boolean       @default(false)
   emailVerificationCode  String?
   emailVerificationExpires DateTime?
+  passwordResetCodeHash  String?
+  passwordResetExpires   DateTime?
+  passwordResetAttempts  Int           @default(0)
   name                   String
   role                   Role          @default(STUDENT)
   status                 AccountStatus @default(ACTIVE)
   profilePicture         String?
   studentId              String?
   course                 String?
+  school                 String?
   yearLevel              String?
   section                String?
   studyGoals             String?
@@ -41,11 +45,15 @@ model User {
   sessionsBeforeLongBreak Int          @default(4)
   remindersEnabled       Boolean       @default(true)
   reminderTime           String        @default("18:00")
+  timezone               String        @default("UTC")
 
   // Gamification (XP + Hearts)
   xp                    Int           @default(0)
   hearts                Int           @default(5)
   hints                 Int           @default(3)
+  bonusHints            Int           @default(0)
+  coins                 Int           @default(0)
+  streakRewardLevel     Int           @default(0)
   heartsDepletedAt      DateTime?
   memorizeSettings      Json?
   dailyUsageDate        String?
@@ -54,6 +62,7 @@ model User {
   dailyTutorUsed        Int           @default(0)
   correctAnswers        Int           @default(0)
   wrongAnswers          Int           @default(0)
+  answerCombo           Int           @default(0)
   totalXpEarned         Int           @default(0)
 
   // Go Unlimited subscription. `premiumUntil` is the authoritative expiry the
@@ -92,6 +101,72 @@ model User {
   chatConversations ChatConversation[]
   payments          Payment[]
   subscription      Subscription?
+  following         Follow[]           @relation("UserFollowing")
+  followers         Follow[]           @relation("UserFollowers")
+  profileActivities ProfileActivity[]
+  activityReactions ActivityReaction[]
+  notifications     Notification[]
+  actedNotifications Notification[]    @relation("NotificationActor")
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  actorId   String?
+  actor     User?    @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+  type      String
+  title     String
+  body      String?
+  data      Json?
+  readAt    DateTime?
+  dedupeKey String
+  createdAt DateTime @default(now())
+
+  @@unique([userId, type, dedupeKey])
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
+}
+
+model Follow {
+  id          String   @id @default(cuid())
+  followerId  String
+  follower    User     @relation("UserFollowing", fields: [followerId], references: [id], onDelete: Cascade)
+  followingId String
+  following   User     @relation("UserFollowers", fields: [followingId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
+}
+
+model ProfileActivity {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  title     String
+  body      String?
+  dedupeKey String
+  meta      Json?
+  createdAt DateTime @default(now())
+  reactions ActivityReaction[]
+
+  @@unique([userId, type, dedupeKey])
+  @@index([userId, createdAt])
+}
+
+model ActivityReaction {
+  id         String          @id @default(cuid())
+  activityId String
+  activity   ProfileActivity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime        @default(now())
+
+  @@unique([activityId, userId])
+  @@index([activityId])
 }
 
 model Subject {
@@ -296,12 +371,15 @@ model ActivityLog {
 }
 
 model DeviceToken {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  token     String   @unique
-  platform  String   @default("unknown") // "ios" | "android"
-  createdAt DateTime @default(now())
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token           String   @unique
+  platform        String   @default("unknown") // "ios" | "android"
+  timezone        String   @default("UTC")
+  lastReminderKey String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@index([userId])
 }

@@ -16,6 +16,9 @@ import { Screen } from "../components/Screen";
 import { useTheme } from "../context/ThemeContext";
 import client from "../api/client";
 import { RADIUS, SPACING } from "../theme/theme";
+import { getStreakLevel } from "../lib/streakLevels";
+import HeaderWallet from "../components/HeaderWallet";
+import NotificationBell from "../components/NotificationBell";
 
 function formatDuration(total) {
   const minutes = Number(total) || 0;
@@ -25,12 +28,14 @@ function formatDuration(total) {
   return remaining ? `${hours}h ${remaining}m` : `${hours}h`;
 }
 
-export default function StatsScreen() {
+export default function StatsScreen({ embedded = false, userId = null, subjectName = "" }) {
   const { colors } = useTheme();
   const { width } = useWindowDimensions();
   const isWide = width >= 760;
   const compact = width < 380;
-  const styles = useMemo(() => createStyles(colors, isWide, compact), [colors, isWide, compact]);
+  const viewOnly = Boolean(userId);
+  const displayName = subjectName?.trim() || "Student";
+  const styles = useMemo(() => createStyles(colors, isWide, compact, embedded), [colors, isWide, compact, embedded]);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -41,15 +46,19 @@ export default function StatsScreen() {
     else setLoading(true);
     setError("");
     try {
-      const { data } = await client.get("/sessions/stats", { timeout: 20000 });
+      const path = viewOnly ? `/students/${userId}/stats` : "/sessions/stats";
+      const { data } = await client.get(path, { timeout: 20000 });
       setStats(data);
     } catch (requestError) {
-      setError(requestError?.response?.data?.error || "Unable to load your statistics. Please try again.");
+      setError(
+        requestError?.response?.data?.error
+          || (viewOnly ? "Unable to load this student's statistics." : "Unable to load your statistics. Please try again.")
+      );
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [userId, viewOnly]);
 
   useFocusEffect(
     useCallback(() => {
@@ -57,25 +66,29 @@ export default function StatsScreen() {
     }, [loadStats])
   );
 
+  const Frame = embedded ? View : Screen;
+
   if (loading && !stats) {
     return (
-      <Screen>
-        <View style={styles.centerState}>
+      <Frame>
+        <View style={[styles.centerState, embedded && styles.centerStateEmbedded]}>
           <View style={styles.stateIcon}>
             <Ionicons name="analytics" size={29} color={colors.violet} />
           </View>
           <ActivityIndicator color={colors.violet} />
-          <Text style={styles.stateTitle}>Calculating your progress</Text>
-          <Text style={styles.stateText}>Bringing your study activity together…</Text>
+          <Text style={styles.stateTitle}>
+            {viewOnly ? `Loading ${displayName}'s stats` : "Calculating your progress"}
+          </Text>
+          <Text style={styles.stateText}>Bringing study activity together…</Text>
         </View>
-      </Screen>
+      </Frame>
     );
   }
 
   if (error && !stats) {
     return (
-      <Screen>
-        <View style={styles.centerState}>
+      <Frame>
+        <View style={[styles.centerState, embedded && styles.centerStateEmbedded]}>
           <View style={[styles.stateIcon, { backgroundColor: colors.tomatoSoft }]}>
             <Ionicons name="cloud-offline-outline" size={29} color={colors.tomato} />
           </View>
@@ -85,7 +98,7 @@ export default function StatsScreen() {
             <Text style={styles.retryText}>Try again</Text>
           </Pressable>
         </View>
-      </Screen>
+      </Frame>
     );
   }
 
@@ -96,50 +109,74 @@ export default function StatsScreen() {
   const subjects = Array.isArray(stats?.subjects)
     ? stats.subjects
     : Object.entries(stats?.subjectTotals || {}).map(([name, minutes]) => ({ name, minutes, percentage: 0 }));
-  const chartWidth = Math.max(280, Math.min(width - 64, 944));
+  const chartWidth = Math.max(
+    260,
+    Math.min(width - (embedded ? 56 : 64), embedded ? 664 : 944)
+  );
   const goalProgress = Math.min(100, stats?.dailyGoalProgress || 0);
+  const streakLevel = getStreakLevel(stats?.streak || 0);
 
   const summaryCards = [
     { icon: "time-outline", value: formatDuration(stats?.totalStudyMinutes), label: "Total focus", color: colors.violet, soft: colors.violetSoft },
     { icon: "timer-outline", value: stats?.totalFocusSessions || 0, label: "Focus sessions", color: colors.mint, soft: colors.mintSoft },
     { icon: "calendar-outline", value: formatDuration(stats?.last7Minutes), label: "Last 7 days", color: colors.amber, soft: colors.amberSoft },
-    { icon: "flame-outline", value: stats?.streak || 0, label: "Day streak", color: colors.tomato, soft: colors.tomatoSoft },
+    { icon: "flame-outline", value: stats?.streak || 0, label: `${streakLevel.name} streak`, color: streakLevel.color, soft: streakLevel.softColor },
   ];
 
   return (
-    <Screen>
+    <Frame>
       <ScrollView
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.page}
+        style={embedded ? undefined : styles.scrollView}
+        showsVerticalScrollIndicator={!embedded}
+        bounces={!embedded}
+        nestedScrollEnabled
+        scrollEnabled={!embedded}
+        overScrollMode="never"
+        contentContainerStyle={[styles.page, embedded && styles.pageEmbedded]}
         refreshControl={
+          embedded ? undefined : (
           <RefreshControl
             refreshing={refreshing}
             onRefresh={() => loadStats({ refresh: true })}
             tintColor={colors.violet}
             colors={[colors.violet]}
           />
+          )
         }
       >
+        {embedded ? null : (
         <View style={styles.header}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.eyebrow}>YOUR PROGRESS</Text>
-            <Text style={styles.title}>Study statistics</Text>
-            <Text style={styles.subtitle}>See what you’ve accomplished and where to focus next.</Text>
+          <HeaderWallet compact={compact} />
+          <View style={styles.headerActions}>
+            <NotificationBell />
+            <Pressable
+              onPress={() => loadStats({ refresh: true })}
+              disabled={refreshing}
+              accessibilityRole="button"
+              accessibilityLabel="Refresh statistics"
+              style={({ pressed }) => [styles.refreshBtn, (pressed || refreshing) && styles.pressed]}
+            >
+              {refreshing ? (
+                <ActivityIndicator size="small" color={colors.violet} />
+              ) : (
+                <Ionicons name="refresh" size={18} color={colors.violet} />
+              )}
+            </Pressable>
           </View>
-          <Pressable
-            onPress={() => loadStats({ refresh: true })}
-            disabled={refreshing}
-            accessibilityRole="button"
-            accessibilityLabel="Refresh statistics"
-            style={({ pressed }) => [styles.refreshBtn, (pressed || refreshing) && styles.pressed]}
-          >
-            {refreshing ? (
-              <ActivityIndicator size="small" color={colors.violet} />
-            ) : (
-              <Ionicons name="refresh" size={19} color={colors.violet} />
-            )}
-          </Pressable>
         </View>
+        )}
+
+        {viewOnly ? (
+          <View style={styles.viewOnlyBanner}>
+            <View style={[styles.viewOnlyIcon, { backgroundColor: colors.violetSoft }]}>
+              <Ionicons name="eye-outline" size={16} color={colors.violet} />
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={styles.viewOnlyTitle} numberOfLines={1}>{displayName}'s stats</Text>
+              <Text style={styles.viewOnlyCopy}>View-only · study progress shared on their profile</Text>
+            </View>
+          </View>
+        ) : null}
 
         {error ? (
           <View style={styles.warning}>
@@ -154,7 +191,7 @@ export default function StatsScreen() {
               <Ionicons name="flag" size={21} color={colors.violet} />
             </View>
             <View style={styles.goalCopy}>
-              <Text style={styles.goalLabel}>TODAY’S FOCUS GOAL</Text>
+              <Text style={styles.goalLabel}>{viewOnly ? "TODAY'S FOCUS" : "TODAY’S FOCUS GOAL"}</Text>
               <Text style={styles.goalValue}>
                 {formatDuration(stats?.todayMinutes)} <Text style={styles.goalTarget}>of {formatDuration(stats?.dailyGoalMinutes)}</Text>
               </Text>
@@ -166,8 +203,10 @@ export default function StatsScreen() {
           </View>
           <Text style={styles.goalHint}>
             {goalProgress >= 100
-              ? "Daily goal complete — excellent work!"
-              : `${formatDuration(Math.max(0, (stats?.dailyGoalMinutes || 0) - (stats?.todayMinutes || 0)))} left to reach today’s goal`}
+              ? (viewOnly ? "Daily goal complete for today." : "Daily goal complete — excellent work!")
+              : viewOnly
+                ? `${formatDuration(Math.max(0, (stats?.dailyGoalMinutes || 0) - (stats?.todayMinutes || 0)))} left to reach today's goal`
+                : `${formatDuration(Math.max(0, (stats?.dailyGoalMinutes || 0) - (stats?.todayMinutes || 0)))} left to reach today’s goal`}
           </Text>
         </View>
 
@@ -183,14 +222,11 @@ export default function StatsScreen() {
           ))}
         </View>
 
-        <View style={styles.sectionHeading}>
-          <View>
-            <Text style={styles.sectionEyebrow}>FOCUS TREND</Text>
-            <Text style={styles.sectionTitle}>Last 7 days</Text>
-          </View>
-          <Text style={styles.sectionMeta}>{stats?.activeDaysLast7 || 0}/7 active days</Text>
-        </View>
         <View style={styles.chartCard}>
+          <View style={styles.cardHead}>
+            <Text style={styles.cardTitle}>Last 7 days</Text>
+            <Text style={styles.cardMeta}>{stats?.activeDaysLast7 || 0}/7 active days</Text>
+          </View>
           <VictoryChart
             width={chartWidth}
             height={220}
@@ -251,20 +287,21 @@ export default function StatsScreen() {
           </View>
         </View>
 
-        <View style={styles.sectionHeading}>
-          <View>
-            <Text style={styles.sectionEyebrow}>SUBJECT BREAKDOWN</Text>
-            <Text style={styles.sectionTitle}>Where your time goes</Text>
-          </View>
-        </View>
         <View style={styles.subjectCard}>
+          <View style={styles.cardHead}>
+            <Text style={styles.cardTitle}>Where your time goes</Text>
+          </View>
           {subjects.length === 0 ? (
             <View style={styles.emptySubject}>
               <View style={styles.emptySubjectIcon}>
                 <Ionicons name="book-outline" size={23} color={colors.violet} />
               </View>
               <Text style={styles.emptySubjectTitle}>No subject activity yet</Text>
-              <Text style={styles.emptySubjectText}>Choose a subject during a focus session to see your breakdown here.</Text>
+              <Text style={styles.emptySubjectText}>
+                {viewOnly
+                  ? "Subject breakdown will appear here once they log focus time."
+                  : "Choose a subject during a focus session to see your breakdown here."}
+              </Text>
             </View>
           ) : (
             subjects.map((subject, index) => {
@@ -288,10 +325,7 @@ export default function StatsScreen() {
 
         <View style={styles.footprintCard}>
           <View style={styles.footprintHeader}>
-            <View>
-              <Text style={styles.sectionEyebrow}>LEARNING FOOTPRINT</Text>
-              <Text style={styles.sectionTitle}>Everything you’ve built</Text>
-            </View>
+            <Text style={styles.cardTitle}>{viewOnly ? "Study footprint" : "Everything you’ve built"}</Text>
             <View style={styles.levelBadge}>
               <Ionicons name="shield-checkmark" size={14} color={colors.violet} />
               <Text style={styles.levelText}>Level {stats?.level || 1}</Text>
@@ -313,21 +347,52 @@ export default function StatsScreen() {
           </View>
         </View>
       </ScrollView>
-    </Screen>
+    </Frame>
   );
 }
 
-const createStyles = (colors, isWide, compact) =>
+const createStyles = (colors, isWide, compact, embedded) =>
   StyleSheet.create({
+    scrollView: {
+      flex: 1,
+    },
     page: {
       width: "100%",
-      maxWidth: 1008,
+      maxWidth: embedded ? "100%" : 1008,
       alignSelf: "center",
       paddingTop: SPACING.md,
-      paddingBottom: 110,
+      paddingBottom: SPACING.md,
     },
+    pageEmbedded: {
+      paddingTop: 0,
+      paddingBottom: 4,
+      gap: 0,
+    },
+    viewOnlyBanner: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: RADIUS.lg,
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      marginBottom: 10,
+    },
+    viewOnlyIcon: {
+      width: 34,
+      height: 34,
+      borderRadius: 11,
+      alignItems: "center",
+      justifyContent: "center",
+      flexShrink: 0,
+    },
+    viewOnlyTitle: { color: colors.text, fontSize: 14, fontWeight: "800" },
+    viewOnlyCopy: { color: colors.textMuted, fontSize: 11.5, lineHeight: 16, marginTop: 2 },
     pressed: { opacity: 0.7, transform: [{ scale: 0.98 }] },
     centerState: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 28 },
+    centerStateEmbedded: { flex: 0, paddingVertical: 28, minHeight: 160 },
     stateIcon: {
       width: 62,
       height: 62,
@@ -341,11 +406,22 @@ const createStyles = (colors, isWide, compact) =>
     stateText: { color: colors.textMuted, fontSize: 12.5, lineHeight: 18, marginTop: 5, textAlign: "center", maxWidth: 340 },
     retryBtn: { backgroundColor: colors.tomato, borderRadius: RADIUS.md, paddingVertical: 11, paddingHorizontal: 20, marginTop: 18 },
     retryText: { color: "#fff", fontSize: 12.5, fontWeight: "900" },
-    header: { flexDirection: "row", alignItems: "flex-start", gap: 12, marginBottom: SPACING.lg },
-    eyebrow: { color: colors.violet, fontSize: 8, fontWeight: "900", letterSpacing: 1, marginBottom: 2 },
-    title: { color: colors.text, fontSize: compact ? 25 : 29, lineHeight: compact ? 31 : 35, fontWeight: "900", letterSpacing: -0.7 },
-    subtitle: { color: colors.textMuted, fontSize: 12.5, lineHeight: 18, marginTop: 4, maxWidth: 560 },
-    refreshBtn: { width: 43, height: 43, borderRadius: 13, alignItems: "center", justifyContent: "center", backgroundColor: colors.violetSoft },
+    header: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 10,
+      marginBottom: 12,
+    },
+    headerActions: { flexDirection: "row", alignItems: "center", gap: 8, flexShrink: 0 },
+    refreshBtn: {
+      width: 40,
+      height: 40,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: colors.violetSoft,
+    },
     warning: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.tomatoSoft, borderRadius: RADIUS.md, padding: 11, marginBottom: 12 },
     warningText: { flex: 1, color: colors.text, fontSize: 11.5, lineHeight: 16 },
     goalCard: {
@@ -379,20 +455,53 @@ const createStyles = (colors, isWide, compact) =>
     summaryIcon: { width: 34, height: 34, borderRadius: 11, alignItems: "center", justifyContent: "center", marginBottom: 9 },
     summaryValue: { color: colors.text, fontSize: compact ? 17 : 20, fontWeight: "900" },
     summaryLabel: { color: colors.textMuted, fontSize: 10.5, fontWeight: "700", marginTop: 2 },
-    sectionHeading: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between", marginTop: 21, marginBottom: 9, paddingHorizontal: 2 },
-    sectionEyebrow: { color: colors.violet, fontSize: 8, fontWeight: "900", letterSpacing: 0.8, marginBottom: 2 },
-    sectionTitle: { color: colors.text, fontSize: 17, fontWeight: "900" },
-    sectionMeta: { color: colors.textMuted, fontSize: 10.5, fontWeight: "700" },
-    chartCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: RADIUS.xl, alignItems: "center", overflow: "hidden" },
-    performanceGrid: { flexDirection: isWide ? "row" : "column", gap: 9, marginTop: 9 },
-    performanceCard: { flex: 1, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: RADIUS.lg, padding: 15 },
+    cardHead: {
+      width: "100%",
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 10,
+      marginBottom: 4,
+    },
+    cardTitle: { flex: 1, minWidth: 0, color: colors.text, fontSize: compact ? 15 : 16, fontWeight: "800" },
+    cardMeta: { color: colors.textMuted, fontSize: 12, fontWeight: "700" },
+    chartCard: {
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: RADIUS.xl,
+      alignItems: "center",
+      overflow: "hidden",
+      marginTop: 12,
+      paddingTop: compact ? 12 : 14,
+      paddingHorizontal: compact ? 12 : 14,
+    },
+    performanceGrid: { flexDirection: isWide ? "row" : "column", gap: 9, marginTop: 10 },
+    performanceCard: {
+      flexGrow: isWide ? 1 : 0,
+      flexShrink: isWide ? 1 : 0,
+      flexBasis: isWide ? 0 : "auto",
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: RADIUS.lg,
+      padding: 15,
+    },
     performanceIcon: { width: 37, height: 37, borderRadius: 12, alignItems: "center", justifyContent: "center", marginBottom: 11 },
     performanceLabel: { color: colors.textMuted, fontSize: 8, fontWeight: "900", letterSpacing: 0.8 },
     performanceValue: { color: colors.text, fontSize: 25, fontWeight: "900", marginTop: 3 },
     performanceMeta: { color: colors.textMuted, fontSize: 11, fontWeight: "600", marginTop: 1 },
     miniTrack: { height: 6, borderRadius: 3, backgroundColor: colors.bg, overflow: "hidden", marginTop: 12 },
     miniFill: { height: "100%", borderRadius: 3 },
-    subjectCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: RADIUS.lg, paddingHorizontal: 15 },
+    subjectCard: {
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: RADIUS.lg,
+      paddingHorizontal: 15,
+      paddingTop: compact ? 12 : 14,
+      marginTop: 10,
+    },
     subjectRow: { paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: colors.border },
     subjectRowLast: { borderBottomWidth: 0 },
     subjectTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
@@ -404,8 +513,8 @@ const createStyles = (colors, isWide, compact) =>
     emptySubjectIcon: { width: 48, height: 48, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: colors.violetSoft },
     emptySubjectTitle: { color: colors.text, fontSize: 13.5, fontWeight: "900", marginTop: 10 },
     emptySubjectText: { color: colors.textMuted, fontSize: 11.5, lineHeight: 17, textAlign: "center", marginTop: 4, maxWidth: 340 },
-    footprintCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: RADIUS.xl, padding: 16, marginTop: 20 },
-    footprintHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 15 },
+    footprintCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: RADIUS.xl, padding: 16, marginTop: 10 },
+    footprintHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12 },
     levelBadge: { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: colors.violetSoft, borderRadius: RADIUS.pill, paddingVertical: 7, paddingHorizontal: 10 },
     levelText: { color: colors.violet, fontSize: 10.5, fontWeight: "900" },
     footprintGrid: { flexDirection: "row", gap: compact ? 5 : 8 },

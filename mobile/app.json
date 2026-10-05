@@ -3,6 +3,7 @@
     "name": "FocusFlow",
     "slug": "focusflow",
     "version": "1.0.0",
+    "scheme": "focusflow",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "splash": {
@@ -27,7 +28,8 @@
     },
     "plugins": [
       "expo-audio",
-      "expo-asset"
+      "expo-asset",
+      "expo-notifications"
     ]
   }
 }

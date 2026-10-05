@@ -4,6 +4,8 @@ import { Platform } from "react-native";
 import Constants from "expo-constants";
 
 const PORT_CANDIDATES = Array.from({ length: 12 }, (_, index) => 4000 + index);
+const PROBE_TIMEOUT_MS = 1200;
+const DETECTION_BUDGET_MS = 3500;
 
 function getLocalNetworkHostCandidates() {
   const hosts = new Set();
@@ -18,14 +20,7 @@ function getLocalNetworkHostCandidates() {
     if (host && host !== "0.0.0.0" && host !== "localhost") hosts.add(host);
   }
 
-  [
-    "10.0.2.2",
-    "127.0.0.1",
-    "localhost",
-    "192.168.1.1",
-    "192.168.0.1",
-    "192.168.1.15",
-  ].forEach((host) => hosts.add(host));
+  ["10.0.2.2", "127.0.0.1", "localhost"].forEach((host) => hosts.add(host));
 
   return [...hosts];
 }
@@ -35,8 +30,6 @@ function buildApiBaseUrlCandidates(envUrl) {
   const hostCandidates = getLocalNetworkHostCandidates();
   const urls = new Set();
 
-  // Web always runs on the development machine, so localhost is the most
-  // reliable first choice. A stale LAN override should not break the website.
   if (Platform.OS === "web") urls.add("http://localhost:4000/api");
   if (explicitUrl) urls.add(explicitUrl);
 
@@ -56,12 +49,43 @@ function buildApiBaseUrlCandidates(envUrl) {
   return [...urls].filter(Boolean);
 }
 
-// Override in mobile/.env when testing on a physical phone:
-//   EXPO_PUBLIC_API_URL=http://YOUR_PC_LAN_IP:4000/api
-// "localhost" only works in simulators/emulators, not on a real device.
+/**
+ * Short list for fast detection: env URL + other ports on the same host only.
+ * Avoids scanning dozens of dead LAN IPs sequentially (which caused 30s+ hangs).
+ */
+function buildPrioritizedApiCandidates(envUrl) {
+  const explicitUrl = envUrl ? envUrl.replace(/\/$/, "") : null;
+  const prioritized = [];
+
+  if (explicitUrl) {
+    prioritized.push(explicitUrl);
+    try {
+      const parsed = new URL(explicitUrl);
+      const host = parsed.hostname;
+      for (const port of PORT_CANDIDATES) {
+        prioritized.push(`http://${host}:${port}/api`);
+      }
+    } catch {
+      // ignore malformed env URL
+    }
+  }
+
+  if (Platform.OS === "web") prioritized.push("http://localhost:4000/api");
+  if (Platform.OS === "android" && !Constants.isDevice) prioritized.push("http://10.0.2.2:4000/api");
+  if (Platform.OS === "ios" && !Constants.isDevice) prioritized.push("http://localhost:4000/api");
+
+  for (const host of getLocalNetworkHostCandidates().slice(0, 2)) {
+    for (const port of [4000, 4001, 4002]) {
+      prioritized.push(`http://${host}:${port}/api`);
+    }
+  }
+
+  return [...new Set(prioritized)];
+}
+
 function resolveApiBaseUrl() {
   const envUrl = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, "");
-  const candidates = buildApiBaseUrlCandidates(envUrl);
+  const candidates = buildPrioritizedApiCandidates(envUrl);
   return candidates[0] || "http://localhost:4000/api";
 }
 
@@ -69,13 +93,13 @@ const API_BASE_URL = resolveApiBaseUrl();
 const API_BASE_URL_CANDIDATES = buildApiBaseUrlCandidates(process.env.EXPO_PUBLIC_API_URL);
 
 let activeApiBaseUrl = API_BASE_URL;
+let apiDetectionPromise = null;
 
-async function probeApiHealth(candidate) {
+async function probeApiHealth(candidate, timeoutMs = PROBE_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 2000);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    // API candidates end in /api, but the Express health endpoint is /health.
     const serverOrigin = candidate.replace(/\/api\/?$/, "");
     const response = await fetch(`${serverOrigin}/health`, {
       method: "GET",
@@ -89,38 +113,70 @@ async function probeApiHealth(candidate) {
   }
 }
 
-async function detectLiveApiBaseUrl() {
-  for (const candidate of API_BASE_URL_CANDIDATES) {
-    try {
-      const isHealthy = await probeApiHealth(candidate);
-      if (isHealthy) {
-        activeApiBaseUrl = candidate;
-        return candidate;
+async function detectLiveApiBaseUrlFast() {
+  const candidates = buildPrioritizedApiCandidates(process.env.EXPO_PUBLIC_API_URL);
+  if (!candidates.length) return activeApiBaseUrl;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (url) => {
+      if (settled) return;
+      settled = true;
+      activeApiBaseUrl = url;
+      client.defaults.baseURL = url;
+      if (typeof __DEV__ !== "undefined" && __DEV__) {
+        // eslint-disable-next-line no-console
+        console.log("FocusFlow API resolved to:", url);
       }
-    } catch (e) {
-      // Try the next port.
-    }
+      resolve(url);
+    };
+
+    const fallbackTimer = setTimeout(() => finish(activeApiBaseUrl), DETECTION_BUDGET_MS);
+
+    candidates.forEach((candidate) => {
+      probeApiHealth(candidate).then((ok) => {
+        if (ok) {
+          clearTimeout(fallbackTimer);
+          finish(candidate);
+        }
+      });
+    });
+  });
+}
+
+/** Call before payment/checkout so we hit the correct backend port immediately. */
+export async function ensureApiBaseUrlReady() {
+  if (!apiDetectionPromise) {
+    apiDetectionPromise = detectLiveApiBaseUrlFast();
   }
-
-  activeApiBaseUrl = API_BASE_URL;
-  return API_BASE_URL;
+  return apiDetectionPromise;
 }
 
-// Print resolved API URL in development to help debugging network issues.
+function kickOffApiDetection() {
+  if (!apiDetectionPromise) {
+    apiDetectionPromise = detectLiveApiBaseUrlFast();
+  }
+}
+
 if (typeof __DEV__ !== "undefined" && __DEV__) {
-  // Metro/Expo will show this in the JS console/logs.
   // eslint-disable-next-line no-console
-  console.log("API_BASE_URL:", API_BASE_URL);
+  console.log("API_BASE_URL (initial):", API_BASE_URL);
+  kickOffApiDetection();
 }
 
-// Keep mobile requests responsive. AI calls are now trimmed to recent context
-// and the backend retries fail fast, so a shorter timeout prevents the app
-// from hanging while the provider is slow or overloaded.
 const DEFAULT_TIMEOUT = 30000;
+export const CHECKOUT_TIMEOUT_MS = 18000;
 
 const client = axios.create({ baseURL: activeApiBaseUrl, timeout: DEFAULT_TIMEOUT });
 
+let firstRequestWarmed = false;
+
 client.interceptors.request.use(async (config) => {
+  if (!firstRequestWarmed) {
+    firstRequestWarmed = true;
+    await ensureApiBaseUrlReady().catch(() => {});
+  }
+
   const token = await AsyncStorage.getItem("focusflow_token");
   if (token) config.headers.Authorization = `Bearer ${token}`;
   if (config.url && !config.url.startsWith("http")) {
@@ -128,11 +184,6 @@ client.interceptors.request.use(async (config) => {
   }
   return config;
 });
-
-// ---- Offline request queue ----
-// When the device is offline or a request fails at the network level, we
-// store the failed request (for safe, replayable verb + path combos) and
-// retry it once connectivity is restored or the app regains focus.
 
 const QUEUE_KEY = "focusflow_offline_queue";
 
@@ -153,14 +204,13 @@ async function writeQueue(queue) {
   }
 }
 
-// Only queue idempotent-ish, non-destructive writes so retrying is safe.
 const SAFE_TO_QUEUE = (method, url) => {
   const m = (method || "").toUpperCase();
   const base = url.split("?")[0];
   const write = m === "POST" || m === "PUT" || m === "PATCH" || m === "DELETE";
   if (!write) return false;
-  // Don't queue auth or AI-generation heavy calls.
   if (base.includes("/auth/") || base.includes("/game/quiz") || base.includes("/ai")) return false;
+  if (base.includes("/premium/")) return false;
   return true;
 };
 
@@ -181,7 +231,6 @@ async function flushQueue() {
           timeout: DEFAULT_TIMEOUT,
         });
       } catch (e) {
-        // If it still fails due to being offline, keep it; otherwise drop it.
         if ((!e || !e.response) && (e?.code === "ECONNABORTED" || e?.message === FRIENDLY_NETWORK_ERROR)) {
           remaining.push(item);
         }
@@ -201,29 +250,38 @@ function enqueueOfflineRequest(config) {
   (async () => {
     const queue = await readQueue();
     queue.push({ method: config.method, url: config.url, data: config.data || {} });
-    // Cap the queue to avoid unbounded growth.
     const capped = queue.slice(-50);
     await writeQueue(capped);
   })();
 }
 
 const FRIENDLY_NETWORK_ERROR = "Unable to connect to the server. Please try again later.";
+const CHECKOUT_NETWORK_ERROR =
+  "Could not reach the FocusFlow server to start checkout. Check that the app API URL matches your backend port (often 4000 or 4001).";
 
-function formatApiError(err) {
+function formatApiError(err, config) {
   const status = err?.response?.status;
+  const data = err?.response?.data;
+  const isCheckout = String(config?.url || "").includes("/premium/checkout");
 
-  // Prefer the server's own error message if one was returned.
-  if (err?.response?.data?.error) return err.response.data.error;
+  if (data?.error) return data.error;
 
-  // AI / backend errors should not leak raw 502/500 messages to the mobile app.
-  if (status === 502 || status === 503 || status === 500) {
-    return "The AI service is temporarily unavailable. Please try again in a moment.";
+  if (status === 502 || status === 503) {
+    if (isCheckout && data?.code === "XENDIT_PUBLIC_KEY") {
+      return data.error || "Use your Xendit Secret API key on the server, not the Public key.";
+    }
+    return isCheckout
+      ? "Could not start Xendit checkout. Please try again in a moment."
+      : "The service is temporarily unavailable. Please try again in a moment.";
+  }
+  if (status === 500) {
+    return isCheckout
+      ? "Could not start checkout. Please try again."
+      : "Something went wrong on the server. Please try again.";
   }
 
-  // Network-level failures (no response, timeout, DNS, etc.) should be
-  // surfaced with a clean, non-technical message.
   if (err?.code === "ECONNABORTED" || !err?.response) {
-    return FRIENDLY_NETWORK_ERROR;
+    return isCheckout ? CHECKOUT_NETWORK_ERROR : FRIENDLY_NETWORK_ERROR;
   }
 
   return err.message || "Something went wrong";
@@ -234,26 +292,33 @@ client.interceptors.response.use(
   async (err) => {
     const config = err?.config;
     const wasNetworkFailure = !err?.response;
+    const isAiRequest = String(config?.url || "").includes("/ai/");
+    const isCheckout = String(config?.url || "").includes("/premium/checkout");
 
-    if (wasNetworkFailure && config && !config.__apiBaseUrlRetried) {
+    if (wasNetworkFailure && config && !config.__apiBaseUrlRetried && !isAiRequest) {
       try {
-        const detectedUrl = await detectLiveApiBaseUrl();
-        if (detectedUrl && detectedUrl !== activeApiBaseUrl) {
+        apiDetectionPromise = null;
+        const detectedUrl = await detectLiveApiBaseUrlFast();
+        if (detectedUrl && detectedUrl !== config.baseURL) {
           activeApiBaseUrl = detectedUrl;
-          const retryConfig = { ...config, __apiBaseUrlRetried: true, baseURL: detectedUrl };
+          const retryConfig = {
+            ...config,
+            __apiBaseUrlRetried: true,
+            baseURL: detectedUrl,
+            timeout: config.timeout || DEFAULT_TIMEOUT,
+          };
           return client.request(retryConfig);
         }
       } catch (e) {
-        // Ignore detection errors and fall through to the normal error handler.
+        // fall through
       }
     }
 
-    // If this is a genuine offline failure (no response) on a safe-to-queue
-    // write, stash it so we can replay it later.
     if (!err?.response && err?.config && SAFE_TO_QUEUE(err.config.method, err.config.url)) {
       enqueueOfflineRequest(err.config);
     }
-    const message = formatApiError(err);
+
+    const message = formatApiError(err, config);
     const enriched = new Error(message);
     const data = err?.response?.data;
     enriched.status = err?.response?.status;
@@ -261,20 +326,15 @@ client.interceptors.response.use(
     enriched.upgradeRequired = Boolean(data?.upgradeRequired);
     enriched.limits = data?.limits;
     enriched.response = err?.response;
+    enriched.isCheckout = isCheckout;
     return Promise.reject(enriched);
   }
 );
 
-/**
- * Explicitly add a write request to the offline queue. Use this when a
- * network write fails and you want to guarantee it is replayed later (e.g.
- * logging a completed Pomodoro session offline). Safe, non-destructive
- * writes are retained; otherwise the request is skipped.
- */
 export async function queueRequest(method, url, data) {
   enqueueOfflineRequest({ method, url, data });
   return { queued: SAFE_TO_QUEUE(method, url) };
 }
 
 export default client;
-export { API_BASE_URL, flushQueue };
+export { API_BASE_URL, flushQueue, activeApiBaseUrl };

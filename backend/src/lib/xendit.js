@@ -13,11 +13,24 @@ function getSecretKey() {
  * shipped in .env.example must never be treated as a working integration, or the
  * server would create invoices against a bogus key and fail confusingly.
  */
+function isPublicApiKey(key = getSecretKey()) {
+  return /xnd_public_/i.test(String(key || ''));
+}
+
 function isXenditConfigured() {
   const key = getSecretKey();
   if (!key) return false;
+  if (isPublicApiKey(key)) return false;
   if (/x{4,}|your[_-]?key|placeholder|change[_-]?me/i.test(key)) return false;
-  return key.startsWith('xnd_');
+  return key.startsWith('xnd_development_') || key.startsWith('xnd_production_');
+}
+
+function xenditKeyMisconfiguration() {
+  const key = getSecretKey();
+  if (!key) return 'missing';
+  if (isPublicApiKey(key)) return 'public_key_not_secret';
+  if (!isXenditConfigured()) return 'invalid';
+  return null;
 }
 
 function isTestMode() {
@@ -60,6 +73,8 @@ function planConfig() {
   };
 }
 
+const XENDIT_REQUEST_TIMEOUT_MS = Number(process.env.XENDIT_REQUEST_TIMEOUT_MS || 12000);
+
 async function xenditRequest(path, { method = 'GET', body } = {}) {
   if (!isXenditConfigured()) {
     const err = new Error('Xendit is not configured on the server');
@@ -67,16 +82,32 @@ async function xenditRequest(path, { method = 'GET', body } = {}) {
     throw err;
   }
 
-  const res = await fetch(`${XENDIT_API_URL}${path}`, {
-    method,
-    headers: {
-      Authorization: basicAuthHeader(),
-      'Content-Type': 'application/json',
-      // Idempotency key so a retried create never double-charges.
-      'api-version': '2022-07-31',
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), XENDIT_REQUEST_TIMEOUT_MS);
+
+  let res;
+  try {
+    res = await fetch(`${XENDIT_API_URL}${path}`, {
+      method,
+      signal: controller.signal,
+      headers: {
+        Authorization: basicAuthHeader(),
+        'Content-Type': 'application/json',
+        'api-version': '2022-07-31',
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (fetchErr) {
+    clearTimeout(timeoutId);
+    if (fetchErr && fetchErr.name === 'AbortError') {
+      const err = new Error(`Xendit request timed out after ${XENDIT_REQUEST_TIMEOUT_MS}ms`);
+      err.code = 'XENDIT_TIMEOUT';
+      throw err;
+    }
+    throw fetchErr;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   const text = await res.text();
   let data = {};
@@ -113,6 +144,9 @@ async function createInvoice({ user, externalId, successUrl, failureUrl, descrip
   // is exercised exactly as it would be with live credentials.
   if (isSandboxMode()) {
     const sandboxId = `sandbox_${externalId}`;
+    // Local sandbox completes inside the app (PremiumCheckout "Complete payment").
+    // Never use success_redirect_url as the hosted checkout URL — that is localhost
+    // and breaks on devices ("This site can't be reached").
     return {
       id: sandboxId,
       external_id: externalId,
@@ -120,9 +154,10 @@ async function createInvoice({ user, externalId, successUrl, failureUrl, descrip
       amount: price,
       currency,
       description,
-      invoice_url: `${successUrl}?sandbox_invoice_id=${sandboxId}&external_id=${externalId}`,
+      invoice_url: null,
       expiry_date: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
       sandbox: true,
+      local_sandbox: true,
     };
   }
 
@@ -138,6 +173,7 @@ async function createInvoice({ user, externalId, successUrl, failureUrl, descrip
     },
     success_redirect_url: successUrl,
     failure_redirect_url: failureUrl,
+    invoice_duration: Number(process.env.XENDIT_INVOICE_DURATION_SECONDS || 86400),
     items: [
       {
         name: `Go Unlimited (${plan})`,
@@ -146,12 +182,41 @@ async function createInvoice({ user, externalId, successUrl, failureUrl, descrip
         category: 'Subscription',
       },
     ],
-    // Metadata is echoed back on the webhook, letting us reconcile even if the
-    // external_id is somehow lost.
     metadata: { userId: user.id, plan },
   };
 
-  return xenditRequest('/v2/invoices', { method: 'POST', body: payload });
+  // Optional: restrict methods (comma-separated in env). If unset, Xendit shows all
+  // channels enabled for your account in the dashboard (required for GCash/Maya in Test Mode).
+  const methodsEnv = (process.env.XENDIT_INVOICE_PAYMENT_METHODS || '').trim();
+  if (methodsEnv) {
+    payload.payment_methods = methodsEnv.split(',').map((m) => m.trim()).filter(Boolean);
+  }
+
+  const invoice = await xenditRequest('/v2/invoices', { method: 'POST', body: payload });
+
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[xendit] Invoice created', {
+      id: invoice.id,
+      status: invoice.status,
+      amount: invoice.amount,
+      currency: invoice.currency,
+      invoice_url: invoice.invoice_url,
+      available_banks: invoice.available_banks,
+      available_retail_outlets: invoice.available_retail_outlets,
+      available_ewallets: invoice.available_ewallets,
+    });
+  }
+
+  return invoice;
+}
+
+/** Shown in the app during Xendit Test Mode (Invoice product). */
+function testModeCheckoutInstructions() {
+  return (
+    'On the Xendit invoice page: (1) Choose a payment method (e.g. GCash or Maya). ' +
+    '(2) In Test Mode, tap the red “Simulate payment” banner at the top of the page to complete the test transaction. ' +
+    'For cards, use Xendit test card numbers from their docs after selecting Credit/Debit Card.'
+  );
 }
 
 /**
@@ -224,18 +289,56 @@ function invoiceStatusToPaymentStatus(status) {
   return 'PENDING';
 }
 
+/**
+ * True only for HTTPS Xendit-hosted checkout pages (never localhost / app redirects).
+ */
+function isHostedCheckoutUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const u = new URL(url.trim());
+    if (u.protocol !== 'https:') return false;
+    const host = u.hostname.toLowerCase();
+    if (host === 'localhost' || host === '127.0.0.1' || host.endsWith('.local')) return false;
+    if (/^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[01])\./.test(host)) return false;
+    return host === 'checkout.xendit.co' || host.endsWith('.xendit.co');
+  } catch {
+    return false;
+  }
+}
+
 function checkoutUrlFor(invoice) {
   if (!invoice) return null;
-  if (invoice.invoice_url && String(invoice.invoice_url).startsWith('http')) return invoice.invoice_url;
-  if (invoice.id && isTestMode()) {
-    // Xendit test invoices are viewable through the hosted checkout host.
-    return `${CHECKOUT_BASE}/${invoice.id}`;
+  if (invoice.local_sandbox || invoice.sandbox === true && String(invoice.id || '').startsWith('sandbox_')) {
+    return null;
   }
-  return invoice.invoice_url || null;
+
+  const candidates = [
+    invoice.invoice_url,
+    invoice.hosted_invoice_url,
+    invoice.checkout_url,
+  ].filter(Boolean);
+
+  for (const raw of candidates) {
+    const url = String(raw).trim();
+    if (isHostedCheckoutUrl(url)) return url;
+  }
+
+  // Use only URLs returned by Xendit — do not guess checkout links from invoice ids.
+  return null;
+}
+
+if (isPublicApiKey(getSecretKey())) {
+  console.warn(
+    '[xendit] XENDIT_SECRET_KEY appears to be a PUBLIC API key (xnd_public_…). ' +
+      'Use the Secret API key (xnd_development_… / xnd_production_…) for invoice creation. ' +
+      'Falling back to local sandbox if XENDIT_SANDBOX=true.'
+  );
 }
 
 module.exports = {
   isXenditConfigured,
+  isPublicApiKey,
+  xenditKeyMisconfiguration,
   isSandboxMode,
   paymentsAvailable,
   isTestMode,
@@ -245,5 +348,7 @@ module.exports = {
   verifyWebhook,
   verifyCallbackToken,
   invoiceStatusToPaymentStatus,
+  isHostedCheckoutUrl,
   checkoutUrlFor,
+  testModeCheckoutInstructions,
 };

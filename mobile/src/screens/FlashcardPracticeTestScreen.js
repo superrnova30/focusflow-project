@@ -15,6 +15,9 @@ import { useTheme } from "../context/ThemeContext";
 import client from "../api/client";
 import { resolveCollectionId } from "../lib/collectionStudy";
 import { RADIUS, SPACING } from "../theme/theme";
+import HeartsBlockedPanel from "../components/HeartsBlockedPanel";
+import { fetchHeartsState, isHeartsBlocked, spendCoinsForHearts } from "../lib/hearts";
+import { startGoUnlimitedCheckout } from "../lib/upgradePrompt";
 
 const PRACTICE_TARGET = 247;
 
@@ -35,6 +38,18 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
   const [justUnlocked, setJustUnlocked] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [batchDone, setBatchDone] = useState(false);
+  const [hearts, setHearts] = useState(5);
+  const [coins, setCoins] = useState(0);
+  const [heartsRefillAt, setHeartsRefillAt] = useState(null);
+  const [buying, setBuying] = useState(null);
+  const [blocked, setBlocked] = useState(false);
+
+  const applyHearts = (state = {}) => {
+    setHearts(state.hearts ?? 0);
+    if (state.coins != null) setCoins(state.coins);
+    setHeartsRefillAt(state.heartsRefillAt || null);
+    setBlocked(isHeartsBlocked(state));
+  };
 
   const loadQuestions = useCallback(async () => {
     if (!collectionId) {
@@ -43,6 +58,12 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
     }
     setLoading(true);
     try {
+      const state = await fetchHeartsState(client).catch(() => null);
+      if (state && isHeartsBlocked(state)) {
+        applyHearts(state);
+        setLoading(false);
+        return;
+      }
       const { data } = await client.get(`/flashcards/collections/${collectionId}/study/practice/questions`, {
         params: { count: 10 },
       });
@@ -63,8 +84,14 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
       setSessionCorrect(0);
       setBatchDone(false);
       setJustUnlocked(false);
+      setBlocked(false);
     } catch (e) {
-      Alert.alert("Error", e?.response?.data?.error || e.message);
+      const payload = e?.response?.data || {};
+      if (payload.code === "HEARTS_DEPLETED" || payload.heartsBlocked) {
+        applyHearts(payload);
+      } else {
+        Alert.alert("Error", payload.error || e.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -100,6 +127,27 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
 
     setSubmitting(true);
     try {
+      if (!isCorrect) {
+        try {
+          const { data: heartData } = await client.post("/game/hearts", { delta: -1 });
+          applyHearts({
+            hearts: heartData.state?.hearts ?? Math.max(0, hearts - 1),
+            coins: heartData.coins ?? heartData.state?.coins,
+            heartsRefillAt: heartData.heartsRefillAt,
+            heartsBlocked: heartData.gameOver || heartData.heartsBlocked,
+          });
+          if (heartData.gameOver || heartData.heartsBlocked) {
+            setBlocked(true);
+          }
+        } catch (heartErr) {
+          const payload = heartErr?.response?.data || {};
+          if (payload.code === "HEARTS_DEPLETED" || payload.heartsBlocked) {
+            applyHearts(payload);
+            setBlocked(true);
+            return;
+          }
+        }
+      }
       const { data } = await client.post(`/flashcards/collections/${collectionId}/study/practice/answer`, {
         correct: isCorrect,
       });
@@ -107,13 +155,37 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
       setUnlocked(Boolean(data.progress?.practiceUnlocked));
       if (data.justUnlocked) setJustUnlocked(true);
     } catch (e) {
-      Alert.alert("Error", e?.response?.data?.error || e.message);
+      const payload = e?.response?.data || {};
+      if (payload.code === "HEARTS_DEPLETED" || payload.heartsBlocked) {
+        applyHearts(payload);
+        setBlocked(true);
+      } else {
+        Alert.alert("Error", payload.error || e.message);
+      }
     } finally {
       setSubmitting(false);
     }
   };
 
+  const buyHearts = async (quantity) => {
+    if (buying) return;
+    setBuying(quantity > 1 ? "hearts" : "heart");
+    try {
+      const data = await spendCoinsForHearts(client, quantity);
+      applyHearts({ hearts: data.hearts, coins: data.coins, heartsRefillAt: null, heartsBlocked: false });
+      setBlocked(false);
+    } catch (e) {
+      Alert.alert("Unable to revive", e.response?.data?.error || e.message || "Please try again.");
+    } finally {
+      setBuying(null);
+    }
+  };
+
   const nextQuestion = () => {
+    if (hearts <= 0) {
+      setBlocked(true);
+      return;
+    }
     if (qIndex + 1 >= questions.length) {
       setBatchDone(true);
       return;
@@ -123,13 +195,36 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
     setRevealed(false);
   };
 
-  if (loading && !questions.length) {
+  if (loading && !questions.length && !blocked) {
     return (
       <Screen>
         <View style={styles.center}>
           <ActivityIndicator color={colors.amber} size="large" />
           <Text style={styles.muted}>Loading practice questions…</Text>
         </View>
+      </Screen>
+    );
+  }
+
+  if (blocked) {
+    return (
+      <Screen>
+        <ScrollView contentContainerStyle={styles.blockedScroll} showsVerticalScrollIndicator={false}>
+          <HeartsBlockedPanel
+            coins={coins}
+            hearts={hearts}
+            refillAt={heartsRefillAt}
+            buying={buying}
+            title="Practice unavailable"
+            message="You ran out of hearts after incorrect answers. Wait 24 hours for a full refill, or spend coins to revive hearts and keep practicing."
+            onRevive={() => buyHearts(1)}
+            onRefillAll={(qty) => buyHearts(qty)}
+            onCheckAgain={loadQuestions}
+            onBack={() => navigation.goBack()}
+            onUpgrade={() => startGoUnlimitedCheckout(navigation)}
+            continueLabel="Continue practicing"
+          />
+        </ScrollView>
       </Screen>
     );
   }
@@ -200,6 +295,21 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
           </View>
         </View>
 
+        <Pressable
+          onPress={() => hearts <= 0 && setBlocked(true)}
+          accessibilityRole="button"
+          accessibilityLabel={hearts <= 0 ? "Out of hearts. Open revive options." : `${hearts} hearts remaining`}
+          style={styles.heartRow}
+        >
+          {[0, 1, 2, 3, 4].map((i) => (
+            <Ionicons
+              key={i}
+              name={i < hearts ? "heart" : "heart-outline"}
+              size={18}
+              color={i < hearts ? "#FF5A76" : colors.border}
+            />
+          ))}
+        </Pressable>
         <Text style={styles.qMeta}>
           Question {qIndex + 1} of {questions.length}
         </Text>
@@ -265,6 +375,16 @@ const createStyles = (colors) =>
       justifyContent: "center",
       padding: SPACING.lg,
       gap: SPACING.md,
+    },
+    blockedScroll: {
+      flexGrow: 1,
+      justifyContent: "center",
+      paddingVertical: SPACING.lg,
+    },
+    heartRow: {
+      flexDirection: "row",
+      gap: 4,
+      marginBottom: SPACING.sm,
     },
     muted: {
       color: colors.textMuted,

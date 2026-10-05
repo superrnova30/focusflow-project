@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import client from "../api/client";
-import { registerForPushNotifications, unregisterPushNotifications, retryOfflineWrites } from "../lib/push";
+import { refreshPushRegistration, unregisterPushNotifications, retryOfflineWrites } from "../lib/push";
 
 const AuthContext = createContext(null);
 
@@ -18,7 +18,7 @@ export function AuthProvider({ children }) {
           setUser(data.user);
           // Start optional background work without blocking the boot flow.
           setTimeout(() => {
-            registerForPushNotifications().catch(() => {});
+            refreshPushRegistration().catch(() => {});
             retryOfflineWrites().catch(() => {});
           }, 0);
         } catch (e) {
@@ -32,11 +32,12 @@ export function AuthProvider({ children }) {
 
   const login = useCallback(async (email, password) => {
     try {
-      const { data } = await client.post("/auth/login", { email, password });
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+      const { data } = await client.post("/auth/login", { email, password, timezone });
       await AsyncStorage.setItem("focusflow_token", data.token);
       setUser(data.user);
       setTimeout(() => {
-        registerForPushNotifications().catch(() => {});
+        refreshPushRegistration().catch(() => {});
         retryOfflineWrites().catch(() => {});
       }, 0);
       return data.user;
@@ -66,6 +67,11 @@ export function AuthProvider({ children }) {
     return data;
   }, []);
 
+  const verifyResetCode = useCallback(async (email, code) => {
+    const { data } = await client.post("/auth/verify-reset-code", { email, code });
+    return data;
+  }, []);
+
   const resetPassword = useCallback(async (email, code, newPassword) => {
     const { data } = await client.post("/auth/reset-password", { email, code, newPassword });
     return data;
@@ -77,7 +83,7 @@ export function AuthProvider({ children }) {
       await AsyncStorage.setItem("focusflow_token", data.token);
       setUser(data.user);
       setTimeout(() => {
-        registerForPushNotifications().catch(() => {});
+        refreshPushRegistration().catch(() => {});
       }, 0);
     }
     return data;
@@ -111,6 +117,7 @@ export function AuthProvider({ children }) {
         logout,
         refreshUser,
         requestPasswordReset,
+        verifyResetCode,
         resetPassword,
         verifyEmail,
         sendVerificationCode,

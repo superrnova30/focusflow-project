@@ -3,7 +3,7 @@ import { TextInput, Pressable, Text, StyleSheet, ActivityIndicator, View } from 
 import { RADIUS } from "../theme/theme";
 import { useTheme } from "../context/ThemeContext";
 
-export function Input({ style, label, secureTextEntry, compact = false, ...props }) {
+export function Input({ style, label, secureTextEntry, compact = false, wrapperStyle, ...props }) {
   const { colors } = useTheme();
   const [secure, setSecure] = useState(!!secureTextEntry);
 
@@ -23,7 +23,7 @@ export function Input({ style, label, secureTextEntry, compact = false, ...props
   }
 
   return (
-    <View style={[styles.inputWrapper, { marginBottom: wrapperMarginBottom }]}> 
+    <View style={[styles.inputWrapper, compact && styles.compactWrapper, { marginBottom: wrapperMarginBottom }, wrapperStyle]}> 
       {label && <Text style={[styles.label, { color: colors.text }]}>{label}</Text>}
       <View
         style={[
@@ -116,6 +116,10 @@ const styles = StyleSheet.create({
     minWidth: 0,
     alignSelf: "stretch",
     marginBottom: 12,
+  },
+  compactWrapper: {
+    flexGrow: 0,
+    flexShrink: 0,
   },
   label: {
     fontSize: 13,

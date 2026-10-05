@@ -1,5 +1,16 @@
 import React, { useState, useCallback } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, Alert, ActivityIndicator } from "react-native";
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  Pressable,
+  Alert,
+  ActivityIndicator,
+  TextInput,
+  KeyboardAvoidingView,
+  Platform,
+} from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import { useFocusEffect } from "@react-navigation/native";
 import { Screen, Card } from "../components/Screen";
@@ -26,6 +37,7 @@ export default function CardImportScreen({ navigation }) {
   const [collections, setCollections] = useState([]);
   const [collectionId, setCollectionId] = useState(null);
   const [newCollectionName, setNewCollectionName] = useState("");
+  const [creatingNew, setCreatingNew] = useState(true);
   const [saving, setSaving] = useState(false);
   const [pdfName, setPdfName] = useState("");
   const [pdfBase64, setPdfBase64] = useState("");
@@ -148,55 +160,80 @@ if (source === "notes" && !notes.trim()) {
     setGeneratedCards(next);
   };
 
+  const openMyDecks = () => {
+    const routeNames = navigation.getState?.()?.routeNames || [];
+    if (routeNames.includes("FilesHome")) {
+      navigation.navigate("FilesHome", { section: "mine", kind: "flashcards" });
+      return;
+    }
+    navigation.navigate("Files", { screen: "FilesHome", params: { section: "mine", kind: "flashcards" } });
+  };
+
   const saveCards = async () => {
     const valid = generatedCards.filter((c) => c.front.trim() && c.back.trim());
     if (valid.length === 0) {
       Alert.alert("No cards", "Add at least one valid card to save.");
       return;
     }
+    if (creatingNew && !newCollectionName.trim()) {
+      Alert.alert("Deck name required", "Enter a name for your new deck.");
+      return;
+    }
+    if (!creatingNew && !collectionId) {
+      Alert.alert("Choose a deck", "Select an existing deck or create a new one.");
+      return;
+    }
 
     setSaving(true);
     try {
-      const collectionName =
-        newCollectionName.trim() ||
-        (collectionId ? collections.find((c) => c.id === collectionId)?.name : null);
-
-      // First save the flashcards directly via magic-import to persist into a
-      // collection (reuse existing endpoint for creation).
       const { data } = await client.post("/flashcards/magic-import", {
-        topic: valid[0].front,
-        notes: valid.map((c) => `Q: ${c.front}\nA: ${c.back}`).join("\n"),
-        collectionName: collectionName || undefined,
+        cards: valid.map((c) => ({ front: c.front.trim(), back: c.back.trim() })),
+        collectionId: creatingNew ? undefined : collectionId,
+        collectionName: creatingNew ? newCollectionName.trim() : undefined,
       });
 
-      const targetName = data.collection?.name || collectionName || "Your cards";
-      Alert.alert("Cards saved! 🎉", `${valid.length} flashcards saved into "${targetName}".`, [
-        {
-          text: "View",
-          onPress: () => {
-            if (data.collection) {
-              navigation.navigate("FlashcardCollection", { collection: data.collection });
-            } else {
-              navigation.goBack();
-            }
+      const targetName = data.collection?.name || newCollectionName.trim() || "Your deck";
+      const savedCount = data.savedCount ?? valid.length;
+      Alert.alert(
+        "Cards saved",
+        `${savedCount} flashcard${savedCount === 1 ? "" : "s"} saved to "${targetName}".`,
+        [
+          {
+            text: "View deck",
+            onPress: () => {
+              if (data.collection) {
+                navigation.navigate("FlashcardCollection", { collection: data.collection });
+              } else {
+                openMyDecks();
+              }
+            },
           },
-        },
-        { text: "OK", onPress: () => navigation.goBack() },
-      ]);
+          {
+            text: "My Decks",
+            onPress: openMyDecks,
+          },
+          { text: "Done", style: "cancel", onPress: () => navigation.goBack() },
+        ]
+      );
+      setGeneratedCards([]);
+      setCreatingNew(true);
+      setCollectionId(null);
+      setNewCollectionName("");
     } catch (e) {
-      Alert.alert("Error", e.message);
+      Alert.alert("Could not save", e?.response?.data?.error || e.message || "Please try again.");
     } finally {
       setSaving(false);
     }
   };
 
-  const targetCollectionName =
-    newCollectionName.trim() ||
-    (collectionId ? collections.find((c) => c.id === collectionId)?.name : null);
-
   return (
     <Screen>
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingTop: 16, paddingBottom: 40 }}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={{ paddingTop: 16, paddingBottom: 40 }}
+      >
         <Text style={styles.header}>Magic Import 🪄</Text>
         <Text style={styles.subtitle}>
           Generate high-quality flashcards with AI, review them, then save to a deck.
@@ -288,37 +325,57 @@ if (source === "notes" && !notes.trim()) {
             <View style={styles.collectionWrap}>
               <Pressable
                 onPress={() => {
-                  setNewCollectionName("");
+                  setCreatingNew(true);
                   setCollectionId(null);
                 }}
-                style={[styles.collectionChip, !targetCollectionName && { borderColor: colors.violet, backgroundColor: colors.violetSoft }]}
+                style={[
+                  styles.collectionChip,
+                  creatingNew && { borderColor: colors.violet, backgroundColor: colors.violetSoft },
+                ]}
               >
-                <Text style={[styles.collectionChipText, !targetCollectionName && { color: colors.violet }]}>✨ New deck</Text>
+                <Text style={[styles.collectionChipText, creatingNew && { color: colors.violet }]}>✨ New deck</Text>
               </Pressable>
               {collections.map((c) => {
-                const active = targetCollectionName === c.name;
+                const active = !creatingNew && collectionId === c.id;
                 return (
                   <Pressable
                     key={c.id}
                     onPress={() => {
+                      setCreatingNew(false);
                       setCollectionId(c.id);
                       setNewCollectionName("");
                     }}
                     style={[styles.collectionChip, active && { borderColor: colors.mint, backgroundColor: colors.mintSoft }]}
                   >
-                    <Text style={[styles.collectionChipText, active && { color: colors.mint }]}>{c.name}</Text>
+                    <Text style={[styles.collectionChipText, active && { color: colors.mint }]} numberOfLines={1}>
+                      {c.name}
+                    </Text>
                   </Pressable>
                 );
               })}
             </View>
 
-            {!targetCollectionName && (
-              <Input
+            {creatingNew ? (
+              <TextInput
                 value={newCollectionName}
                 onChangeText={setNewCollectionName}
                 placeholder="New deck name (e.g. Chemistry Ch. 4)"
-                style={{ marginTop: 10 }}
+                placeholderTextColor={colors.textMuted}
+                autoCapitalize="sentences"
+                autoCorrect
+                style={[
+                  styles.deckNameInput,
+                  {
+                    color: colors.text,
+                    borderColor: colors.border,
+                    backgroundColor: colors.surface,
+                  },
+                ]}
               />
+            ) : (
+              <Text style={styles.deckHint}>
+                Saving to "{collections.find((c) => c.id === collectionId)?.name || "selected deck"}"
+              </Text>
             )}
 
             <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
@@ -332,6 +389,7 @@ if (source === "notes" && !notes.trim()) {
           </View>
         )}
       </ScrollView>
+      </KeyboardAvoidingView>
     </Screen>
   );
 }
@@ -365,7 +423,17 @@ const useStyles = (colors) =>
       borderWidth: 1, borderColor: colors.border, borderRadius: 999, paddingVertical: 8, paddingHorizontal: 14,
       backgroundColor: colors.surface,
     },
-    collectionChipText: { color: colors.text, fontSize: 12.5, fontWeight: "700" },
+    collectionChipText: { color: colors.text, fontSize: 12.5, fontWeight: "700", maxWidth: 140 },
+    deckNameInput: {
+      marginTop: 10,
+      borderWidth: 1,
+      borderRadius: 12,
+      paddingHorizontal: 14,
+      paddingVertical: Platform.OS === "ios" ? 12 : 10,
+      fontSize: 15,
+      fontWeight: "600",
+    },
+    deckHint: { color: colors.textMuted, fontSize: 12.5, marginTop: 10, fontWeight: "600" },
     discardBtn: { borderWidth: 1, borderRadius: 12, paddingVertical: 14, paddingHorizontal: 20, alignItems: "center", justifyContent: "center" },
     discardText: { fontWeight: "700", fontSize: 14 },
   });

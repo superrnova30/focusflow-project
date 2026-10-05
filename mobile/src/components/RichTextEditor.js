@@ -2,6 +2,7 @@ import React from "react";
 import { View, Text, TextInput, Pressable, StyleSheet, ScrollView } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "../context/ThemeContext";
+import InlineFormatEditor from "./InlineFormatEditor";
 
 /**
  * A lightweight rich-text editor that stores content as an array of blocks.
@@ -25,8 +26,29 @@ export default function RichTextEditor({
   compact = false,
   embedded = false,
   scrollable = false,
+  simple = false,
 }) {
   const { colors } = useTheme();
+
+  if (simple) {
+    return (
+      <View
+        style={[
+          editorStyles.container,
+          compact && editorStyles.containerCompact,
+          embedded && editorStyles.containerEmbedded,
+          !embedded && { backgroundColor: colors.surface, borderColor: colors.border },
+        ]}
+      >
+        <InlineFormatEditor
+          value={value}
+          onChange={onChange}
+          compact={compact}
+          placeholder={placeholder || "Notes, steps, or reminders"}
+        />
+      </View>
+    );
+  }
 
   const updateBlock = (index, patch) => {
     const next = [...value];
@@ -62,9 +84,19 @@ export default function RichTextEditor({
     updateBlock(index, { marks });
   };
 
-  const renderBlock = (block, index) => {
+  const renderBlockControls = (block, index) => {
     const isLast = index === value.length - 1;
+    const isList = block.type === "bullet" || block.type === "numbered" || block.type === "checklist";
+    if (isLast && !compact && isList) {
+      return <IconButton name="add" onPress={() => addBlock(index, block.type)} color={colors.violet} />;
+    }
+    if (value.length > 1) {
+      return <IconButton name="remove" onPress={() => removeBlock(index)} color={colors.textMuted} />;
+    }
+    return null;
+  };
 
+  const renderBlock = (block, index) => {
     if (block.type === "heading") {
       const size = block.level === 1 ? 24 : block.level === 3 ? 15 : 19;
       return (
@@ -77,7 +109,7 @@ export default function RichTextEditor({
             style={[editorStyles.blockInput, editorStyles.heading, { fontSize: size, color: colors.text }]}
             multiline
           />
-          <IconButton name="remove" onPress={() => removeBlock(index)} color={colors.textMuted} />
+          {renderBlockControls(block, index)}
         </View>
       );
     }
@@ -95,11 +127,7 @@ export default function RichTextEditor({
             style={[editorStyles.blockInput, { color: colors.text }]}
             multiline
           />
-          {isLast ? (
-            <IconButton name="add" onPress={() => addBlock(index, block.type)} color={colors.violet} />
-          ) : (
-            <IconButton name="remove" onPress={() => removeBlock(index)} color={colors.textMuted} />
-          )}
+          {renderBlockControls(block, index)}
         </View>
       );
     }
@@ -126,11 +154,7 @@ export default function RichTextEditor({
             ]}
             multiline
           />
-          {isLast ? (
-            <IconButton name="add" onPress={() => addBlock(index, "checklist")} color={colors.violet} />
-          ) : (
-            <IconButton name="remove" onPress={() => removeBlock(index)} color={colors.textMuted} />
-          )}
+          {renderBlockControls(block, index)}
         </View>
       );
     }
@@ -154,11 +178,7 @@ export default function RichTextEditor({
           ]}
           multiline
         />
-        {isLast ? (
-          <IconButton name="add" onPress={() => addBlock(index, "text")} color={colors.violet} />
-        ) : (
-          <IconButton name="remove" onPress={() => removeBlock(index)} color={colors.textMuted} />
-        )}
+        {renderBlockControls(block, index)}
       </View>
     );
   };
@@ -197,7 +217,9 @@ export default function RichTextEditor({
           contentContainerStyle={editorStyles.toolbarContent}
           style={[editorStyles.toolbar, { borderBottomColor: colors.border }]}
         >
-          <Text style={[editorStyles.toolbarLabel, { color: colors.textMuted }]}>Format</Text>
+          {compact ? null : (
+            <Text style={[editorStyles.toolbarLabel, { color: colors.textMuted }]}>Format</Text>
+          )}
           <ToolButton
             label="B"
             active={value[lastTextBlockIndex]?.marks?.includes("bold")}

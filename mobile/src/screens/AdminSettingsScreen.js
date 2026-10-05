@@ -40,6 +40,9 @@ export default function AdminSettingsScreen() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [savedAt, setSavedAt] = useState("");
+  const [broadcastTitle, setBroadcastTitle] = useState("");
+  const [broadcastBody, setBroadcastBody] = useState("");
+  const [broadcasting, setBroadcasting] = useState(false);
 
   const loadSettings = async () => {
     setLoading(true);
@@ -83,6 +86,27 @@ export default function AdminSettingsScreen() {
       if (Platform.OS !== "web") Alert.alert("Error", e.message);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const sendBroadcast = async () => {
+    const title = broadcastTitle.trim();
+    const body = broadcastBody.trim();
+    if (!title) {
+      Alert.alert("Add a title", "Students need a short heading for the update.");
+      return;
+    }
+    setBroadcasting(true);
+    try {
+      const { data } = await client.post("/admin/notifications/broadcast", { title, body });
+      setBroadcastTitle("");
+      setBroadcastBody("");
+      setSavedAt(`Update sent to ${data.sent || 0} student${data.sent === 1 ? "" : "s"}.`);
+      if (Platform.OS !== "web") Alert.alert("Sent", `Update sent to ${data.sent || 0} students.`);
+    } catch (e) {
+      Alert.alert("Could not send", e?.response?.data?.error || e.message);
+    } finally {
+      setBroadcasting(false);
     }
   };
 
@@ -223,6 +247,44 @@ export default function AdminSettingsScreen() {
                 </Pressable>
               );
             })}
+          </View>
+        </View>
+
+        <Text style={styles.sectionLabel}>Student updates</Text>
+        <View style={styles.group}>
+          <View style={styles.goalBlock}>
+            <Text style={styles.rowTitle}>Send a notification</Text>
+            <Text style={styles.rowHint}>This appears in every student’s notification list.</Text>
+            <TextInput
+              value={broadcastTitle}
+              onChangeText={setBroadcastTitle}
+              placeholder="Title"
+              placeholderTextColor={colors.textMuted}
+              maxLength={80}
+              style={styles.broadcastInput}
+              accessibilityLabel="Notification title"
+            />
+            <TextInput
+              value={broadcastBody}
+              onChangeText={setBroadcastBody}
+              placeholder="Short message"
+              placeholderTextColor={colors.textMuted}
+              maxLength={240}
+              multiline
+              style={[styles.broadcastInput, styles.broadcastBody]}
+              accessibilityLabel="Notification message"
+            />
+            <Pressable
+              onPress={sendBroadcast}
+              disabled={broadcasting}
+              style={({ pressed }) => [styles.broadcastBtn, (pressed || broadcasting) && styles.pressed]}
+            >
+              {broadcasting ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Text style={styles.saveBtnText}>Send to students</Text>
+              )}
+            </Pressable>
           </View>
         </View>
 
@@ -391,4 +453,26 @@ const createStyles = (colors, compact) =>
       marginTop: 4,
     },
     saveBtnText: { color: "#fff", fontSize: 14, fontWeight: "800" },
+    broadcastInput: {
+      marginTop: 10,
+      minHeight: 44,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.bg,
+      borderRadius: RADIUS.md,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      color: colors.text,
+      fontSize: 14,
+      fontWeight: "600",
+    },
+    broadcastBody: { minHeight: 76, textAlignVertical: "top" },
+    broadcastBtn: {
+      height: 42,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: colors.violet,
+      borderRadius: RADIUS.md,
+      marginTop: 12,
+    },
   });

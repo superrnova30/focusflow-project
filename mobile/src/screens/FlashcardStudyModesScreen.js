@@ -17,6 +17,9 @@ import { deckAccent } from "../lib/deckColors";
 import client from "../api/client";
 import { resolveCollectionId, resolveCardCount } from "../lib/collectionStudy";
 import { RADIUS, SPACING } from "../theme/theme";
+import HeartsBlockedPanel from "../components/HeartsBlockedPanel";
+import { fetchHeartsState, isHeartsBlocked, spendCoinsForHearts } from "../lib/hearts";
+import { startGoUnlimitedCheckout } from "../lib/upgradePrompt";
 
 const PRACTICE_TARGET = 247;
 
@@ -34,6 +37,10 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
   const [progress, setProgress] = useState(null);
   const [collection, setCollection] = useState(routeCollection || null);
   const [cardCount, setCardCount] = useState(resolveCardCount(routeCollection));
+  const [publicUnlocked, setPublicUnlocked] = useState(false);
+  const [heartsState, setHeartsState] = useState(null);
+  const [buying, setBuying] = useState(null);
+  const heartsLocked = isHeartsBlocked(heartsState);
 
   const fetchStudyData = useCallback(async () => {
     if (!collectionId) {
@@ -42,13 +49,16 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
     }
     setLoading(true);
     try {
-      const [collectionRes, progressRes] = await Promise.all([
+      const [collectionRes, progressRes, gameRes] = await Promise.all([
         client.get(`/flashcards/collections/${collectionId}`),
         client.get(`/flashcards/collections/${collectionId}/study/progress`),
+        fetchHeartsState(client).catch(() => null),
       ]);
+      if (gameRes) setHeartsState(gameRes);
       const loadedCollection = collectionRes.data.collection;
       setCollection(loadedCollection);
       setProgress(progressRes.data.progress);
+      setPublicUnlocked(Boolean(progressRes.data.unlocked && !progressRes.data.isOwner));
       const count =
         progressRes.data.cardCount ??
         loadedCollection?.flashcards?.length ??
@@ -80,13 +90,35 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
   );
 
   const practiceAnswered = progress?.practiceAnswered || 0;
-  const practiceUnlocked = progress?.practiceUnlocked || practiceAnswered >= PRACTICE_TARGET;
+  const practiceUnlocked = progress?.practiceUnlocked || practiceAnswered >= PRACTICE_TARGET || publicUnlocked;
   const practicePct = Math.min(100, Math.round((practiceAnswered / PRACTICE_TARGET) * 100));
   const hasCards = cardCount > 0;
+
+  const buyHearts = async (quantity) => {
+    if (buying) return;
+    setBuying(quantity > 1 ? "hearts" : "heart");
+    try {
+      const data = await spendCoinsForHearts(client, quantity);
+      setHeartsState((current) => ({
+        ...(current || {}),
+        hearts: data.hearts,
+        coins: data.coins,
+        heartsBlocked: false,
+        heartsRefillAt: null,
+      }));
+    } catch (e) {
+      Alert.alert("Unable to revive", e.response?.data?.error || e.message || "Please try again.");
+    } finally {
+      setBuying(null);
+    }
+  };
 
   const openMode = (screen) => {
     if (!hasCards) {
       Alert.alert("No cards yet", "Add flashcards to this deck before studying.");
+      return;
+    }
+    if (heartsLocked && (screen === "FlashcardMemorize" || screen === "FlashcardPracticeTest")) {
       return;
     }
     const deck = collection || routeCollection || {};
@@ -170,16 +202,39 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
           </View>
         )}
 
+        {heartsLocked ? (
+          <View style={{ marginBottom: SPACING.lg }}>
+            <HeartsBlockedPanel
+              coins={heartsState?.coins || 0}
+              hearts={heartsState?.hearts || 0}
+              refillAt={heartsState?.heartsRefillAt}
+              buying={buying}
+              title="Quizzes unavailable"
+              message="You're out of hearts after incorrect answers. Wait 24 hours for a full refill, or spend coins to revive hearts and keep studying."
+              onRevive={() => buyHearts(1)}
+              onRefillAll={(qty) => buyHearts(qty)}
+              onCheckAgain={async () => {
+                const state = await fetchHeartsState(client);
+                setHeartsState(state);
+              }}
+              onUpgrade={() => startGoUnlimitedCheckout(navigation)}
+            />
+          </View>
+        ) : null}
+
         <View style={styles.modeList}>
-          {modes.map((mode) => (
+          {modes.map((mode) => {
+            const quizLocked = heartsLocked && (mode.id === "memorize" || mode.id === "practice");
+            const disabled = !hasCards || quizLocked;
+            return (
             <Pressable
               key={mode.id}
               onPress={() => openMode(mode.screen)}
-              disabled={!hasCards}
+              disabled={disabled}
               style={({ pressed }) => [
                 styles.modeCard,
-                { backgroundColor: colors.surface, borderColor: colors.border, opacity: hasCards ? 1 : 0.55 },
-                pressed && hasCards && styles.pressed,
+                { backgroundColor: colors.surface, borderColor: colors.border, opacity: disabled ? 0.55 : 1 },
+                pressed && !disabled && styles.pressed,
               ]}
             >
               <View style={[styles.modeIcon, { backgroundColor: mode.soft }]}>
@@ -201,9 +256,10 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
                   </View>
                 ) : null}
               </View>
-              <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+              <Ionicons name={quizLocked ? "heart-dislike" : "chevron-forward"} size={18} color={colors.textMuted} />
             </Pressable>
-          ))}
+            );
+          })}
         </View>
       </ScrollView>
     </Screen>

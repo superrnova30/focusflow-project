@@ -23,8 +23,11 @@ import NoteContentPreview from "../components/NoteContentPreview";
 import { useTheme } from "../context/ThemeContext";
 import { usePremium } from "../context/PremiumContext";
 import client from "../api/client";
-import { handleLimitError, navigateToPremium } from "../lib/upgradePrompt";
+import { handleLimitError, promptUpgradeLimit } from "../lib/upgradePrompt";
 import { RADIUS, SPACING } from "../theme/theme";
+import HeaderWallet from "../components/HeaderWallet";
+import NotificationBell from "../components/NotificationBell";
+import { notifyTasksChanged } from "../lib/tasks";
 
 function parseDescriptionJson(raw) {
   if (Array.isArray(raw)) return raw;
@@ -43,11 +46,20 @@ function blocksPlainText(blocks) {
   return (blocks || []).map((b) => b?.text || "").join(" ").toLowerCase();
 }
 
+function formatTaskDate(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
 const STATUS_FILTERS = [
   { key: "all", label: "All" },
   { key: "todo", label: "To do" },
   { key: "done", label: "Completed" },
 ];
+
+const TIME_PRESETS = [15, 25, 45, 60];
 
 export default function TasksScreen() {
   const navigation = useNavigation();
@@ -72,6 +84,7 @@ export default function TasksScreen() {
   const [subjectName, setSubjectName] = useState("");
   const [estMinutes, setEstMinutes] = useState("25");
   const [editingTask, setEditingTask] = useState(null);
+  const [viewingTask, setViewingTask] = useState(null);
   const [editTitle, setEditTitle] = useState("");
   const [editSubjectName, setEditSubjectName] = useState("");
   const [editEstMinutes, setEditEstMinutes] = useState("25");
@@ -90,7 +103,8 @@ export default function TasksScreen() {
     if (!silent) setRefreshing(true);
     try {
       const { data } = await client.get(`/tasks?archived=${archived}`);
-      setTasks(data.tasks || []);
+      const nextTasks = (data.tasks || []).filter((task) => Boolean(task.archived) === Boolean(archived));
+      setTasks(nextTasks);
       if (data.limits) setTaskLimits(data.limits);
       await refreshLimits();
     } catch (error) {
@@ -103,7 +117,7 @@ export default function TasksScreen() {
   const fetchSubjects = useCallback(async () => {
     try {
       const { data } = await client.get("/subjects");
-      setSubjects(data.subjects || []);
+      setSubjects((data.subjects || []).filter((subject) => !subject.archived));
     } catch {
       // Subject picker is optional; tasks still work without it.
     }
@@ -144,14 +158,7 @@ export default function TasksScreen() {
 
   const openNewTaskModal = () => {
     if (activeTaskLimitReached) {
-      Alert.alert(
-        "Task limit reached",
-        `Basic includes up to ${taskLimits.tasks.max} active tasks. Archive one or upgrade to Go Unlimited for unlimited tasks.`,
-        [
-          { text: "Not now", style: "cancel" },
-          { text: "View plans", onPress: () => navigateToPremium(navigation) },
-        ]
-      );
+      promptUpgradeLimit(navigation, { code: "TASK_LIMIT_EXCEEDED" });
       return;
     }
     resetEditTaskForm();
@@ -159,7 +166,16 @@ export default function TasksScreen() {
     setShowAddModal(true);
   };
 
+  const openTaskDetails = (task) => {
+    setViewingTask(task);
+  };
+
+  const closeTaskDetails = () => {
+    setViewingTask(null);
+  };
+
   const openEditTaskModal = (task) => {
+    setViewingTask(null);
     setEditingTask(task);
     setEditTitle(task.title || "");
     setEditSubjectName(task.subject?.archived ? "" : task.subject?.name || "");
@@ -198,6 +214,7 @@ export default function TasksScreen() {
         descriptionJson: descriptionBlocks.length ? descriptionBlocks : null,
       });
       setTasks((current) => [data.task, ...current]);
+      notifyTasksChanged();
       if (data.limits) setTaskLimits(data.limits);
       closeTaskModal();
       await fetchTasks(false, true);
@@ -234,6 +251,7 @@ export default function TasksScreen() {
       );
       closeTaskModal();
       await fetchTasks(showArchived, true);
+      notifyTasksChanged();
     } catch (error) {
       Alert.alert("Could not update task", error.message);
     } finally {
@@ -251,6 +269,7 @@ export default function TasksScreen() {
     );
     try {
       await client.patch(`/tasks/${task.id}`, { completed: nextCompleted });
+      notifyTasksChanged();
     } catch (error) {
       setTasks((current) =>
         current.map((item) =>
@@ -266,6 +285,7 @@ export default function TasksScreen() {
       const { data } = await client.post(`/tasks/${task.id}/archive`);
       setTasks((current) => current.filter((item) => item.id !== task.id));
       if (data.limits) setTaskLimits(data.limits);
+      notifyTasksChanged({ removedTaskId: task.id });
     } catch (error) {
       Alert.alert("Could not archive task", error.message);
     }
@@ -276,6 +296,7 @@ export default function TasksScreen() {
       const { data } = await client.post(`/tasks/${task.id}/restore`);
       setTasks((current) => current.filter((item) => item.id !== task.id));
       if (data.limits) setTaskLimits(data.limits);
+      notifyTasksChanged();
     } catch (error) {
       if (handleLimitError(navigation, error, { title: "Unlimited tasks" })) return;
       Alert.alert("Could not restore task", error.message);
@@ -296,6 +317,7 @@ export default function TasksScreen() {
               const { data } = await client.delete(`/tasks/${task.id}`);
               setTasks((current) => current.filter((item) => item.id !== task.id));
               if (data.limits) setTaskLimits(data.limits);
+              notifyTasksChanged();
             } catch (error) {
               Alert.alert("Could not delete task", error.message);
             }
@@ -318,6 +340,8 @@ export default function TasksScreen() {
   const filteredTasks = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     return tasks.filter((task) => {
+      if (!showArchived && task.archived) return false;
+      if (showArchived && !task.archived) return false;
       if (statusFilter === "todo" && task.completed) return false;
       if (statusFilter === "done" && !task.completed) return false;
       if (subjectFilter && task.subjectId !== subjectFilter) return false;
@@ -333,7 +357,7 @@ export default function TasksScreen() {
       }
       return true;
     });
-  }, [tasks, searchQuery, statusFilter, subjectFilter]);
+  }, [tasks, searchQuery, statusFilter, subjectFilter, showArchived]);
 
   const selectSubjectName = (name) => {
     if (editingTask) setEditSubjectName(name);
@@ -348,40 +372,20 @@ export default function TasksScreen() {
         contentContainerStyle={styles.page}
       >
         <View style={styles.header}>
-          <View style={styles.headerCopy}>
-            <Text style={styles.eyebrow}>TASK PLANNER</Text>
-            <Text style={styles.headerTitle}>
-              {showArchived ? "Archived tasks" : "Your tasks"}
-            </Text>
-            <Text style={styles.headerSubtitle}>
-              {showArchived
-                ? "Restore past tasks or permanently remove what you no longer need."
-                : "Plan what matters, focus on one thing, and keep moving forward."}
-            </Text>
+          <View style={styles.headerLeft}>
             {!showArchived && !isPremium && taskLimits?.tasks?.max != null && (
               <View style={[styles.limitPill, { backgroundColor: colors.violetSoft, borderColor: colors.violet + "44" }]}>
                 <Ionicons name="layers-outline" size={13} color={colors.violet} />
                 <Text style={[styles.limitPillText, { color: colors.violet }]}>
-                  {taskLimits.tasks.used ?? 0}/{taskLimits.tasks.max} active tasks on Basic
+                  {taskLimits.tasks.used ?? 0}/{taskLimits.tasks.max} Basic
                 </Text>
               </View>
             )}
           </View>
-          {!showArchived && (
-            <Pressable
-              onPress={openNewTaskModal}
-              accessibilityRole="button"
-              accessibilityLabel="Add a task"
-              style={({ pressed }) => [
-                styles.addTaskButton,
-                activeTaskLimitReached && styles.addTaskButtonMuted,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Ionicons name="add" size={20} color="#FFFFFF" />
-              {!compact && <Text style={styles.addTaskButtonText}>Add task</Text>}
-            </Pressable>
-          )}
+          <View style={styles.headerActions}>
+            <HeaderWallet compact={compact} showFriends={false} />
+            <NotificationBell />
+          </View>
         </View>
 
         <View style={styles.statsGrid}>
@@ -406,18 +410,22 @@ export default function TasksScreen() {
           </View>
 
           <View style={styles.statCard}>
-            <View style={[styles.statIcon, { backgroundColor: colors.violetSoft }]}>
-              <Ionicons name="list-outline" size={20} color={colors.violet} />
+            <View style={styles.statTop}>
+              <View style={[styles.statIcon, { backgroundColor: colors.violetSoft }]}>
+                <Ionicons name="list-outline" size={20} color={colors.violet} />
+              </View>
+              <Text style={styles.statValue}>{pendingCount}</Text>
             </View>
-            <Text style={styles.statValue}>{pendingCount}</Text>
             <Text style={styles.statLabel}>Still to do</Text>
           </View>
 
           <View style={styles.statCard}>
-            <View style={[styles.statIcon, { backgroundColor: colors.amberSoft }]}>
-              <Ionicons name="timer-outline" size={20} color={colors.amber} />
+            <View style={styles.statTop}>
+              <View style={[styles.statIcon, { backgroundColor: colors.amberSoft }]}>
+                <Ionicons name="timer-outline" size={20} color={colors.amber} />
+              </View>
+              <Text style={styles.statValue}>{totalFocusSessions}</Text>
             </View>
-            <Text style={styles.statValue}>{totalFocusSessions}</Text>
             <Text style={styles.statLabel}>Focus sessions</Text>
           </View>
         </View>
@@ -607,7 +615,7 @@ export default function TasksScreen() {
         </View>
 
         <View style={styles.listHeader}>
-          <View>
+          <View style={styles.listHeaderCopy}>
             <Text style={styles.listTitle}>
               {showArchived ? "Archived" : statusFilter === "done" ? "Completed" : statusFilter === "todo" ? "To do" : "All tasks"}
             </Text>
@@ -615,6 +623,21 @@ export default function TasksScreen() {
               {filteredTasks.length} {filteredTasks.length === 1 ? "task" : "tasks"}
             </Text>
           </View>
+          {!showArchived && (
+            <Pressable
+              onPress={openNewTaskModal}
+              accessibilityRole="button"
+              accessibilityLabel="Add a task"
+              style={({ pressed }) => [
+                styles.addTaskButton,
+                activeTaskLimitReached && styles.addTaskButtonMuted,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Ionicons name="add" size={18} color="#FFFFFF" />
+              <Text style={styles.addTaskButtonText}>Add task</Text>
+            </Pressable>
+          )}
         </View>
 
         {filteredTasks.length === 0 ? (
@@ -695,16 +718,24 @@ export default function TasksScreen() {
                     ) : null}
                   </Pressable>
 
-                  <View style={{ flex: 1, minWidth: 0 }}>
-                    <Text
-                      numberOfLines={2}
-                      style={[
-                        styles.taskTitle,
-                        task.completed && !showArchived && styles.taskTitleDone,
-                      ]}
-                    >
-                      {task.title}
-                    </Text>
+                  <Pressable
+                    onPress={() => openTaskDetails(task)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`View details for ${task.title}`}
+                    style={({ pressed }) => [styles.taskMain, pressed && styles.pressed]}
+                  >
+                    <View style={styles.taskTitleRow}>
+                      <Text
+                        numberOfLines={2}
+                        style={[
+                          styles.taskTitle,
+                          task.completed && !showArchived && styles.taskTitleDone,
+                        ]}
+                      >
+                        {task.title}
+                      </Text>
+                      <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+                    </View>
                     <View style={styles.taskBadges}>
                       {task.subject?.name && !task.subject.archived && (
                         <View style={[styles.taskBadge, { backgroundColor: colors.violetSoft }]}>
@@ -719,11 +750,16 @@ export default function TasksScreen() {
                         <Text style={styles.taskBadgeText}>{task.estMinutes || 25} min</Text>
                       </View>
                     </View>
-                  </View>
+                  </Pressable>
                 </View>
 
                 {parseDescriptionJson(task.descriptionJson).length > 0 ? (
-                  <View style={[styles.taskDetailsPanel, { backgroundColor: colors.bg, borderColor: colors.border }]}>
+                  <Pressable
+                    onPress={() => openTaskDetails(task)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`View details for ${task.title}`}
+                    style={[styles.taskDetailsPanel, { backgroundColor: colors.bg, borderColor: colors.border }]}
+                  >
                     <View style={styles.taskDetailsHeader}>
                       <Ionicons name="document-text-outline" size={14} color={colors.mint} />
                       <Text style={[styles.taskDetailsLabel, { color: colors.textMuted }]}>Details</Text>
@@ -732,7 +768,7 @@ export default function TasksScreen() {
                       blocks={parseDescriptionJson(task.descriptionJson)}
                       compact
                     />
-                  </View>
+                  </Pressable>
                 ) : null}
 
                 <View style={styles.taskCardFooter}>
@@ -833,10 +869,10 @@ export default function TasksScreen() {
                   </View>
                   <View style={{ flex: 1, minWidth: 0 }}>
                     <Text style={styles.modalEyebrow}>
-                      {editingTask ? "UPDATE YOUR PLAN" : "PLAN YOUR NEXT WIN"}
+                      {editingTask ? "Planner" : "New task"}
                     </Text>
                     <Text style={styles.modalTitle} numberOfLines={1}>
-                      {editingTask ? "Edit task" : "Add a task"}
+                      {editingTask ? "Edit this task" : "Add a task"}
                     </Text>
                   </View>
                 </View>
@@ -862,61 +898,117 @@ export default function TasksScreen() {
               >
                 <Text style={styles.modalIntro}>
                   {editingTask
-                    ? "Update the details so this task fits your current plan."
-                    : "Be specific—a clear task is easier to start and finish."}
+                    ? "Update the name, subject, or time so it matches your plan."
+                    : "Give it a clear name so it’s easy to start and finish."}
                 </Text>
 
-                <Input
-                  label="Task name"
-                  value={editingTask ? editTitle : title}
-                  onChangeText={editingTask ? setEditTitle : setTitle}
-                  placeholder="e.g. Review chapter 4"
-                  autoFocus
-                />
+                <View style={styles.fieldGroup}>
+                  <Input
+                    compact={compact}
+                    label="Task name"
+                    value={editingTask ? editTitle : title}
+                    onChangeText={editingTask ? setEditTitle : setTitle}
+                    placeholder="e.g. Review chapter 4"
+                    autoFocus
+                    wrapperStyle={styles.modalInputWrapper}
+                    style={styles.modalField}
+                  />
+                </View>
 
-                <Input
-                  label="Subject (optional)"
-                  value={editingTask ? editSubjectName : subjectName}
-                  onChangeText={editingTask ? setEditSubjectName : setSubjectName}
-                  placeholder="Choose or type a subject"
-                />
-
-                {subjects.length > 0 && (
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    keyboardShouldPersistTaps="handled"
-                    contentContainerStyle={styles.modalSubjects}
-                  >
+                <View style={styles.fieldGroup}>
+                  <View style={styles.fieldHead}>
+                    <Text style={styles.fieldLabel}>Subject</Text>
+                    <Text style={styles.optionalBadge}>Optional</Text>
+                  </View>
+                  <View style={styles.subjectChipWrap}>
+                    <Pressable
+                      onPress={() => selectSubjectName("")}
+                      style={[
+                        styles.modalSubjectChip,
+                        !(editingTask ? editSubjectName : subjectName).trim() && styles.modalSubjectChipSelected,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.modalSubjectText,
+                          !(editingTask ? editSubjectName : subjectName).trim() && styles.modalSubjectTextSelected,
+                        ]}
+                      >
+                        None
+                      </Text>
+                    </Pressable>
                     {subjects.map((subject) => {
                       const currentName = editingTask ? editSubjectName : subjectName;
-                      const selected =
-                        currentName.trim().toLowerCase() === subject.name.toLowerCase();
+                      const selected = currentName.trim().toLowerCase() === subject.name.toLowerCase();
                       return (
                         <Pressable
                           key={subject.id}
                           onPress={() => selectSubjectName(selected ? "" : subject.name)}
                           style={[
                             styles.modalSubjectChip,
-                            selected && {
-                              borderColor: colors.violet,
-                              backgroundColor: colors.violetSoft,
-                            },
+                            selected && styles.modalSubjectChipSelected,
                           ]}
                         >
-                          <Text
-                            style={[
-                              styles.modalSubjectText,
-                              selected && { color: colors.violet },
-                            ]}
-                          >
+                          <Text style={[styles.modalSubjectText, selected && styles.modalSubjectTextSelected]}>
                             {subject.name}
                           </Text>
                         </Pressable>
                       );
                     })}
-                  </ScrollView>
-                )}
+                  </View>
+                  <View style={styles.subjectInputRow}>
+                    <Ionicons name="pencil-outline" size={16} color={colors.textMuted} />
+                    <TextInput
+                      value={editingTask ? editSubjectName : subjectName}
+                      onChangeText={editingTask ? setEditSubjectName : setSubjectName}
+                      placeholder="Or type a new subject"
+                      placeholderTextColor={colors.textMuted}
+                      style={styles.subjectInput}
+                    />
+                    {(editingTask ? editSubjectName : subjectName).trim() ? (
+                      <Pressable onPress={() => selectSubjectName("")} hitSlop={8} accessibilityLabel="Clear subject">
+                        <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+                      </Pressable>
+                    ) : null}
+                  </View>
+                </View>
+
+                <View style={styles.fieldGroup}>
+                  <View style={styles.fieldHead}>
+                    <Text style={styles.fieldLabel}>Time estimate</Text>
+                  </View>
+                  <View style={styles.estimateRow}>
+                    {TIME_PRESETS.map((mins) => {
+                      const current = Number(editingTask ? editEstMinutes : estMinutes);
+                      const selected = current === mins;
+                      return (
+                        <Pressable
+                          key={mins}
+                          onPress={() =>
+                            editingTask ? setEditEstMinutes(String(mins)) : setEstMinutes(String(mins))
+                          }
+                          style={[styles.timeChip, selected && styles.timeChipSelected]}
+                        >
+                          <Text style={[styles.timeChipText, selected && styles.timeChipTextSelected]}>
+                            {mins} min
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                    <View style={styles.estimateInputWrap}>
+                      <TextInput
+                        value={editingTask ? editEstMinutes : estMinutes}
+                        onChangeText={editingTask ? setEditEstMinutes : setEstMinutes}
+                        keyboardType="number-pad"
+                        style={styles.estimateInput}
+                        placeholder="25"
+                        placeholderTextColor={colors.textMuted}
+                        maxLength={3}
+                      />
+                      <Text style={styles.estimateUnit}>min</Text>
+                    </View>
+                  </View>
+                </View>
 
                 <View style={styles.descriptionSection}>
                   <TaskDescriptionEditor
@@ -925,30 +1017,6 @@ export default function TasksScreen() {
                     value={editingTask ? editDescriptionBlocks : descriptionBlocks}
                     onChange={editingTask ? setEditDescriptionBlocks : setDescriptionBlocks}
                   />
-                </View>
-
-                <View style={styles.estimateSection}>
-                  <View style={styles.estimateCopy}>
-                    <View style={[styles.estimateIcon, { backgroundColor: colors.amberSoft }]}>
-                      <Ionicons name="time-outline" size={18} color={colors.amber} />
-                    </View>
-                    <View>
-                      <Text style={styles.estimateTitle}>Time estimate</Text>
-                      <Text style={styles.estimateSubtitle}>How long might this take?</Text>
-                    </View>
-                  </View>
-                  <View style={styles.estimateInputWrap}>
-                    <TextInput
-                      value={editingTask ? editEstMinutes : estMinutes}
-                      onChangeText={editingTask ? setEditEstMinutes : setEstMinutes}
-                      keyboardType="number-pad"
-                      style={[styles.estimateInput, { outlineStyle: "none" }]}
-                      placeholder="25"
-                      placeholderTextColor={colors.textMuted}
-                      maxLength={3}
-                    />
-                    <Text style={styles.estimateUnit}>min</Text>
-                  </View>
                 </View>
               </ScrollView>
 
@@ -995,6 +1063,173 @@ export default function TasksScreen() {
           </KeyboardAvoidingView>
         </View>
       </Modal>
+
+      <Modal
+        visible={Boolean(viewingTask)}
+        transparent
+        animationType="fade"
+        onRequestClose={closeTaskDetails}
+        statusBarTranslucent
+      >
+        <View style={styles.modalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={closeTaskDetails} accessibilityLabel="Close task details" />
+          <KeyboardAvoidingView
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+            style={[styles.modalContainer, { maxHeight: modalMaxHeight }]}
+          >
+            {viewingTask ? (
+              <View
+                style={[
+                  styles.modalCard,
+                  { maxHeight: modalMaxHeight, borderColor: colors.border, backgroundColor: colors.surface },
+                ]}
+              >
+                <View style={[styles.modalHeader, styles.modalContentHorizontal]}>
+                  <View style={styles.modalHeaderCopy}>
+                    <View style={[styles.modalIcon, { backgroundColor: colors.mintSoft }]}>
+                      <Ionicons name="eye-outline" size={22} color={colors.mint} />
+                    </View>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={styles.modalEyebrow}>Task details</Text>
+                      <Text style={styles.modalTitle} numberOfLines={2}>
+                        {viewingTask.title}
+                      </Text>
+                    </View>
+                  </View>
+                  <Pressable
+                    onPress={closeTaskDetails}
+                    style={styles.closeButton}
+                    accessibilityLabel="Close task details"
+                  >
+                    <Ionicons name="close" size={21} color={colors.text} />
+                  </Pressable>
+                </View>
+
+                <ScrollView
+                  style={styles.modalScroll}
+                  showsVerticalScrollIndicator
+                  nestedScrollEnabled
+                  contentContainerStyle={[styles.modalContent, { paddingBottom: SPACING.sm }]}
+                >
+                  <View style={styles.detailsStatusRow}>
+                    <View
+                      style={[
+                        styles.detailsStatus,
+                        {
+                          backgroundColor: viewingTask.archived
+                            ? colors.violetSoft
+                            : viewingTask.completed
+                              ? colors.mintSoft
+                              : colors.amberSoft,
+                        },
+                      ]}
+                    >
+                      <Ionicons
+                        name={
+                          viewingTask.archived
+                            ? "archive-outline"
+                            : viewingTask.completed
+                              ? "checkmark-circle"
+                              : "ellipse-outline"
+                        }
+                        size={14}
+                        color={
+                          viewingTask.archived
+                            ? colors.violet
+                            : viewingTask.completed
+                              ? colors.mint
+                              : colors.amber
+                        }
+                      />
+                      <Text
+                        style={[
+                          styles.detailsStatusText,
+                          {
+                            color: viewingTask.archived
+                              ? colors.violet
+                              : viewingTask.completed
+                                ? colors.mint
+                                : colors.amber,
+                          },
+                        ]}
+                      >
+                        {viewingTask.archived ? "Archived" : viewingTask.completed ? "Completed" : "To do"}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.detailsMetaGrid}>
+                    <View style={styles.detailsMeta}>
+                      <Ionicons name="book-outline" size={16} color={colors.violet} />
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.detailsMetaLabel}>Subject</Text>
+                        <Text style={styles.detailsMetaValue} numberOfLines={1}>
+                          {viewingTask.subject?.name && !viewingTask.subject.archived
+                            ? viewingTask.subject.name
+                            : "None"}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.detailsMeta}>
+                      <Ionicons name="time-outline" size={16} color={colors.amber} />
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.detailsMetaLabel}>Time</Text>
+                        <Text style={styles.detailsMetaValue}>{viewingTask.estMinutes || 25} min</Text>
+                      </View>
+                    </View>
+                    <View style={styles.detailsMeta}>
+                      <Ionicons name="timer-outline" size={16} color={colors.tomato} />
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.detailsMetaLabel}>Focus sessions</Text>
+                        <Text style={styles.detailsMetaValue}>{viewingTask.pomodorosSpent || 0}</Text>
+                      </View>
+                    </View>
+                    {formatTaskDate(viewingTask.createdAt) ? (
+                      <View style={styles.detailsMeta}>
+                        <Ionicons name="calendar-outline" size={16} color={colors.mint} />
+                        <View style={{ flex: 1, minWidth: 0 }}>
+                          <Text style={styles.detailsMetaLabel}>Created</Text>
+                          <Text style={styles.detailsMetaValue}>{formatTaskDate(viewingTask.createdAt)}</Text>
+                        </View>
+                      </View>
+                    ) : null}
+                  </View>
+
+                  <View style={styles.detailsNotes}>
+                    <Text style={styles.detailsNotesLabel}>Notes</Text>
+                    {parseDescriptionJson(viewingTask.descriptionJson).length > 0 ? (
+                      <NoteContentPreview blocks={parseDescriptionJson(viewingTask.descriptionJson)} />
+                    ) : (
+                      <Text style={styles.detailsEmptyNotes}>No notes added for this task.</Text>
+                    )}
+                  </View>
+                </ScrollView>
+
+                <View style={[styles.modalFooter, { borderTopColor: colors.border }]}>
+                  <View style={styles.modalActions}>
+                    <Pressable
+                      onPress={closeTaskDetails}
+                      style={({ pressed }) => [styles.cancelButton, pressed && styles.pressed]}
+                    >
+                      <Text style={styles.cancelButtonText}>Close</Text>
+                    </Pressable>
+                    {!viewingTask.archived && !showArchived ? (
+                      <Pressable
+                        onPress={() => openEditTaskModal(viewingTask)}
+                        accessibilityLabel={`Edit ${viewingTask.title}`}
+                        style={({ pressed }) => [styles.saveButton, pressed && styles.pressed]}
+                      >
+                        <Ionicons name="create-outline" size={18} color="#FFFFFF" />
+                        <Text style={styles.saveButtonText}>Edit task</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                </View>
+              </View>
+            ) : null}
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
     </Screen>
   );
 }
@@ -1010,62 +1245,56 @@ const createStyles = (colors, isDark, wide, compact) =>
     },
     header: {
       flexDirection: "row",
-      alignItems: "flex-start",
+      alignItems: "center",
       justifyContent: "space-between",
-      gap: SPACING.md,
+      gap: 12,
       marginBottom: SPACING.lg,
     },
-    headerCopy: { flex: 1, maxWidth: 620 },
-    eyebrow: {
-      color: colors.violet,
-      fontSize: 9,
-      fontWeight: "900",
-      letterSpacing: 1.1,
-      marginBottom: 4,
+    headerLeft: {
+      flex: 1,
+      minWidth: 0,
+      flexDirection: "row",
+      flexWrap: "wrap",
+      alignItems: "center",
+      gap: 8,
     },
-    headerTitle: {
-      color: colors.text,
-      fontSize: compact ? 25 : 29,
-      lineHeight: compact ? 31 : 35,
-      fontWeight: "900",
-      letterSpacing: -0.7,
-    },
-    headerSubtitle: {
-      color: colors.textMuted,
-      fontSize: 12.5,
-      lineHeight: 19,
-      marginTop: 5,
+    headerActions: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      alignItems: "center",
+      justifyContent: "flex-end",
+      gap: 8,
+      flexShrink: 0,
     },
     addTaskButton: {
-      minWidth: compact ? 46 : 116,
-      height: 46,
+      minHeight: 40,
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "center",
-      gap: 7,
-      borderRadius: RADIUS.md,
+      gap: 6,
+      paddingHorizontal: compact ? 12 : 14,
+      borderRadius: 12,
       backgroundColor: colors.tomato,
       shadowColor: colors.tomato,
-      shadowOpacity: 0.25,
-      shadowRadius: 10,
-      shadowOffset: { width: 0, height: 4 },
-      elevation: 4,
+      shadowOpacity: 0.22,
+      shadowRadius: 8,
+      shadowOffset: { width: 0, height: 3 },
+      elevation: 3,
+      flexShrink: 0,
     },
-    addTaskButtonText: { color: "#FFFFFF", fontSize: 13, fontWeight: "900" },
+    addTaskButtonText: { color: "#FFFFFF", fontSize: compact ? 12.5 : 13, fontWeight: "800" },
     addTaskButtonMuted: { opacity: 0.55 },
     limitPill: {
       flexDirection: "row",
       alignItems: "center",
-      alignSelf: "flex-start",
       gap: 6,
-      marginTop: 10,
       paddingHorizontal: 10,
-      paddingVertical: 6,
+      paddingVertical: 7,
       borderRadius: RADIUS.pill,
       borderWidth: 1,
     },
     limitPillText: { fontSize: 11, fontWeight: "800" },
-    descriptionSection: { marginTop: SPACING.md, marginBottom: SPACING.md },
+    descriptionSection: { marginBottom: 4 },
     taskDetailsPanel: {
       marginTop: 12,
       padding: 12,
@@ -1114,7 +1343,6 @@ const createStyles = (colors, isDark, wide, compact) =>
       borderRadius: 12,
       alignItems: "center",
       justifyContent: "center",
-      marginBottom: 8,
     },
     statValue: {
       color: colors.text,
@@ -1126,6 +1354,7 @@ const createStyles = (colors, isDark, wide, compact) =>
       color: colors.textMuted,
       fontSize: compact ? 9 : 10.5,
       fontWeight: "700",
+      marginTop: 8,
     },
     progressTrack: {
       height: 5,
@@ -1243,8 +1472,10 @@ const createStyles = (colors, isDark, wide, compact) =>
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "space-between",
+      gap: 12,
       marginBottom: 11,
     },
+    listHeaderCopy: { flex: 1, minWidth: 0 },
     listTitle: { color: colors.text, fontSize: 16, fontWeight: "900" },
     listMeta: { color: colors.textMuted, fontSize: 10.5, marginTop: 2 },
     taskGrid: {
@@ -1267,6 +1498,8 @@ const createStyles = (colors, isDark, wide, compact) =>
     },
     taskCardDone: { opacity: 0.72 },
     taskCardTop: { flexDirection: "row", alignItems: "flex-start", gap: 11 },
+    taskMain: { flex: 1, minWidth: 0 },
+    taskTitleRow: { flexDirection: "row", alignItems: "flex-start", gap: 6 },
     checkbox: {
       width: 25,
       height: 25,
@@ -1282,6 +1515,8 @@ const createStyles = (colors, isDark, wide, compact) =>
       backgroundColor: colors.bg,
     },
     taskTitle: {
+      flex: 1,
+      minWidth: 0,
       color: colors.text,
       fontSize: 14,
       lineHeight: 19,
@@ -1446,11 +1681,11 @@ const createStyles = (colors, isDark, wide, compact) =>
     },
     modalEyebrow: {
       color: colors.violet,
-      fontSize: 8,
-      fontWeight: "900",
-      letterSpacing: 0.9,
+      fontSize: 11,
+      fontWeight: "800",
+      letterSpacing: 0.8,
     },
-    modalTitle: { color: colors.text, fontSize: 19, fontWeight: "900", marginTop: 2 },
+    modalTitle: { color: colors.text, fontSize: 22, fontWeight: "900", marginTop: 2, letterSpacing: -0.3 },
     closeButton: {
       width: 38,
       height: 38,
@@ -1463,61 +1698,126 @@ const createStyles = (colors, isDark, wide, compact) =>
     },
     modalIntro: {
       color: colors.textMuted,
-      fontSize: 12,
-      lineHeight: 18,
+      fontSize: 13,
+      lineHeight: 19,
       marginBottom: SPACING.lg,
     },
-    modalSubjects: { gap: 7, paddingBottom: 15 },
+    fieldGroup: {
+      marginBottom: SPACING.lg,
+    },
+    fieldHead: {
+      flexDirection: "row",
+      alignItems: "baseline",
+      gap: 8,
+      marginBottom: 8,
+    },
+    fieldLabel: {
+      color: colors.text,
+      fontSize: 13,
+      fontWeight: "700",
+    },
+    optionalBadge: {
+      color: colors.textMuted,
+      fontSize: 12,
+      fontWeight: "600",
+    },
+    modalInputWrapper: {
+      flex: 0,
+      marginBottom: 0,
+    },
+    modalField: {
+      backgroundColor: colors.bg,
+    },
+    subjectChipWrap: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      alignItems: "center",
+      gap: 8,
+      marginBottom: 10,
+    },
     modalSubjectChip: {
-      paddingHorizontal: 10,
+      flexDirection: "row",
+      alignItems: "center",
+      alignSelf: "flex-start",
+      gap: 5,
+      minHeight: 36,
+      paddingHorizontal: 12,
       paddingVertical: 7,
       borderRadius: RADIUS.pill,
       borderWidth: 1,
       borderColor: colors.border,
       backgroundColor: colors.bg,
     },
-    modalSubjectText: { color: colors.textMuted, fontSize: 10.5, fontWeight: "700" },
-    estimateSection: {
-      flexDirection: compact ? "column" : "row",
-      alignItems: compact ? "stretch" : "center",
-      justifyContent: "space-between",
-      gap: 12,
-      padding: 12,
-      backgroundColor: colors.bg,
+    modalSubjectChipSelected: {
+      borderColor: colors.violet,
+      backgroundColor: colors.violetSoft,
+    },
+    modalSubjectText: { color: colors.textMuted, fontSize: 13, fontWeight: "700" },
+    modalSubjectTextSelected: { color: colors.violet },
+    subjectInputRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      minHeight: 46,
+      paddingHorizontal: 12,
+      borderRadius: RADIUS.md,
       borderWidth: 1,
       borderColor: colors.border,
-      borderRadius: RADIUS.md,
+      backgroundColor: colors.bg,
     },
-    estimateCopy: { flex: 1, flexDirection: "row", alignItems: "center", gap: 10 },
-    estimateIcon: {
-      width: 36,
-      height: 36,
-      borderRadius: 11,
+    subjectInput: {
+      flex: 1,
+      minWidth: 0,
+      color: colors.text,
+      fontSize: 14,
+      fontWeight: "600",
+      paddingVertical: 10,
+      ...(Platform.OS === "web" ? { outlineStyle: "none" } : null),
+    },
+    estimateRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      alignItems: "center",
+      gap: 8,
+    },
+    timeChip: {
+      minHeight: 36,
+      paddingHorizontal: 12,
+      borderRadius: RADIUS.pill,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.bg,
       alignItems: "center",
       justifyContent: "center",
     },
-    estimateTitle: { color: colors.text, fontSize: 11.5, fontWeight: "800" },
-    estimateSubtitle: { color: colors.textMuted, fontSize: 9.5, marginTop: 2 },
+    timeChipSelected: {
+      borderColor: colors.amber,
+      backgroundColor: colors.amberSoft,
+    },
+    timeChipText: { color: colors.textMuted, fontSize: 13, fontWeight: "800" },
+    timeChipTextSelected: { color: colors.amber },
     estimateInputWrap: {
       flexDirection: "row",
       alignItems: "center",
       gap: 5,
-      backgroundColor: colors.surface,
+      minHeight: 36,
+      backgroundColor: colors.bg,
       borderWidth: 1,
       borderColor: colors.border,
-      borderRadius: 10,
-      paddingHorizontal: 9,
+      borderRadius: RADIUS.pill,
+      paddingHorizontal: 10,
     },
     estimateInput: {
       width: 36,
-      minHeight: 38,
+      minHeight: 34,
       color: colors.text,
       fontSize: 13,
       fontWeight: "800",
       textAlign: "right",
-      paddingVertical: 8,
+      paddingVertical: 6,
+      ...(Platform.OS === "web" ? { outlineStyle: "none" } : null),
     },
-    estimateUnit: { color: colors.textMuted, fontSize: 10, fontWeight: "700" },
+    estimateUnit: { color: colors.textMuted, fontSize: 11, fontWeight: "700" },
     modalActions: { flexDirection: "row", gap: 9 },
     cancelButton: {
       flex: 1,
@@ -1541,4 +1841,46 @@ const createStyles = (colors, isDark, wide, compact) =>
       borderRadius: RADIUS.md,
     },
     saveButtonText: { color: "#FFFFFF", fontSize: 13, fontWeight: "900" },
+    detailsStatusRow: { marginBottom: 12 },
+    detailsStatus: {
+      alignSelf: "flex-start",
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: RADIUS.pill,
+    },
+    detailsStatusText: { fontSize: 12, fontWeight: "800" },
+    detailsMetaGrid: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 8,
+      marginBottom: 14,
+    },
+    detailsMeta: {
+      flexGrow: 1,
+      flexBasis: compact ? "100%" : "47%",
+      minWidth: compact ? "100%" : 140,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      borderRadius: RADIUS.md,
+      backgroundColor: colors.bg,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    detailsMetaLabel: { color: colors.textMuted, fontSize: 11, fontWeight: "700" },
+    detailsMetaValue: { color: colors.text, fontSize: 14, fontWeight: "800", marginTop: 2 },
+    detailsNotes: {
+      padding: 12,
+      borderRadius: RADIUS.md,
+      backgroundColor: colors.bg,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    detailsNotesLabel: { color: colors.text, fontSize: 13, fontWeight: "800", marginBottom: 8 },
+    detailsEmptyNotes: { color: colors.textMuted, fontSize: 13, lineHeight: 18, fontWeight: "500" },
   });

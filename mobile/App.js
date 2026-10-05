@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from "react";
 import { NavigationContainer, DefaultTheme, DarkTheme } from "@react-navigation/native";
+import { navigationRef } from "./src/lib/navigationRef";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { StatusBar } from "expo-status-bar";
 import { AppState, View, ActivityIndicator, Text, Pressable } from "react-native";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
@@ -36,6 +38,7 @@ import FlashcardTutorLessonScreen from "./src/screens/FlashcardTutorLessonScreen
 import FlashcardPracticeTestScreen from "./src/screens/FlashcardPracticeTestScreen";
 import MagicImportScreen from "./src/screens/MagicImportScreen";
 import StudyNotesScreen from "./src/screens/StudyNotesScreen";
+import FilesScreen from "./src/screens/FilesScreen";
 import NoteEditScreen from "./src/screens/NoteEditScreen";
 import NoteViewScreen from "./src/screens/NoteViewScreen";
 import NoteImportScreen from "./src/screens/NoteImportScreen";
@@ -44,10 +47,19 @@ import GamifiedQuizScreen from "./src/screens/GamifiedQuizScreen";
 import ProgressScreen from "./src/screens/ProgressScreen";
 import LeaderboardScreen from "./src/screens/LeaderboardScreen";
 import StudentProfileScreen from "./src/screens/StudentProfileScreen";
+import FindFriendsScreen from "./src/screens/FindFriendsScreen";
+import FollowListScreen from "./src/screens/FollowListScreen";
+import SchoolHubScreen from "./src/screens/SchoolHubScreen";
+import UserAvatar from "./src/components/UserAvatar";
 import AdminHomeScreen from "./src/screens/AdminHomeScreen";
 import { AIChatProvider } from './src/context/AIChatContext';
 import { AIHistoryProvider } from './src/context/AIHistoryContext';
 import { PremiumProvider } from './src/context/PremiumContext';
+import { NotificationProvider } from './src/context/NotificationContext';
+import NotificationsScreen from './src/screens/NotificationsScreen';
+import NotificationPanel from './src/components/NotificationPanel';
+import { UpgradeLimitProvider } from './src/context/UpgradeLimitContext';
+import { refreshPushRegistration } from './src/lib/push';
 import PremiumScreen from './src/screens/PremiumScreen';
 import PremiumCheckoutScreen from './src/screens/PremiumCheckoutScreen';
 import AIHistoryScreen from './src/screens/AIHistoryScreen';
@@ -56,6 +68,8 @@ import AIHistoryDetailScreen from './src/screens/AIHistoryDetailScreen';
 const AuthStack = createNativeStackNavigator();
 const StudentTabs = createBottomTabNavigator();
 const StudyStack = createNativeStackNavigator();
+const FilesStack = createNativeStackNavigator();
+const ProfileStack = createNativeStackNavigator();
 
 function MaintenanceScreen() {
   const { colors } = useTheme();
@@ -104,10 +118,11 @@ function StudyNavigator() {
       }}
     >
       <StudyStack.Screen name="StudyHome" component={StudyHomeScreen} options={{ headerShown: false }} />
+      <StudyStack.Screen name="Notifications" component={NotificationsScreen} options={{ headerShown: false }} />
       <StudyStack.Screen name="Coach" component={CoachScreen} options={{ title: "AI Study Coach" }} />
       <StudyStack.Screen name="StudyAI" component={StudyAIResultScreen} />
       <StudyStack.Screen name="StudyChat" component={StudyChatScreen} options={{ headerShown: false }} />
-      <StudyStack.Screen name="AIHistory" component={AIHistoryScreen} options={{ title: "AI History" }} />
+      <StudyStack.Screen name="AIHistory" component={AIHistoryScreen} options={{ headerShown: false }} />
       <StudyStack.Screen name="AIHistoryDetail" component={AIHistoryDetailScreen} options={{ title: "Conversation" }} />
       <StudyStack.Screen name="Premium" component={PremiumScreen} options={{ title: "Go Unlimited" }} />
       <StudyStack.Screen name="PremiumCheckout" component={PremiumCheckoutScreen} options={{ title: "Checkout" }} />
@@ -132,15 +147,64 @@ function StudyNavigator() {
       <StudyStack.Screen name="Progress" component={ProgressScreen} />
       <StudyStack.Screen name="Leaderboard" component={LeaderboardScreen} />
       <StudyStack.Screen name="StudentProfile" component={StudentProfileScreen} options={{ title: "Student profile" }} />
+      <StudyStack.Screen name="FollowList" component={FollowListScreen} options={{ headerShown: false }} />
+      <StudyStack.Screen name="FindFriends" component={FindFriendsScreen} options={{ headerShown: false }} />
+      <StudyStack.Screen name="SchoolHub" component={SchoolHubScreen} options={{ headerShown: false }} />
     </StudyStack.Navigator>
   );
 }
 
-// Students get the familiar tab layout. Admin accounts land on their own
-// dashboard (see AdminHomeScreen) — same login screen, silently different
-// destination.
+function FilesNavigator() {
+  const { colors } = useTheme();
+  return (
+    <FilesStack.Navigator
+      screenOptions={{
+        headerShown: true,
+        headerStyle: { backgroundColor: colors.surface },
+        headerTitleStyle: { color: colors.text, fontWeight: "700", fontSize: 17 },
+        headerTintColor: colors.tomato,
+        headerBackTitle: "Files",
+        headerShadowVisible: false,
+      }}
+    >
+      <FilesStack.Screen name="FilesHome" component={FilesScreen} options={{ headerShown: false }} />
+      <FilesStack.Screen name="Flashcards" component={FlashcardCollectionsScreen} />
+      <FilesStack.Screen name="FlashcardCollection" component={FlashcardCollectionScreen} />
+      <FilesStack.Screen name="FlashcardEdit" component={FlashcardEditScreen} />
+      <FilesStack.Screen name="FlashcardStudy" component={FlashcardStudyScreen} />
+      <FilesStack.Screen name="FlashcardStudyModes" component={FlashcardStudyModesScreen} />
+      <FilesStack.Screen name="FlashcardMemorize" component={FlashcardMemorizeScreen} />
+      <FilesStack.Screen name="FlashcardTutorLesson" component={FlashcardTutorLessonScreen} />
+      <FilesStack.Screen name="FlashcardPracticeTest" component={FlashcardPracticeTestScreen} />
+      <FilesStack.Screen name="MagicImport" component={MagicImportScreen} />
+      <FilesStack.Screen name="Notes" component={StudyNotesScreen} />
+      <FilesStack.Screen name="NoteEdit" component={NoteEditScreen} />
+      <FilesStack.Screen name="NoteView" component={NoteViewScreen} />
+      <FilesStack.Screen name="NoteImport" component={NoteImportScreen} />
+      <FilesStack.Screen name="CardImport" component={CardImportScreen} />
+      <FilesStack.Screen name="GamifiedQuiz" component={GamifiedQuizScreen} />
+      <FilesStack.Screen name="StudentProfile" component={StudentProfileScreen} options={{ title: "Student profile" }} />
+    </FilesStack.Navigator>
+  );
+}
+
+function ProfileNavigator() {
+  return (
+    <ProfileStack.Navigator screenOptions={{ headerShown: false }}>
+      <ProfileStack.Screen name="ProfileHome" component={StudentProfileScreen} />
+      <ProfileStack.Screen name="Notifications" component={NotificationsScreen} />
+      <ProfileStack.Screen name="StudentProfile" component={StudentProfileScreen} />
+      <ProfileStack.Screen name="Settings" component={SettingsScreen} />
+      <ProfileStack.Screen name="FindFriends" component={FindFriendsScreen} />
+      <ProfileStack.Screen name="FollowList" component={FollowListScreen} />
+      <ProfileStack.Screen name="SchoolHub" component={SchoolHubScreen} />
+    </ProfileStack.Navigator>
+  );
+}
+
 function StudentNavigator() {
   const { colors } = useTheme();
+  const { user } = useAuth();
   return (
     <StudentTabs.Navigator
       initialRouteName="Study"
@@ -168,12 +232,9 @@ function StudentNavigator() {
         options={{ tabBarIcon: ({ color, size }) => <Ionicons name="book" color={color} size={size} /> }}
       />
       <StudentTabs.Screen
-        name="AIHistoryTab"
-        component={AIHistoryScreen}
-        options={{
-          title: "AI History",
-          tabBarIcon: ({ color, size }) => <Ionicons name="time" color={color} size={size} />,
-        }}
+        name="Files"
+        component={FilesNavigator}
+        options={{ tabBarIcon: ({ color, size }) => <Ionicons name="folder" color={color} size={size} /> }}
       />
       <StudentTabs.Screen
         name="Stats"
@@ -181,9 +242,18 @@ function StudentNavigator() {
         options={{ tabBarIcon: ({ color, size }) => <Ionicons name="stats-chart" color={color} size={size} /> }}
       />
       <StudentTabs.Screen
-        name="Settings"
-        component={SettingsScreen}
-        options={{ tabBarIcon: ({ color, size }) => <Ionicons name="settings" color={color} size={size} /> }}
+        name="Profile"
+        component={ProfileNavigator}
+        options={{
+          tabBarLabel: "Profile",
+          tabBarIcon: ({ focused }) => (
+            <UserAvatar
+              user={user}
+              size={26}
+              ringColor={focused ? colors.tomato : colors.border}
+            />
+          ),
+        }}
       />
     </StudentTabs.Navigator>
   );
@@ -247,7 +317,7 @@ function RootNavigator() {
   }
 
   return (
-    <NavigationContainer theme={navTheme}>
+    <NavigationContainer ref={navigationRef} theme={navTheme}>
       <StatusBar style={isDark ? "light" : "dark"} />
       {!user ? (
         <AuthNavigator />
@@ -257,7 +327,12 @@ function RootNavigator() {
         <AIChatProvider>
           <AIHistoryProvider>
             <PremiumProvider>
-              <StudentNavigator />
+              <UpgradeLimitProvider>
+                <NotificationProvider>
+                  <StudentNavigator />
+                  <NotificationPanel />
+                </NotificationProvider>
+              </UpgradeLimitProvider>
             </PremiumProvider>
           </AIHistoryProvider>
         </AIChatProvider>
@@ -299,19 +374,25 @@ class ErrorBoundary extends React.Component {
 export default function App() {
   useEffect(() => {
     flushQueue().catch(() => {});
+    refreshPushRegistration().catch(() => {});
     const subscription = AppState.addEventListener("change", (nextState) => {
-      if (nextState === "active") flushQueue().catch(() => {});
+      if (nextState === "active") {
+        flushQueue().catch(() => {});
+        refreshPushRegistration().catch(() => {});
+      }
     });
     return () => subscription.remove();
   }, []);
 
   return (
-    <ThemeProvider>
-      <AuthProvider>
-        <ErrorBoundary>
-          <RootNavigator />
-        </ErrorBoundary>
-      </AuthProvider>
-    </ThemeProvider>
+    <SafeAreaProvider>
+      <ThemeProvider>
+        <AuthProvider>
+          <ErrorBoundary>
+            <RootNavigator />
+          </ErrorBoundary>
+        </AuthProvider>
+      </ThemeProvider>
+    </SafeAreaProvider>
   );
 }

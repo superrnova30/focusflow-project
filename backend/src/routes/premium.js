@@ -53,6 +53,7 @@ function publicPayment(payment) {
  */
 router.get('/plan', requireAuth, async (req, res) => {
   const { price, currency, durationDays, plan } = xendit.planConfig();
+  const keyIssue = xendit.xenditKeyMisconfiguration();
   res.json({
     plan: {
       id: plan,
@@ -67,6 +68,9 @@ router.get('/plan', requireAuth, async (req, res) => {
     paymentsEnabled: xendit.paymentsAvailable(),
     testMode: xendit.isTestMode(),
     sandbox: xendit.isSandboxMode(),
+    xenditHostedCheckout: xendit.isXenditConfigured(),
+    xenditKeyIssue: keyIssue,
+    testModeInstructions: xendit.isTestMode() ? xendit.testModeCheckoutInstructions() : null,
   });
 });
 
@@ -105,6 +109,7 @@ router.get('/status', requireAuth, async (req, res) => {
  * comes from server config; the client cannot influence it.
  */
 router.post('/checkout', requireAuth, async (req, res) => {
+  const checkoutStartedAt = Date.now();
   try {
     if (!xendit.paymentsAvailable()) {
       return res.status(503).json({
@@ -133,11 +138,20 @@ router.post('/checkout', requireAuth, async (req, res) => {
     });
 
     if (existing && existing.checkoutUrl) {
-      return res.json({
-        payment: publicPayment(existing),
-        checkoutUrl: existing.checkoutUrl,
-        reused: true,
-        testMode: xendit.isTestMode(),
+      if (xendit.isHostedCheckoutUrl(existing.checkoutUrl)) {
+        return res.json({
+          payment: publicPayment(existing),
+          checkoutUrl: existing.checkoutUrl,
+          reused: true,
+          testMode: xendit.isTestMode(),
+          localSandbox: false,
+          testModeInstructions: xendit.isTestMode() ? xendit.testModeCheckoutInstructions() : null,
+        });
+      }
+      // Stale row from an old bug (localhost redirect stored as checkout URL) — discard it.
+      await prisma.payment.update({
+        where: { id: existing.id },
+        data: { checkoutUrl: null, status: existing.status === 'PENDING' ? 'FAILED' : existing.status },
       });
     }
 
@@ -157,6 +171,7 @@ router.post('/checkout', requireAuth, async (req, res) => {
     });
 
     let invoice;
+    const xenditStartedAt = Date.now();
     try {
       invoice = await xendit.createInvoice({
         user,
@@ -165,6 +180,11 @@ router.post('/checkout', requireAuth, async (req, res) => {
         successUrl: buildReturnUrl('success'),
         failureUrl: buildReturnUrl('failure'),
       });
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(
+          `[premium/checkout] Xendit invoice in ${Date.now() - xenditStartedAt}ms (total ${Date.now() - checkoutStartedAt}ms)`
+        );
+      }
     } catch (err) {
       await prisma.payment.update({
         where: { id: payment.id },
@@ -178,30 +198,58 @@ router.post('/checkout', requireAuth, async (req, res) => {
     }
 
     const checkoutUrl = xendit.checkoutUrlFor(invoice);
+    const localSandbox = Boolean(xendit.isSandboxMode() || invoice.local_sandbox);
+
+    if (!checkoutUrl && !localSandbox) {
+      await prisma.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: 'FAILED',
+          rawPayload: { created: invoice, error: 'no_hosted_checkout_url' },
+        },
+      });
+      const keyIssue = xendit.xenditKeyMisconfiguration();
+      console.error('[premium/checkout] No valid Xendit hosted URL', {
+        keyIssue,
+        invoiceId: invoice.id,
+        invoice_url: invoice.invoice_url,
+      });
+      return res.status(502).json({
+        error:
+          keyIssue === 'public_key_not_secret'
+            ? 'Payment server misconfigured: use your Xendit Secret API key (xnd_development_…), not the Public key.'
+            : 'Could not obtain a valid Xendit checkout link. Please try again.',
+        code: keyIssue === 'public_key_not_secret' ? 'XENDIT_PUBLIC_KEY' : 'INVALID_CHECKOUT_URL',
+      });
+    }
 
     const updated = await prisma.payment.update({
       where: { id: payment.id },
       data: {
         xenditInvoiceId: invoice.id || null,
-        checkoutUrl,
+        checkoutUrl: checkoutUrl || null,
         expiresAt: invoice.expiry_date ? new Date(invoice.expiry_date) : payment.expiresAt,
         rawPayload: { created: invoice },
       },
     });
 
-    await prisma.activityLog.create({
-      data: {
-        userId: user.id,
-        action: 'premium_checkout_started',
-        meta: { paymentId: updated.id, amount: price, currency, plan },
-      },
-    });
+    prisma.activityLog
+      .create({
+        data: {
+          userId: user.id,
+          action: 'premium_checkout_started',
+          meta: { paymentId: updated.id, amount: price, currency, plan },
+        },
+      })
+      .catch(() => {});
 
     return res.status(201).json({
       payment: publicPayment(updated),
-      checkoutUrl,
+      checkoutUrl: checkoutUrl || null,
+      localSandbox,
       reused: false,
       testMode: xendit.isTestMode(),
+      testModeInstructions: xendit.isTestMode() ? xendit.testModeCheckoutInstructions() : null,
     });
   } catch (err) {
     console.error('Premium checkout error', err);
@@ -272,9 +320,13 @@ router.post('/verify', requireAuth, async (req, res) => {
       },
     });
 
+    const xenditStatus = String(invoice.status || '').toUpperCase();
+
     return res.json({
       verified: status === 'PAID',
-      xenditStatus: invoice.status,
+      pending: status === 'PENDING',
+      failed: status === 'FAILED' || status === 'EXPIRED',
+      xenditStatus,
       premium: premiumState(user),
       payment: publicPayment(fresh),
     });
@@ -299,12 +351,27 @@ router.post('/webhook', async (req, res) => {
     }
 
     const body = req.body || {};
-    const event = body.event || body.status || '';
-    const isInvoiceEvent = /invoice/i.test(String(event)) || Boolean(body.id && body.external_id);
-    if (!isInvoiceEvent) return res.json({ ok: true, ignored: true });
+    const nested = body.data || body.payload || {};
+    const event = body.event || body.event_type || '';
+    const statusHint = String(body.status || nested.status || '').toUpperCase();
+    const externalId = body.external_id || nested.external_id;
+    const invoiceId = body.id || nested.id;
 
-    const externalId = body.external_id;
-    const invoiceId = body.id;
+    const isInvoiceEvent =
+      /invoice/i.test(String(event)) ||
+      Boolean(invoiceId && externalId) ||
+      ['PAID', 'PENDING', 'EXPIRED', 'FAILED'].includes(statusHint);
+
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[xendit/webhook] received', {
+        event,
+        status: statusHint,
+        externalId,
+        invoiceId,
+      });
+    }
+
+    if (!isInvoiceEvent) return res.json({ ok: true, ignored: true });
 
     const payment = await prisma.payment.findFirst({
       where: {
@@ -336,6 +403,10 @@ router.post('/webhook', async (req, res) => {
         where: { id: payment.id },
         data: { status, rawPayload: { webhook: invoice } },
       });
+    }
+
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[xendit/webhook] processed', { paymentId: payment.id, status });
     }
 
     return res.json({ ok: true, status });

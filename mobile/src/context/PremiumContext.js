@@ -1,22 +1,24 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { Linking, Platform } from 'react-native';
-import client from '../api/client';
+import { Alert, AppState, Linking, Platform } from 'react-native';
+import client, { CHECKOUT_TIMEOUT_MS, ensureApiBaseUrlReady } from '../api/client';
 import { useAuth } from './AuthContext';
+import { isValidXenditCheckoutUrl, checkoutOpenErrorMessage } from '../lib/xenditCheckout';
+import GoUnlimitedCheckoutModal from '../components/GoUnlimitedCheckoutModal';
+import PaymentConfirmingModal from '../components/PaymentConfirmingModal';
+import { navigationRef } from '../lib/navigationRef';
 
 const PremiumContext = createContext(null);
 
-/**
- * Central place for everything "Go Unlimited". The entitlement itself always
- * comes from the server (via /auth/me, which the AuthContext already refreshes
- * on every app boot), so premium survives logout/login and page reloads. This
- * context layers on the plan details, checkout and payment verification.
- */
+const DEFAULT_TEST_INSTRUCTIONS =
+  'On the Xendit page: pick GCash, Maya, or Card, then use the red "Simulate payment" banner (Test Mode) to finish.';
+
 export function PremiumProvider({ children }) {
   const { user, refreshUser } = useAuth();
 
   const [plan, setPlan] = useState(null);
   const [paymentsEnabled, setPaymentsEnabled] = useState(false);
   const [sandbox, setSandbox] = useState(false);
+  const [testMode, setTestMode] = useState(false);
   const [status, setStatus] = useState(null);
   const [pendingPayment, setPendingPayment] = useState(null);
   const [loadingPlan, setLoadingPlan] = useState(false);
@@ -24,10 +26,22 @@ export function PremiumProvider({ children }) {
   const [error, setError] = useState(null);
   const [limits, setLimits] = useState(null);
 
+  const [checkoutModalVisible, setCheckoutModalVisible] = useState(false);
+  const [checkoutModalError, setCheckoutModalError] = useState(null);
+  const [openingCheckout, setOpeningCheckout] = useState(false);
+  const [testModeInstructions, setTestModeInstructions] = useState(DEFAULT_TEST_INSTRUCTIONS);
+  const [confirmModalVisible, setConfirmModalVisible] = useState(false);
+  const [confirmPhase, setConfirmPhase] = useState('confirming');
+
   const mountedRef = useRef(true);
+  const checkoutInFlightRef = useRef(false);
+  const cachedCheckoutUrlRef = useRef(null);
+  const activePaymentIdRef = useRef(null);
+  const awaitingPaymentVerifyRef = useRef(false);
+  const verifyInProgressRef = useRef(false);
+
   useEffect(() => () => { mountedRef.current = false; }, []);
 
-  // The auth user object already carries a derived `premium` block.
   const premium = (user && user.premium) || {
     isPremium: false,
     plan: null,
@@ -61,6 +75,8 @@ export function PremiumProvider({ children }) {
       setPlan(data.plan || null);
       setPaymentsEnabled(Boolean(data.paymentsEnabled));
       setSandbox(Boolean(data.sandbox));
+      setTestMode(Boolean(data.testMode));
+      if (data.testModeInstructions) setTestModeInstructions(data.testModeInstructions);
     } catch (e) {
       if (mountedRef.current) setError(e.message);
     } finally {
@@ -76,8 +92,14 @@ export function PremiumProvider({ children }) {
       setPendingPayment(data.pendingPayment || null);
       setPaymentsEnabled(Boolean(data.paymentsEnabled));
       setSandbox(Boolean(data.sandbox));
-      // Sync auth only when entitlement changed — refreshing the whole user object
-      // on every poll was retriggering effects keyed on `user` and looping on web.
+      setTestMode(Boolean(data.testMode));
+
+      const pendingUrl = data.pendingPayment?.checkoutUrl;
+      if (pendingUrl && isValidXenditCheckoutUrl(pendingUrl)) {
+        cachedCheckoutUrlRef.current = pendingUrl;
+        activePaymentIdRef.current = data.pendingPayment.id;
+      }
+
       const serverPremium = Boolean(data.premium?.isPremium);
       const localPremium = Boolean(user?.premium?.isPremium);
       if (serverPremium !== localPremium) {
@@ -102,29 +124,6 @@ export function PremiumProvider({ children }) {
     refreshLimits();
   }, [user?.id, loadPlan, refreshStatus, refreshLimits]);
 
-  /**
-   * Starts a real Xendit checkout and returns the hosted invoice URL.
-   * The amount is decided entirely server-side.
-   */
-  const startCheckout = useCallback(async () => {
-    setStarting(true);
-    setError(null);
-    try {
-      const { data } = await client.post('/premium/checkout', {}, { timeout: 45000 });
-      if (mountedRef.current && data.payment) setPendingPayment(data.payment);
-      return data;
-    } catch (e) {
-      setError(e.message);
-      throw e;
-    } finally {
-      if (mountedRef.current) setStarting(false);
-    }
-  }, []);
-
-  /**
-   * Asks the server to verify the payment against Xendit directly. Access is
-   * granted by the server, never by this client.
-   */
   const verifyPayment = useCallback(async (params = {}) => {
     try {
       const { data } = await client.post('/premium/verify', params, { timeout: 30000 });
@@ -135,6 +134,7 @@ export function PremiumProvider({ children }) {
         }
         await refreshLimits();
         setPendingPayment(null);
+        cachedCheckoutUrlRef.current = null;
       }
       return data;
     } catch (e) {
@@ -143,11 +143,6 @@ export function PremiumProvider({ children }) {
     }
   }, [refreshUser, refreshLimits, user?.premium?.isPremium]);
 
-  /**
-   * Polls verification for a short window after the student returns from
-   * checkout. Xendit's webhook can land a moment after the redirect, so the
-   * success screen waits for the entitlement to actually appear.
-   */
   const pollForActivation = useCallback(
     async ({ attempts = 6, intervalMs = 2500, paymentId } = {}) => {
       for (let i = 0; i < attempts; i += 1) {
@@ -156,18 +151,115 @@ export function PremiumProvider({ children }) {
           if (result && result.verified) return result;
           if (result && result.premium && result.premium.isPremium) return result;
         } catch (e) {
-          // keep polling; transient errors are expected while Xendit settles
+          // keep polling
         }
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
       }
-      // Final authoritative read so the caller still gets fresh state.
       return refreshStatus();
     },
     [verifyPayment, refreshStatus]
   );
 
+  const runPostCheckoutVerification = useCallback(
+    async ({ showConfirming = true } = {}) => {
+      if (verifyInProgressRef.current || isPremium) return;
+      verifyInProgressRef.current = true;
+      if (showConfirming) {
+        setConfirmPhase('confirming');
+        setConfirmModalVisible(true);
+      }
+      try {
+        const paymentId = activePaymentIdRef.current;
+        let lastResult = null;
+        for (let i = 0; i < 6; i += 1) {
+          try {
+            lastResult = await verifyPayment(paymentId ? { paymentId } : {});
+            if (lastResult?.verified || lastResult?.premium?.isPremium) {
+              awaitingPaymentVerifyRef.current = false;
+              setCheckoutModalVisible(false);
+              setCheckoutModalError(null);
+              setConfirmPhase('success');
+              await refreshLimits();
+              return;
+            }
+            if (lastResult?.failed) {
+              awaitingPaymentVerifyRef.current = false;
+              setConfirmPhase('failed');
+              return;
+            }
+          } catch (e) {
+            // retry
+          }
+          if (i < 5) {
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+        }
+        awaitingPaymentVerifyRef.current = false;
+        setConfirmPhase('pending');
+      } finally {
+        verifyInProgressRef.current = false;
+      }
+    },
+    [verifyPayment, isPremium, refreshLimits]
+  );
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active' && awaitingPaymentVerifyRef.current) {
+        runPostCheckoutVerification();
+      }
+    });
+    return () => sub.remove();
+  }, [runPostCheckoutVerification]);
+
+  useEffect(() => {
+    const onUrl = ({ url }) => {
+      if (!url || !/premium\/return|premium\/success/i.test(url)) return;
+      if (/status=failed|premium\/failed/i.test(url)) return;
+      awaitingPaymentVerifyRef.current = true;
+      runPostCheckoutVerification();
+    };
+    const sub = Linking.addEventListener('url', onUrl);
+    Linking.getInitialURL()
+      .then((url) => {
+        if (url) onUrl({ url });
+      })
+      .catch(() => {});
+    return () => sub.remove();
+  }, [runPostCheckoutVerification]);
+
+  const startCheckout = useCallback(async () => {
+    if (checkoutInFlightRef.current) {
+      const err = new Error('Checkout is already in progress.');
+      err.code = 'CHECKOUT_IN_FLIGHT';
+      throw err;
+    }
+    checkoutInFlightRef.current = true;
+    setStarting(true);
+    setError(null);
+    try {
+      await ensureApiBaseUrlReady();
+      const { data } = await client.post('/premium/checkout', {}, { timeout: CHECKOUT_TIMEOUT_MS });
+      if (mountedRef.current && data.payment) setPendingPayment(data.payment);
+      if (data.checkoutUrl && isValidXenditCheckoutUrl(data.checkoutUrl)) {
+        cachedCheckoutUrlRef.current = data.checkoutUrl;
+        activePaymentIdRef.current = data.payment?.id || null;
+      }
+      if (data.testModeInstructions) {
+        setTestModeInstructions(data.testModeInstructions);
+      }
+      return data;
+    } catch (e) {
+      if (mountedRef.current) setError(e.message);
+      throw e;
+    } finally {
+      checkoutInFlightRef.current = false;
+      if (mountedRef.current) setStarting(false);
+    }
+  }, []);
+
   const openCheckoutUrl = useCallback(async (url) => {
-    if (!url) return false;
+    if (!url || !isValidXenditCheckoutUrl(url)) return false;
     if (Platform.OS === 'web') {
       if (typeof window !== 'undefined' && window.open) {
         window.open(url, '_blank', 'noopener,noreferrer');
@@ -183,13 +275,88 @@ export function PremiumProvider({ children }) {
     }
   }, []);
 
+  const showGoUnlimitedCheckoutModal = useCallback(() => {
+    if (isPremium) return;
+    if (!paymentsEnabled) {
+      Alert.alert(
+        'Payments unavailable',
+        'Go Unlimited is not available right now. Check Xendit Test Mode configuration on the server.'
+      );
+      return;
+    }
+    setCheckoutModalError(null);
+    setCheckoutModalVisible(true);
+  }, [isPremium, paymentsEnabled]);
+
+  const closeCheckoutModal = useCallback(() => {
+    setCheckoutModalVisible(false);
+    setCheckoutModalError(null);
+    setOpeningCheckout(false);
+  }, []);
+
+  const handleCheckoutCancel = useCallback(() => {
+    closeCheckoutModal();
+  }, [closeCheckoutModal]);
+
+  const handleCheckoutGoBack = useCallback(() => {
+    closeCheckoutModal();
+    if (navigationRef.isReady() && navigationRef.canGoBack()) {
+      navigationRef.goBack();
+    }
+  }, [closeCheckoutModal]);
+
+  const handleOpenCheckout = useCallback(async () => {
+    if (openingCheckout || checkoutInFlightRef.current) return;
+
+    setOpeningCheckout(true);
+    setCheckoutModalError(null);
+
+    try {
+      let url = cachedCheckoutUrlRef.current;
+      if (!url || !isValidXenditCheckoutUrl(url)) {
+        const data = await startCheckout();
+        if (data?.localSandbox && !data?.checkoutUrl) {
+          setCheckoutModalError(
+            'Hosted Xendit checkout requires a Secret API key (xnd_development_…). Set it in backend/.env and restart the server.'
+          );
+          return;
+        }
+        url = data?.checkoutUrl;
+      }
+
+      if (!url || !isValidXenditCheckoutUrl(url)) {
+        setCheckoutModalError(checkoutOpenErrorMessage(url));
+        return;
+      }
+
+      awaitingPaymentVerifyRef.current = true;
+      const opened = await openCheckoutUrl(url);
+      if (!opened) {
+        setCheckoutModalError('Could not open the browser. Allow pop-ups or tap Open Checkout again.');
+        return;
+      }
+    } catch (e) {
+      setCheckoutModalError(e?.message || 'Could not start checkout. Please try again.');
+    } finally {
+      if (mountedRef.current) setOpeningCheckout(false);
+    }
+  }, [openingCheckout, startCheckout, openCheckoutUrl]);
+
+  /** @deprecated name kept for callers — only opens the checkout modal (no API call). */
+  const beginGoUnlimitedCheckout = useCallback(() => {
+    showGoUnlimitedCheckoutModal();
+    return { ok: true };
+  }, [showGoUnlimitedCheckoutModal]);
+
   const value = {
     plan,
     loadingPlan,
     starting,
+    openingCheckout,
     error,
     paymentsEnabled,
     sandbox,
+    testMode,
     premium,
     isPremium,
     limits,
@@ -199,12 +366,37 @@ export function PremiumProvider({ children }) {
     refreshStatus,
     refreshLimits,
     startCheckout,
+    showGoUnlimitedCheckoutModal,
+    beginGoUnlimitedCheckout,
     verifyPayment,
     pollForActivation,
     openCheckoutUrl,
   };
 
-  return <PremiumContext.Provider value={value}>{children}</PremiumContext.Provider>;
+  return (
+    <PremiumContext.Provider value={value}>
+      {children}
+      <GoUnlimitedCheckoutModal
+        visible={checkoutModalVisible && !isPremium}
+        onOpenCheckout={handleOpenCheckout}
+        onCancel={handleCheckoutCancel}
+        onGoBack={handleCheckoutGoBack}
+        opening={openingCheckout}
+        error={checkoutModalError}
+        testMode={testMode}
+        testInstructions={testMode ? testModeInstructions : null}
+      />
+      <PaymentConfirmingModal
+        visible={confirmModalVisible}
+        phase={confirmPhase}
+        onDismiss={() => {
+          setConfirmModalVisible(false);
+          setConfirmPhase('confirming');
+        }}
+        onRetryCheck={() => runPostCheckoutVerification({ showConfirming: false })}
+      />
+    </PremiumContext.Provider>
+  );
 }
 
 export function usePremium() {
