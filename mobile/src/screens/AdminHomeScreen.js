@@ -10,11 +10,35 @@ import AdminUsersScreen from "./AdminUsersScreen";
 import AdminPremiumScreen from "./AdminPremiumScreen";
 import AdminUserDetailScreen from "./AdminUserDetailScreen";
 import AdminContentScreen from "./AdminContentScreen";
-import AdminLogsScreen from "./AdminLogsScreen";
 import AdminSettingsScreen from "./AdminSettingsScreen";
+import AdminSchoolsScreen from "./AdminSchoolsScreen";
+import AdminSupportScreen from "./AdminSupportScreen";
+import AdminSupportDetailScreen from "./AdminSupportDetailScreen";
+import AdminNotificationsScreen from "./AdminNotificationsScreen";
 
 const Tabs = createBottomTabNavigator();
+const OverviewStack = createNativeStackNavigator();
 const UsersStack = createNativeStackNavigator();
+
+function OverviewNavigator() {
+  const { colors } = useTheme();
+  return (
+    <OverviewStack.Navigator
+      screenOptions={{
+        headerShown: false,
+        headerStyle: { backgroundColor: colors.surface },
+        headerTitleStyle: { color: colors.text, fontWeight: "700", fontSize: 17 },
+        headerTintColor: colors.tomato,
+        headerShadowVisible: false,
+      }}
+    >
+      <OverviewStack.Screen name="OverviewHome" component={AdminDashboardScreen} />
+      <OverviewStack.Screen name="AdminNotifications" component={AdminNotificationsScreen} />
+      <OverviewStack.Screen name="SupportInbox" component={AdminSupportScreen} />
+      <OverviewStack.Screen name="SupportDetail" component={AdminSupportDetailScreen} />
+    </OverviewStack.Navigator>
+  );
+}
 
 // The Users tab needs its own stack so an admin can push into a student's full
 // profile (with a proper back button) without losing the tab bar.
@@ -44,6 +68,7 @@ export default function AdminHomeScreen() {
   const { colors } = useTheme();
   const { width } = useWindowDimensions();
   const showTabLabels = width >= 430;
+
   return (
     <Tabs.Navigator
       screenOptions={{
@@ -64,7 +89,7 @@ export default function AdminHomeScreen() {
     >
       <Tabs.Screen
         name="Overview"
-        component={AdminDashboardScreen}
+        component={OverviewNavigator}
         options={{
           tabBarLabel: "Overview",
           tabBarIcon: ({ color, size }) => <Ionicons name="pulse" color={color} size={size} />,
@@ -95,11 +120,11 @@ export default function AdminHomeScreen() {
         }}
       />
       <Tabs.Screen
-        name="Logs"
-        component={AdminLogsScreen}
+        name="Schools"
+        component={AdminSchoolsScreen}
         options={{
-          tabBarLabel: "Logs",
-          tabBarIcon: ({ color, size }) => <Ionicons name="document-text" color={color} size={size} />,
+          tabBarLabel: "Schools",
+          tabBarIcon: ({ color, size }) => <Ionicons name="school" color={color} size={size} />,
         }}
       />
       <Tabs.Screen

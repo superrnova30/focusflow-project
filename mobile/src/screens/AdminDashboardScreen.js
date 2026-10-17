@@ -9,10 +9,12 @@ import {
   RefreshControl,
   useWindowDimensions,
 } from "react-native";
-import { useFocusEffect } from "@react-navigation/native";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
 import { Screen } from "../components/Screen";
+import RefreshButton from "../components/RefreshButton";
 import { useTheme } from "../context/ThemeContext";
+import { useNotifications } from "../context/NotificationContext";
 import client from "../api/client";
 import { RADIUS, SPACING } from "../theme/theme";
 
@@ -26,6 +28,8 @@ function formatDuration(total) {
 
 export default function AdminDashboardScreen() {
   const { colors } = useTheme();
+  const navigation = useNavigation();
+  const { unreadCount, openPanel, panelOpen, closePanel } = useNotifications();
   const { width } = useWindowDimensions();
   const isDesktop = width >= 980;
   const isTablet = width >= 640;
@@ -121,19 +125,45 @@ export default function AdminDashboardScreen() {
             <Text style={styles.title}>Platform overview</Text>
             <Text style={styles.subtitle}>Monitor student engagement, learning activity, and system health.</Text>
           </View>
-          <Pressable
-            onPress={() => fetchAnalytics({ refresh: true })}
-            disabled={refreshing}
-            accessibilityRole="button"
-            accessibilityLabel="Refresh analytics"
-            style={({ pressed }) => [styles.refreshBtn, (pressed || refreshing) && styles.pressed]}
-          >
-            {refreshing ? (
-              <ActivityIndicator size="small" color={colors.violet} />
-            ) : (
-              <Ionicons name="refresh" size={19} color={colors.violet} />
-            )}
-          </Pressable>
+          <View style={styles.headerActions}>
+            <Pressable
+              onPress={() => navigation.navigate("SupportInbox")}
+              accessibilityRole="button"
+              accessibilityLabel="Open support inbox"
+              style={({ pressed }) => [styles.refreshBtn, pressed && styles.pressed]}
+            >
+              <Ionicons name="mail-outline" size={19} color={colors.violet} />
+            </Pressable>
+            <Pressable
+              onPress={() => (panelOpen ? closePanel() : openPanel())}
+              accessibilityRole="button"
+              accessibilityLabel={
+                unreadCount ? `${unreadCount} unread notifications` : "Open notifications"
+              }
+              style={({ pressed }) => [styles.refreshBtn, pressed && styles.pressed]}
+            >
+              <Ionicons
+                name={unreadCount || panelOpen ? "notifications" : "notifications-outline"}
+                size={19}
+                color={colors.violet}
+              />
+              {unreadCount > 0 ? (
+                <View style={[styles.notifBadge, { backgroundColor: colors.tomato, borderColor: colors.surface }]}>
+                  <Text style={styles.notifBadgeText}>
+                    {unreadCount > 99 ? "99+" : String(unreadCount)}
+                  </Text>
+                </View>
+              ) : null}
+            </Pressable>
+            <RefreshButton
+              refreshing={refreshing}
+              onPress={() => fetchAnalytics({ refresh: true })}
+              color={colors.violet}
+              backgroundColor={colors.violetSoft}
+              accessibilityLabel="Refresh analytics"
+              style={styles.refreshBtn}
+            />
+          </View>
         </View>
 
         {error ? (
@@ -308,7 +338,30 @@ const createStyles = (colors, isDesktop, isTablet, isPhone, compact) =>
     eyebrow: { color: colors.violet, fontSize: 8, fontWeight: "900", letterSpacing: 1, marginBottom: 3 },
     title: { color: colors.text, fontSize: compact ? 25 : 30, lineHeight: compact ? 31 : 36, fontWeight: "900", letterSpacing: -0.7 },
     subtitle: { color: colors.textMuted, fontSize: 12.5, lineHeight: 18, marginTop: 4, maxWidth: 600 },
-    refreshBtn: { width: 43, height: 43, borderRadius: 13, alignItems: "center", justifyContent: "center", backgroundColor: colors.violetSoft, flexShrink: 0 },
+    headerActions: { flexDirection: "row", alignItems: "center", gap: 8, flexShrink: 0 },
+    refreshBtn: {
+      width: 43,
+      height: 43,
+      borderRadius: 13,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: colors.violetSoft,
+      flexShrink: 0,
+      position: "relative",
+    },
+    notifBadge: {
+      position: "absolute",
+      top: -3,
+      right: -3,
+      minWidth: 17,
+      height: 17,
+      paddingHorizontal: 4,
+      borderRadius: 9,
+      borderWidth: 1.5,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    notifBadgeText: { color: "#fff", fontSize: 9, fontWeight: "900", lineHeight: 11 },
     warning: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.tomatoSoft, borderRadius: RADIUS.md, padding: 11, marginBottom: 12 },
     warningText: { flex: 1, color: colors.text, fontSize: 11.5, lineHeight: 16 },
     summaryCard: {
@@ -508,7 +561,7 @@ const createStyles = (colors, isDesktop, isTablet, isPhone, compact) =>
     rankBadgeFirst: { backgroundColor: colors.amberSoft },
     rankText: { color: colors.textMuted, fontSize: 9.5, fontWeight: "900" },
     rankTextFirst: { color: colors.amber },
-    studentAvatar: { width: 36, height: 36, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: colors.violetSoft },
+    studentAvatar: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: colors.violetSoft, overflow: "hidden" },
     studentInitial: { color: colors.violet, fontSize: 14, fontWeight: "900" },
     studentCopy: { flex: 1, minWidth: 0 },
     studentName: { color: colors.text, fontSize: 11.5, fontWeight: "800" },

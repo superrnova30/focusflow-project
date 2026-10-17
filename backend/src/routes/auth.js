@@ -10,6 +10,7 @@ const {
   isResetCodeValid,
   clearPasswordReset,
   issuePasswordResetEmail,
+  resetResendWaitSeconds,
 } = require("../lib/passwordReset");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
@@ -17,7 +18,19 @@ const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const router = express.Router();
 
 const verificationTokens = new Map();
-const GENERIC_RESET_SENT = "If an account exists, a verification code has been sent to that email.";
+const RESET_CODE_SENT = "A verification code has been sent to that email.";
+const ACCOUNT_NOT_REGISTERED =
+  "No account is registered with this email address. Sign up to create one.";
+const VERIFICATION_CODE_TTL_MS = 15 * 60 * 1000;
+const VERIFICATION_RESEND_COOLDOWN_MS = 45 * 1000;
+
+function wasVerificationCodeSentRecently(user) {
+  if (!user?.emailVerificationCode || !user.emailVerificationExpires) return false;
+  const remaining = new Date(user.emailVerificationExpires).getTime() - Date.now();
+  if (remaining <= 0) return false;
+  const elapsed = VERIFICATION_CODE_TTL_MS - remaining;
+  return elapsed >= 0 && elapsed < VERIFICATION_RESEND_COOLDOWN_MS;
+}
 
 function normalizeEmail(value) {
   return String(value || "").trim().toLowerCase();
@@ -181,7 +194,10 @@ router.post("/login", async (req, res) => {
     await bumpStreak(user.id, timezone);
     await prisma.activityLog.create({ data: { userId: user.id, action: "login" } });
 
-    const refreshed = await prisma.user.findUnique({ where: { id: user.id } });
+    const refreshed = await prisma.user.findUnique({
+      where: { id: user.id },
+      include: { schoolRecord: true },
+    });
     const token = signToken(refreshed);
     res.json({ token, user: publicUser(refreshed) });
   } catch (err) {
@@ -202,16 +218,26 @@ router.post("/forgot-password", async (req, res) => {
 
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
-      return res.status(200).json({ message: GENERIC_RESET_SENT });
+      return res.status(404).json({ error: ACCOUNT_NOT_REGISTERED, code: "ACCOUNT_NOT_FOUND" });
     }
 
     try {
-      await issuePasswordResetEmail(user, { initiatedBy: "self" });
+      const result = await issuePasswordResetEmail(user, { initiatedBy: "self" });
+      if (result?.skipped === "cooldown") {
+        const retryAfterSec = resetResendWaitSeconds(user);
+        return res.status(200).json({
+          message: `A reset code was sent recently. Check your inbox and spam folder${
+            retryAfterSec ? `, or wait ${retryAfterSec}s to resend` : ""
+          }.`,
+          recentlySent: true,
+          retryAfterSec,
+        });
+      }
     } catch (err) {
       return res.status(err.status || 500).json({ error: err.message || "Failed to start password reset" });
     }
 
-    return res.status(200).json({ message: GENERIC_RESET_SENT });
+    return res.status(200).json({ message: RESET_CODE_SENT, sent: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to start password reset" });
@@ -280,6 +306,7 @@ router.post("/reset-password", async (req, res) => {
     }
 
     const passwordHash = await hashPassword(newPassword);
+    const wasUnverified = user.role === "STUDENT" && !user.emailVerified;
     await prisma.user.update({
       where: { id: user.id },
       data: {
@@ -287,9 +314,19 @@ router.post("/reset-password", async (req, res) => {
         passwordResetCodeHash: null,
         passwordResetExpires: null,
         passwordResetAttempts: 0,
+        // Inbox access was proven via the reset code — allow sign-in without a separate verify step.
+        ...(wasUnverified
+          ? {
+              emailVerified: true,
+              emailVerificationCode: null,
+              emailVerificationExpires: null,
+            }
+          : {}),
       },
     });
-    await prisma.activityLog.create({ data: { userId: user.id, action: "password_reset" } });
+    await prisma.activityLog.create({
+      data: { userId: user.id, action: wasUnverified ? "password_reset_and_email_verified" : "password_reset" },
+    });
 
     return res.json({ ok: true, message: "Password was reset successfully" });
   } catch (err) {
@@ -312,6 +349,16 @@ router.post("/send-verification", async (req, res) => {
 
     if (user.emailVerified) {
       return res.status(400).json({ error: "This email is already verified" });
+    }
+
+    if (wasVerificationCodeSentRecently(user)) {
+      const remaining = new Date(user.emailVerificationExpires).getTime() - Date.now();
+      const elapsed = VERIFICATION_CODE_TTL_MS - remaining;
+      const waitSec = Math.max(1, Math.ceil((VERIFICATION_RESEND_COOLDOWN_MS - elapsed) / 1000));
+      return res.status(200).json({
+        message: `A code was sent recently. Check your inbox and spam folder, or wait ${waitSec}s to resend.`,
+        recentlySent: true,
+      });
     }
 
     const verificationCode = generateVerificationCode();
@@ -409,7 +456,15 @@ router.get("/me", requireAuth, async (req, res) => {
       maintenanceMode: true,
     });
   }
-  res.json({ user: publicUser(req.user) });
+  const user = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    include: { schoolRecord: true },
+  });
+  if (user) {
+    const { attachSchoolChangedAt } = require("../lib/schools");
+    await attachSchoolChangedAt(user);
+  }
+  res.json({ user: publicUser(user || req.user) });
 });
 
 router.get("/system-status", async (req, res) => {
@@ -476,14 +531,40 @@ router.get("/oauth/google/callback", (req, res, next) => {
 
 router.patch("/me", requireAuth, async (req, res) => {
   const allowed = [
-    "name", "profilePicture", "studentId", "course", "school", "yearLevel", "section", "studyGoals",
+    "name", "profilePicture", "studentId", "course", "yearLevel", "section", "studyGoals",
     "preferredStudyDuration", "dailyGoalMinutes", "focusMinutes", "shortBreakMinutes",
     "longBreakMinutes", "sessionsBeforeLongBreak", "remindersEnabled", "reminderTime",
+    "pushNotificationsEnabled",
   ];
   const data = {};
   for (const key of allowed) if (key in req.body) data[key] = req.body[key];
 
-  const user = await prisma.user.update({ where: { id: req.user.id }, data });
+  if ("schoolId" in req.body) {
+    const { assignSchoolToUser } = require("../lib/schools");
+    try {
+      await assignSchoolToUser(req.user.id, req.body.schoolId || null);
+    } catch (err) {
+      if (err.status) {
+        return res.status(err.status).json({
+          error: err.message,
+          code: err.code || undefined,
+          schoolChange: err.schoolChange || undefined,
+        });
+      }
+      throw err;
+    }
+  }
+
+  const user = Object.keys(data).length
+    ? await prisma.user.update({
+        where: { id: req.user.id },
+        data,
+        include: { schoolRecord: true },
+      })
+    : await prisma.user.findUnique({
+        where: { id: req.user.id },
+        include: { schoolRecord: true },
+      });
   res.json({ user: publicUser(user) });
 });
 

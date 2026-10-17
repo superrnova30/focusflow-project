@@ -165,9 +165,21 @@ if (typeof __DEV__ !== "undefined" && __DEV__) {
 }
 
 const DEFAULT_TIMEOUT = 30000;
+/** Tutor / study AI generation can take longer than normal API calls. */
+export const AI_REQUEST_TIMEOUT_MS = 120000;
 export const CHECKOUT_TIMEOUT_MS = 18000;
 
 const client = axios.create({ baseURL: activeApiBaseUrl, timeout: DEFAULT_TIMEOUT });
+
+function isLongRunningAiUrl(url = "") {
+  const path = String(url || "");
+  return (
+    path.includes("/tutor-lesson")
+    || path.includes("/study/practice")
+    || path.includes("/ai/")
+    || path.includes("/materials/") && path.includes("generate")
+  );
+}
 
 let firstRequestWarmed = false;
 
@@ -181,6 +193,9 @@ client.interceptors.request.use(async (config) => {
   if (token) config.headers.Authorization = `Bearer ${token}`;
   if (config.url && !config.url.startsWith("http")) {
     config.baseURL = activeApiBaseUrl;
+  }
+  if (isLongRunningAiUrl(config.url) && (config.timeout == null || config.timeout === DEFAULT_TIMEOUT)) {
+    config.timeout = AI_REQUEST_TIMEOUT_MS;
   }
   return config;
 });
@@ -207,7 +222,7 @@ async function writeQueue(queue) {
 const SAFE_TO_QUEUE = (method, url) => {
   const m = (method || "").toUpperCase();
   const base = url.split("?")[0];
-  const write = m === "POST" || m === "PUT" || m === "PATCH" || m === "DELETE";
+  const write = m === "POST" || m === "PUT" || m === "PATCH";
   if (!write) return false;
   if (base.includes("/auth/") || base.includes("/game/quiz") || base.includes("/ai")) return false;
   if (base.includes("/premium/")) return false;
@@ -280,7 +295,13 @@ function formatApiError(err, config) {
       : "Something went wrong on the server. Please try again.";
   }
 
-  if (err?.code === "ECONNABORTED" || !err?.response) {
+  if (err?.code === "ECONNABORTED") {
+    if (isLongRunningAiUrl(config?.url)) {
+      return "The AI is taking longer than expected. Please try again in a moment.";
+    }
+    return isCheckout ? CHECKOUT_NETWORK_ERROR : FRIENDLY_NETWORK_ERROR;
+  }
+  if (!err?.response) {
     return isCheckout ? CHECKOUT_NETWORK_ERROR : FRIENDLY_NETWORK_ERROR;
   }
 

@@ -17,10 +17,30 @@ function withTextAndSpans(block) {
   return { text, spans };
 }
 
+function coerceBlocks(blocks) {
+  if (blocks == null || blocks === "") return null;
+  if (typeof blocks === "string") {
+    const trimmed = blocks.trim();
+    if (!trimmed) return null;
+    try {
+      return coerceBlocks(JSON.parse(trimmed));
+    } catch {
+      return [{ type: "text", text: trimmed, marks: [] }];
+    }
+  }
+  if (Array.isArray(blocks)) return blocks;
+  if (typeof blocks === "object") {
+    if (Array.isArray(blocks.blocks)) return blocks.blocks;
+    if (blocks.text != null || blocks.spans || blocks.type) return [blocks];
+  }
+  return null;
+}
+
 /** Normalize rich-text block arrays (notes, task descriptions). */
 function sanitizeRichTextBlocks(blocks) {
-  if (!Array.isArray(blocks)) return null;
-  const filtered = blocks
+  const list = coerceBlocks(blocks);
+  if (!Array.isArray(list)) return null;
+  const filtered = list
     .filter((block) => block && typeof block === "object")
     .map((block) => {
       if (block.type === "heading") {

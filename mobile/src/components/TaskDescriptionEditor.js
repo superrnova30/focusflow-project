@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { forwardRef, useEffect, useMemo, useState } from "react";
 import { View, Text, StyleSheet, Pressable } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "../context/ThemeContext";
@@ -8,7 +8,7 @@ import { RADIUS } from "../theme/theme";
 /**
  * Task-specific description field — collapsible, matches Tasks modal panels.
  */
-export default function TaskDescriptionEditor({ value = [], onChange, compact = false, inModal = false }) {
+const TaskDescriptionEditor = forwardRef(function TaskDescriptionEditor({ value = [], onChange, compact = false, inModal = false }, ref) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors, compact, inModal), [colors, compact, inModal]);
   const hasContent = (value?.length ?? 0) > 0;
@@ -44,6 +44,7 @@ export default function TaskDescriptionEditor({ value = [], onChange, compact = 
         </View>
         <View style={styles.editorBox}>
           <RichTextEditor
+            ref={ref}
             simple
             embedded
             compact
@@ -103,6 +104,7 @@ export default function TaskDescriptionEditor({ value = [], onChange, compact = 
 
       <View style={[styles.editorShell, { backgroundColor: colors.bg, borderColor: colors.border }]}>
         <RichTextEditor
+          ref={ref}
           simple
           embedded
           compact={compact || inModal}
@@ -114,7 +116,7 @@ export default function TaskDescriptionEditor({ value = [], onChange, compact = 
       </View>
     </View>
   );
-}
+});
 
 const createStyles = (colors, compact, inModal) =>
   StyleSheet.create({
@@ -253,3 +255,5 @@ const createStyles = (colors, compact, inModal) =>
     },
     pressed: { opacity: 0.82 },
   });
+
+export default TaskDescriptionEditor;

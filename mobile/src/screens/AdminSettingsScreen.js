@@ -19,6 +19,7 @@ import { useTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import client from "../api/client";
 import { RADIUS, SPACING } from "../theme/theme";
+import ConfirmDialog from "../components/ConfirmDialog";
 
 const THEME_OPTIONS = [
   { key: "light", label: "Light", icon: "sunny-outline" },
@@ -43,6 +44,7 @@ export default function AdminSettingsScreen() {
   const [broadcastTitle, setBroadcastTitle] = useState("");
   const [broadcastBody, setBroadcastBody] = useState("");
   const [broadcasting, setBroadcasting] = useState(false);
+  const [logoutModalVisible, setLogoutModalVisible] = useState(false);
 
   const loadSettings = async () => {
     setLoading(true);
@@ -110,18 +112,11 @@ export default function AdminSettingsScreen() {
     }
   };
 
-  const confirmLogout = () => {
-    if (Platform.OS === "web") {
-      const confirmed = typeof window !== "undefined" && window.confirm
-        ? window.confirm("Log out of the admin console?")
-        : true;
-      if (confirmed) logout();
-      return;
-    }
-    Alert.alert("Log out?", "You’ll need to sign in again to manage FocusFlow.", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Log out", style: "destructive", onPress: logout },
-    ]);
+  const confirmLogout = () => setLogoutModalVisible(true);
+
+  const handleLogoutConfirm = async () => {
+    setLogoutModalVisible(false);
+    await logout();
   };
 
   if (loading) {
@@ -302,6 +297,17 @@ export default function AdminSettingsScreen() {
           )}
         </Pressable>
       </ScrollView>
+
+      <ConfirmDialog
+        visible={logoutModalVisible}
+        title="Log out?"
+        message="Are you sure you want to log out?"
+        cancelText="Cancel"
+        confirmText="Log Out"
+        destructive
+        onCancel={() => setLogoutModalVisible(false)}
+        onConfirm={handleLogoutConfirm}
+      />
     </Screen>
   );
 }

@@ -27,7 +27,7 @@ const IS_NATIVE = Platform.OS === "ios" || Platform.OS === "android";
 
 const ERROR_COLOR = "#EF4444";
 
-export default function SignupScreen({ navigation }) {
+export default function SignupScreen({ navigation, route }) {
   const { colors, isDark } = useTheme();
   const { wide, compact } = useStableLayout(900);
   const styles = useMemo(
@@ -38,7 +38,7 @@ export default function SignupScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const [keyboardInset, setKeyboardInset] = useState(0);
   const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(route?.params?.email || "");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState(null);

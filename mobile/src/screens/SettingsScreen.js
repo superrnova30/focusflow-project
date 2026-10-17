@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { View, Text, StyleSheet, ScrollView, Switch, Alert, Image, Pressable, useWindowDimensions, Platform } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import Constants from "expo-constants";
 import * as ImagePicker from "expo-image-picker";
 import { Screen, Card } from "../components/Screen";
 import { Input, Button } from "../components/Inputs";
@@ -9,11 +8,23 @@ import { useTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
 import { usePremium } from "../context/PremiumContext";
 import { RADIUS, SPACING } from "../theme/theme";
-import { registerForPushNotifications, unregisterPushNotifications, sendTestPush, getSavedPushToken } from "../lib/push";
+import {
+  enablePushNotifications,
+  disablePushNotifications,
+  sendTestPush,
+  getSavedPushToken,
+  getCachedPushPreference,
+  fetchPushStatus,
+  syncReminderDelivery,
+  openSystemNotificationSettings,
+  supportsLocalNotifications,
+  isExpoGo,
+} from "../lib/push";
 import { ALARM_SOUNDS, loadAlarmPrefs, saveAlarmPrefs } from "../lib/alarmPrefs";
 import { previewAlarm } from "../lib/alarmPlayer";
 import client from "../api/client";
-import HeaderWallet from "../components/HeaderWallet";
+import ConfirmDialog from "../components/ConfirmDialog";
+import SchoolPickerField from "../components/SchoolPickerField";
 
 const GOLD = "#FFC15E";
 
@@ -38,13 +49,13 @@ export default function SettingsScreen({ navigation }) {
   const isWide = width >= 900;
   const compact = width < 390;
   const styles = useMemo(() => createStyles(colors, isWide, compact), [colors, isWide, compact]);
-  const { user, logout, refreshUser } = useAuth();
+  const { user, setUser, logout, refreshUser } = useAuth();
   const { isPremium, premium } = usePremium();
 
   const [name, setName] = useState(user?.name || "");
   const [studentId, setStudentId] = useState(user?.studentId || "");
   const [course, setCourse] = useState(user?.course || "");
-  const [school, setSchool] = useState(user?.school || "");
+  const [schoolRecord, setSchoolRecord] = useState(user?.schoolRecord || (user?.school ? { name: user.school } : null));
   const [yearLevel, setYearLevel] = useState(user?.yearLevel || "");
   const [section, setSection] = useState(user?.section || "");
   const [profilePicture, setProfilePicture] = useState(user?.profilePicture || "");
@@ -59,13 +70,14 @@ export default function SettingsScreen({ navigation }) {
   const [saving, setSaving] = useState(false);
 
   const [changeOpen, setChangeOpen] = useState(false);
+  const [logoutModalVisible, setLogoutModalVisible] = useState(false);
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [changing, setChanging] = useState(false);
 
-  const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushEnabled, setPushEnabled] = useState(Boolean(user?.pushNotificationsEnabled));
   const [pushBusy, setPushBusy] = useState(false);
-  const isExpoGo = Constants.appOwnership === "expo";
+  const [hasRemoteToken, setHasRemoteToken] = useState(false);
 
   const [alarmEnabled, setAlarmEnabled] = useState(true);
   const [alarmSoundId, setAlarmSoundId] = useState("chime");
@@ -73,17 +85,42 @@ export default function SettingsScreen({ navigation }) {
   const alarmPrefsReady = useRef(false);
 
   useEffect(() => {
-    getSavedPushToken()
-      .then((token) => setPushEnabled(!!token))
-      .catch(() => {});
-  }, []);
+    let cancelled = false;
+    (async () => {
+      try {
+        const cachedPref = await getCachedPushPreference();
+        const token = await getSavedPushToken();
+        if (!cancelled) {
+          setHasRemoteToken(Boolean(token));
+          if (typeof user?.pushNotificationsEnabled === "boolean") {
+            setPushEnabled(user.pushNotificationsEnabled);
+          } else if (cachedPref != null) {
+            setPushEnabled(cachedPref);
+          } else {
+            setPushEnabled(Boolean(token));
+          }
+        }
+        const status = await fetchPushStatus().catch(() => null);
+        if (!cancelled && status) {
+          setPushEnabled(Boolean(status.enabled));
+          setHasRemoteToken(Boolean(status.hasDeviceToken));
+          if (status.user) setUser(status.user);
+        }
+      } catch (e) {
+        // keep last known state
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id]);
 
   useEffect(() => {
     loadAlarmPrefs()
       .then((prefs) => {
-        setAlarmEnabled(prefs.enabled);
-        setAlarmSoundId(prefs.soundId);
-        setAlarmVolume(prefs.volume);
+      setAlarmEnabled(prefs.enabled);
+      setAlarmSoundId(prefs.soundId);
+      setAlarmVolume(prefs.volume);
         alarmPrefsReady.current = true;
       })
       .catch(() => {
@@ -103,7 +140,7 @@ export default function SettingsScreen({ navigation }) {
     setName(user?.name || "");
     setStudentId(user?.studentId || "");
     setCourse(user?.course || "");
-    setSchool(user?.school || "");
+    setSchoolRecord(user?.schoolRecord || (user?.school ? { name: user.school } : null));
     setYearLevel(user?.yearLevel || "");
     setSection(user?.section || "");
     setProfilePicture(user?.profilePicture || "");
@@ -114,6 +151,9 @@ export default function SettingsScreen({ navigation }) {
     setSessionsBeforeLong(String(user?.sessionsBeforeLongBreak ?? 4));
     setReminderTime(user?.reminderTime || "18:00");
     setReminders(user?.remindersEnabled ?? true);
+    if (typeof user?.pushNotificationsEnabled === "boolean") {
+      setPushEnabled(user.pushNotificationsEnabled);
+    }
   }, [user]);
 
   const savedProfile = useMemo(
@@ -121,7 +161,6 @@ export default function SettingsScreen({ navigation }) {
       name: (user?.name || "").trim(),
       studentId: (user?.studentId || "").trim(),
       course: (user?.course || "").trim(),
-      school: (user?.school || "").trim(),
       yearLevel: (user?.yearLevel || "").trim(),
       section: (user?.section || "").trim(),
       profilePicture: user?.profilePicture || "",
@@ -141,7 +180,6 @@ export default function SettingsScreen({ navigation }) {
       name.trim() !== savedProfile.name ||
       studentId.trim() !== savedProfile.studentId ||
       course.trim() !== savedProfile.course ||
-      school.trim() !== savedProfile.school ||
       yearLevel.trim() !== savedProfile.yearLevel ||
       section.trim() !== savedProfile.section ||
       profilePicture !== savedProfile.profilePicture ||
@@ -156,7 +194,6 @@ export default function SettingsScreen({ navigation }) {
       name,
       studentId,
       course,
-      school,
       yearLevel,
       section,
       profilePicture,
@@ -172,19 +209,69 @@ export default function SettingsScreen({ navigation }) {
   );
 
   const togglePush = async (value) => {
+    if (!supportsLocalNotifications) {
+      Alert.alert("Unavailable", "Push notifications are only available on iOS and Android devices.");
+      return;
+    }
+
     setPushBusy(true);
     try {
       if (value) {
-        await registerForPushNotifications();
+        const result = await enablePushNotifications({
+          requestPermission: true,
+          reminderTime: reminderTime.trim() || user?.reminderTime || "18:00",
+          remindersEnabled: reminders,
+          streakCount: user?.streakCount || 0,
+        });
         setPushEnabled(true);
-        Alert.alert("Push enabled", "Background notifications are registered for this device.");
+        setHasRemoteToken(Boolean(result?.token));
+        if (result?.user) setUser(result.user);
+        else {
+          try {
+            const refreshed = await refreshUser();
+            if (refreshed) setUser(refreshed);
+          } catch (e) {
+            // preference already saved server-side
+          }
+        }
+
+        if (result?.mode === "remote") {
+          Alert.alert("Push enabled", "Background notifications are registered for this device.");
+        } else if (result?.warning) {
+          Alert.alert(
+            "Reminders enabled on this device",
+            `${result.warning}\n\nDaily study reminders will still fire locally when the app is closed.`
+          );
+        } else if (isExpoGo) {
+          Alert.alert(
+            "Reminders enabled",
+            "Daily study reminders are scheduled on this device. Remote push requires a development build."
+          );
+        } else {
+          Alert.alert("Reminders enabled", "You will receive study reminders when the app is closed.");
+        }
       } else {
-        await unregisterPushNotifications();
+        await disablePushNotifications();
         setPushEnabled(false);
+        setHasRemoteToken(false);
+        try {
+          const refreshed = await refreshUser();
+          if (refreshed) setUser(refreshed);
+        } catch (e) {
+          // local state already cleared
+        }
       }
     } catch (e) {
       setPushEnabled(false);
-      Alert.alert("Push unavailable", e.message || "This device could not be registered.");
+      setHasRemoteToken(false);
+      if (e?.code === "PERMISSION_DENIED") {
+        Alert.alert("Notifications blocked", e.message, [
+          { text: "Not now", style: "cancel" },
+          { text: "Open settings", onPress: () => openSystemNotificationSettings() },
+        ]);
+      } else {
+        Alert.alert("Push unavailable", e.message || "This device could not be registered.");
+      }
     } finally {
       setPushBusy(false);
     }
@@ -194,12 +281,16 @@ export default function SettingsScreen({ navigation }) {
     setPushBusy(true);
     try {
       const result = await sendTestPush();
-      Alert.alert(
-        "Notification queued",
-        `Expo accepted the test notification for ${result?.result?.accepted || 1} device${result?.result?.accepted === 1 ? "" : "s"}.`
-      );
+      if (result?.local) {
+        Alert.alert("Test sent", "A local test notification was delivered on this device.");
+      } else {
+        Alert.alert(
+          "Notification queued",
+          `Expo accepted the test notification for ${result?.result?.accepted || 1} device${result?.result?.accepted === 1 ? "" : "s"}.`
+        );
+      }
     } catch (e) {
-      Alert.alert("Error", e.message);
+      Alert.alert("Error", e?.response?.data?.error || e.message);
     } finally {
       setPushBusy(false);
     }
@@ -255,7 +346,6 @@ export default function SettingsScreen({ navigation }) {
         name: name.trim(),
         studentId: studentId.trim(),
         course: course.trim(),
-        school: school.trim(),
         yearLevel: yearLevel.trim(),
         section: section.trim(),
         profilePicture,
@@ -267,7 +357,14 @@ export default function SettingsScreen({ navigation }) {
         reminderTime: reminderTime.trim(),
         remindersEnabled: reminders,
       });
-      await refreshUser();
+      const refreshed = await refreshUser();
+      await syncReminderDelivery({
+        pushEnabled,
+        remindersEnabled: reminders,
+        reminderTime: reminderTime.trim(),
+        streakCount: refreshed?.streakCount || user?.streakCount || 0,
+        hasRemoteToken,
+      }).catch(() => {});
       Alert.alert("Saved", "Your profile and study preferences were updated.");
     } catch (e) {
       Alert.alert("Error", e.message);
@@ -280,7 +377,7 @@ export default function SettingsScreen({ navigation }) {
     setName(savedProfile.name);
     setStudentId(savedProfile.studentId);
     setCourse(savedProfile.course);
-    setSchool(savedProfile.school);
+    setSchoolRecord(user?.schoolRecord || (user?.school ? { name: user.school } : null));
     setYearLevel(savedProfile.yearLevel);
     setSection(savedProfile.section);
     setProfilePicture(savedProfile.profilePicture);
@@ -291,7 +388,7 @@ export default function SettingsScreen({ navigation }) {
     setSessionsBeforeLong(savedProfile.sessionsBeforeLong);
     setReminderTime(savedProfile.reminderTime);
     setReminders(savedProfile.reminders);
-  }, [savedProfile]);
+  }, [savedProfile, user]);
 
   const changePassword = async () => {
     if (newPassword.length < 8) {
@@ -317,16 +414,11 @@ export default function SettingsScreen({ navigation }) {
     }
   };
 
-  const confirmLogout = () => {
-    if (Platform.OS === "web") {
-      const confirmed = typeof window !== "undefined" && window.confirm ? window.confirm("Log out of FocusFlow?") : true;
-      if (confirmed) logout();
-      return;
-    }
-    Alert.alert("Log out?", "You'll need to sign in again to access your study space.", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Log out", style: "destructive", onPress: logout },
-    ]);
+  const confirmLogout = () => setLogoutModalVisible(true);
+
+  const handleLogoutConfirm = async () => {
+    setLogoutModalVisible(false);
+    await logout();
   };
 
   const renderCardHeading = (icon, iconBg, iconColor, title, subtitle, instant = false) => (
@@ -356,7 +448,7 @@ export default function SettingsScreen({ navigation }) {
         <View style={styles.header}>
           <View style={styles.headerTop}>
             {navigation?.canGoBack?.() ? (
-              <Pressable
+          <Pressable
                 onPress={() => navigation.goBack()}
                 style={({ pressed }) => [{ width: 36, height: 36, borderRadius: 10, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center", marginRight: 8 }, pressed && styles.pressed]}
               >
@@ -367,11 +459,10 @@ export default function SettingsScreen({ navigation }) {
               <Text style={styles.eyebrow}>ACCOUNT</Text>
               <Text style={styles.headerTitle}>Settings</Text>
             </View>
-            <HeaderWallet compact={compact} />
           </View>
           <Text style={styles.headerSubtitle}>
             Profile and study preferences save together. Theme, push, and alarm settings apply instantly.
-          </Text>
+              </Text>
         </View>
 
         <Card style={styles.accountHero}>
@@ -405,13 +496,13 @@ export default function SettingsScreen({ navigation }) {
               </View>
             </View>
             {user?.id ? (
-              <Pressable
+                <Pressable
                 onPress={() => navigation.navigate("ProfileHome")}
                 style={({ pressed }) => [styles.publicProfileLink, pressed && styles.pressed]}
-              >
+                >
                 <Ionicons name="globe-outline" size={13} color={colors.violet} />
                 <Text style={styles.publicProfileLinkText}>View public profile</Text>
-              </Pressable>
+                </Pressable>
             ) : null}
           </View>
           <Pressable onPress={confirmLogout} style={({ pressed }) => [styles.logoutBtn, pressed && styles.pressed]}>
@@ -432,7 +523,7 @@ export default function SettingsScreen({ navigation }) {
             <Text style={styles.subscriptionMeta} numberOfLines={2}>
               {isPremium
                 ? `${premium.daysRemaining} day${premium.daysRemaining === 1 ? "" : "s"} remaining on your plan`
-                : "Unlimited cards, hearts, AI tutoring, hints, and prompts."}
+                : "Unlimited cards, tasks, hearts, AI tutoring, hints, chat, and prompts."}
             </Text>
           </View>
           {!compact && (
@@ -443,7 +534,7 @@ export default function SettingsScreen({ navigation }) {
             </View>
           )}
           <Ionicons name="chevron-forward" size={17} color={colors.textMuted} />
-        </Pressable>
+            </Pressable>
 
         <View style={styles.settingsGrid}>
           <View style={styles.settingsColumn}>
@@ -458,14 +549,25 @@ export default function SettingsScreen({ navigation }) {
               <View style={styles.formRow}>
                 <Input label="Full name" value={name} onChangeText={setName} placeholder="Your full name" />
                 <Input label="Student ID" value={studentId} onChangeText={setStudentId} placeholder="Student ID" autoCapitalize="characters" />
-              </View>
+          </View>
               <Input label="Course" value={course} onChangeText={setCourse} placeholder="e.g. BS Computer Science" />
-              <Input label="School" value={school} onChangeText={setSchool} placeholder="e.g. FocusFlow University" />
+              <SchoolPickerField
+                school={schoolRecord}
+                schoolChange={user?.schoolChange}
+                onChange={(next, updatedUser) => {
+                  setSchoolRecord(next);
+                  if (updatedUser) {
+                    setUser(updatedUser);
+                  } else {
+                    refreshUser().catch(() => {});
+                  }
+                }}
+              />
               <View style={styles.formRow}>
                 <Input label="Year level" value={yearLevel} onChangeText={setYearLevel} placeholder="e.g. 2nd Year" />
                 <Input label="Section" value={section} onChangeText={setSection} placeholder="Optional" />
               </View>
-            </Card>
+        </Card>
 
             <Card style={styles.settingsCard}>
               {renderCardHeading(
@@ -482,15 +584,15 @@ export default function SettingsScreen({ navigation }) {
                 accessibilityRole="button"
                 accessibilityState={{ expanded: pomodoroExpanded }}
               >
-                <View style={{ flex: 1 }}>
+            <View style={{ flex: 1 }}>
                   <Text style={styles.dropdownTitle}>Pomodoro schedule</Text>
                   <Text style={styles.dropdownSummary}>{`${focusMinutes}m focus · ${shortBreak}m short · ${longBreak}m long`}</Text>
                 </View>
                 <View style={styles.dropdownChevron}>
                   <Ionicons name={pomodoroExpanded ? "chevron-up" : "chevron-down"} size={18} color={colors.violet} />
-                </View>
-              </Pressable>
-              {pomodoroExpanded && (
+            </View>
+          </Pressable>
+          {pomodoroExpanded && (
                 <View style={styles.expandedFields}>
                   <View style={styles.formRow}>
                     <Input label="Focus minutes" value={focusMinutes} onChangeText={setFocusMinutes} placeholder="25" keyboardType="number-pad" />
@@ -500,9 +602,9 @@ export default function SettingsScreen({ navigation }) {
                     <Input label="Long break" value={longBreak} onChangeText={setLongBreak} placeholder="15" keyboardType="number-pad" />
                     <Input label="Sessions per cycle" value={sessionsBeforeLong} onChangeText={setSessionsBeforeLong} placeholder="4" keyboardType="number-pad" />
                   </View>
-                </View>
-              )}
-            </Card>
+            </View>
+          )}
+        </Card>
 
             <Card style={styles.settingsCard}>
               {renderCardHeading(
@@ -522,6 +624,29 @@ export default function SettingsScreen({ navigation }) {
               {reminders && (
                 <Input label="Reminder time (24-hour)" value={reminderTime} onChangeText={setReminderTime} placeholder="18:00" />
               )}
+        </Card>
+
+            <Card style={styles.settingsCard}>
+              {renderCardHeading(
+                "chatbubbles-outline",
+                colors.violetSoft,
+                colors.violet,
+                "Help & support",
+                "Reach the PomodAI team from inside the app."
+              )}
+              <Pressable
+                onPress={() => navigation.navigate("Study", { screen: "ContactSupport" })}
+                style={({ pressed }) => [styles.actionRow, pressed && styles.pressed]}
+                accessibilityRole="button"
+                accessibilityLabel="Contact PomodAI"
+              >
+                <View style={styles.actionIcon}><Ionicons name="mail-outline" size={18} color={colors.violet} /></View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.actionTitle}>Contact PomodAI</Text>
+                  <Text style={styles.actionSubtitle}>Account, school, payments, bugs, and more.</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={17} color={colors.textMuted} />
+              </Pressable>
             </Card>
 
             <Card style={styles.settingsCard}>
@@ -588,7 +713,7 @@ export default function SettingsScreen({ navigation }) {
                   );
                 })}
               </View>
-            </Card>
+        </Card>
 
             <Card style={styles.settingsCard}>
               {renderCardHeading(
@@ -604,22 +729,24 @@ export default function SettingsScreen({ navigation }) {
                   <Text style={styles.preferenceTitle}>Push notifications</Text>
                   <Text style={styles.preferenceSubtitle}>Receive reminders when the app is closed.</Text>
                 </View>
-                <Switch
-                  value={pushEnabled}
-                  onValueChange={togglePush}
-                  disabled={pushBusy || isExpoGo}
+            <Switch
+              value={pushEnabled}
+              onValueChange={togglePush}
+                  disabled={pushBusy || !supportsLocalNotifications}
                   trackColor={{ false: colors.border, true: colors.tomato }}
-                />
-              </View>
-              <Text style={styles.hint}>
-                {isExpoGo
-                  ? "Push notifications require a custom development build."
+            />
+          </View>
+          <Text style={styles.hint}>
+            {!supportsLocalNotifications
+                  ? "Push notifications are available on iOS and Android devices."
+                  : isExpoGo
+                  ? "Daily reminders are scheduled on this device. Remote push needs a development build."
                   : "Turning this on or off takes effect immediately."}
-              </Text>
-              {!isExpoGo && pushEnabled && (
+          </Text>
+              {pushEnabled && supportsLocalNotifications && (
                 <Button title="Send test notification" onPress={handleTestPush} loading={pushBusy} variant="secondary" style={{ marginTop: 12 }} />
-              )}
-            </Card>
+          )}
+        </Card>
 
             <Card style={styles.settingsCard}>
               {renderCardHeading(
@@ -665,7 +792,7 @@ export default function SettingsScreen({ navigation }) {
                     </Pressable>
                     <View style={styles.volumeTrack}>
                       <View style={[styles.volumeFill, { width: `${alarmVolume * 100}%` }]} />
-                    </View>
+                </View>
                     <Pressable
                       onPress={() => setAlarmVolume((value) => Math.min(1, Math.round((value + 0.1) * 10) / 10))}
                       style={({ pressed }) => [styles.volumeBtn, pressed && styles.pressed]}
@@ -673,10 +800,10 @@ export default function SettingsScreen({ navigation }) {
                       <Ionicons name="add" size={17} color={colors.text} />
                     </Pressable>
                     <Text style={styles.volumePct}>{Math.round(alarmVolume * 100)}%</Text>
-                  </View>
-                </>
-              )}
-            </Card>
+              </View>
+            </>
+          )}
+        </Card>
           </View>
         </View>
       </ScrollView>
@@ -701,6 +828,17 @@ export default function SettingsScreen({ navigation }) {
           </View>
         </View>
       )}
+
+      <ConfirmDialog
+        visible={logoutModalVisible}
+        title="Log out?"
+        message="Are you sure you want to log out?"
+        cancelText="Cancel"
+        confirmText="Log Out"
+        destructive
+        onCancel={() => setLogoutModalVisible(false)}
+        onConfirm={handleLogoutConfirm}
+      />
     </Screen>
   );
 }
@@ -744,7 +882,8 @@ const createStyles = (colors, isWide, compact) =>
     avatar: {
       width: compact ? 58 : 70,
       height: compact ? 58 : 70,
-      borderRadius: compact ? 19 : 23,
+      borderRadius: compact ? 29 : 35,
+      overflow: "hidden",
       borderWidth: 1,
       borderColor: colors.border,
     },
@@ -756,7 +895,7 @@ const createStyles = (colors, isWide, compact) =>
       bottom: -4,
       width: 25,
       height: 25,
-      borderRadius: 9,
+      borderRadius: 13,
       alignItems: "center",
       justifyContent: "center",
       backgroundColor: colors.violet,

@@ -1,4 +1,4 @@
- const express = require("express");
+const express = require("express");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
@@ -7,6 +7,11 @@ const { requireAuth, requireRole } = require("../middleware/auth");
 const { generateStudyPack, generateCoachInsight } = require("../lib/ai");
 const { enforcePromptLimit } = require("../lib/featureLimits");
 const { extractTextFromBuffer, SUPPORTED_FILE_TYPES } = require("../lib/documentText");
+const { toPersistedFlashcard } = require("../lib/flashcardAnswer");
+
+function flashcardCreates(list) {
+  return (list || []).map((card) => toPersistedFlashcard(card)).filter(Boolean);
+}
 
 const UPLOAD_DIR = path.join(__dirname, "..", "..", "uploads");
 
@@ -182,7 +187,7 @@ router.post("/generate", requireRole("STUDENT"), async (req, res) => {
         aiImportantTerms: pack.importantTerms || null,
         aiShortAnswer: pack.shortAnswer || null,
         aiPracticeQuestions: pack.practiceQuestions || null,
-        flashcards: { create: (pack.flashcards || []).map((f) => ({ front: f.front, back: f.back })) },
+        flashcards: { create: flashcardCreates(pack.flashcards) },
         quizzes: {
           create: {
             title: title || subjectName || "Untitled quiz",
@@ -258,7 +263,7 @@ async function handleUpload(req, res) {
         aiImportantTerms: pack.importantTerms || null,
         aiShortAnswer: pack.shortAnswer || null,
         aiPracticeQuestions: pack.practiceQuestions || null,
-        flashcards: { create: (pack.flashcards || []).map((f) => ({ front: f.front, back: f.back })) },
+        flashcards: { create: flashcardCreates(pack.flashcards) },
         quizzes: {
           create: {
             title: title || subjectName || fileName || `Uploaded ${normalizedType.toUpperCase()} quiz`,
@@ -314,6 +319,7 @@ router.patch("/:id", async (req, res) => {
 // Regenerate the AI study pack from the stored rawText.
 router.post("/:id/regenerate", async (req, res) => {
   try {
+    if (!(await enforcePromptLimit(req, res))) return;
     const existing = await prisma.studyMaterial.findFirst({
       where: { id: req.params.id, uploadedById: req.user.id },
       include: { flashcards: true, quizzes: { include: { questions: true } } },
@@ -342,7 +348,7 @@ router.post("/:id/regenerate", async (req, res) => {
         aiImportantTerms: pack.importantTerms || null,
         aiShortAnswer: pack.shortAnswer || null,
         aiPracticeQuestions: pack.practiceQuestions || null,
-        flashcards: { create: (pack.flashcards || []).map((f) => ({ front: f.front, back: f.back })) },
+        flashcards: { create: flashcardCreates(pack.flashcards) },
         quizzes: {
           updateMany: existing.quizzes.map((quizItem) => ({
             where: { id: quizItem.id },

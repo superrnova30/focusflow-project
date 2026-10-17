@@ -22,6 +22,9 @@ const adminRoutes = require("./routes/admin");
 const pushRoutes = require("./routes/push");
 const aiRoutes = require("./routes/ai");
 const premiumRoutes = require("./routes/premium");
+const shopRoutes = require("./routes/shop");
+const schoolRoutes = require("./routes/schools");
+const adminSchoolRoutes = require("./routes/adminSchools");
 const { sendDailyReminders } = require("./lib/reminders");
 const { isEmailConfigured, verifyEmailDelivery } = require("./lib/mailer");
 
@@ -75,6 +78,9 @@ if (String(process.env.ENABLE_AI_DEBUG).toLowerCase() === 'true') {
 
 app.use("/api/ai", aiRoutes);
 app.use("/api/premium", premiumRoutes);
+app.use("/api/shop", shopRoutes);
+app.use("/api/schools", schoolRoutes);
+app.use("/api/admin/schools", adminSchoolRoutes);
 // History endpoints are declared before the chat router so /ai/conversations
 // is never swallowed by a broader /ai handler.
 app.use("/api/ai", aiConversationRoutes);
@@ -100,6 +106,8 @@ app.use("/api/students", studentRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/game", gameRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/admin/support", require("./routes/adminSupport"));
+app.use("/api/support", require("./routes/support"));
 app.use("/api/push", pushRoutes);
 
 // Fallback 404

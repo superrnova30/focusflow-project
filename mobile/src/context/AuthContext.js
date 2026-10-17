@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
+import { AppState } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import client from "../api/client";
 import { refreshPushRegistration, unregisterPushNotifications, retryOfflineWrites } from "../lib/push";
@@ -8,6 +9,11 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [booting, setBooting] = useState(true);
+  const userRef = useRef(null);
+
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
 
   useEffect(() => {
     (async () => {
@@ -18,7 +24,7 @@ export function AuthProvider({ children }) {
           setUser(data.user);
           // Start optional background work without blocking the boot flow.
           setTimeout(() => {
-            refreshPushRegistration().catch(() => {});
+            refreshPushRegistration(data.user).catch(() => {});
             retryOfflineWrites().catch(() => {});
           }, 0);
         } catch (e) {
@@ -30,6 +36,15 @@ export function AuthProvider({ children }) {
     })();
   }, []);
 
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState !== "active" || !userRef.current) return;
+      refreshPushRegistration(userRef.current).catch(() => {});
+      retryOfflineWrites().catch(() => {});
+    });
+    return () => subscription.remove();
+  }, []);
+
   const login = useCallback(async (email, password) => {
     try {
       const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -37,7 +52,7 @@ export function AuthProvider({ children }) {
       await AsyncStorage.setItem("focusflow_token", data.token);
       setUser(data.user);
       setTimeout(() => {
-        refreshPushRegistration().catch(() => {});
+        refreshPushRegistration(data.user).catch(() => {});
         retryOfflineWrites().catch(() => {});
       }, 0);
       return data.user;
@@ -83,7 +98,7 @@ export function AuthProvider({ children }) {
       await AsyncStorage.setItem("focusflow_token", data.token);
       setUser(data.user);
       setTimeout(() => {
-        refreshPushRegistration().catch(() => {});
+        refreshPushRegistration(data.user).catch(() => {});
       }, 0);
     }
     return data;
@@ -95,7 +110,8 @@ export function AuthProvider({ children }) {
   }, []);
 
   const logout = useCallback(async () => {
-    await unregisterPushNotifications();
+    // Drop this device's token but keep the user's push preference for next login.
+    await unregisterPushNotifications({ clearPreference: false });
     await AsyncStorage.removeItem("focusflow_token");
     setUser(null);
   }, []);

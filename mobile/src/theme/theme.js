@@ -43,3 +43,9 @@ export const THEME = darkColors;
 export const SPACING = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24 };
 export const RADIUS = { sm: 8, md: 12, lg: 16, xl: 24, pill: 999 };
 
+export function answerMarkStyle(isDark) {
+  return isDark
+    ? { backgroundColor: "rgba(74, 222, 148, 0.30)", color: "#ECFDF5" }
+    : { backgroundColor: "#BBF7D0", color: "#065F46" };
+}
+

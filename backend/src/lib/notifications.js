@@ -218,6 +218,7 @@ function notificationActorSelect() {
     name: true,
     profilePicture: true,
     school: true,
+    schoolId: true,
     course: true,
     yearLevel: true,
     section: true,

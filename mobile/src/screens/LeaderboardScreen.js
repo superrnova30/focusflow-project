@@ -572,7 +572,7 @@ const createStyles = (colors, isWide, compact) =>
     avatar: {
       width: compact ? 38 : 43,
       height: compact ? 38 : 43,
-      borderRadius: compact ? 12 : 14,
+      borderRadius: compact ? 19 : 22,
       alignItems: "center",
       justifyContent: "center",
       marginLeft: compact ? 5 : 8,

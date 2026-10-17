@@ -162,7 +162,7 @@ async function settlePaidPayment({ payment, invoice, source }) {
   if (payment.status === 'PAID') return { alreadySettled: true };
 
   if (!invoiceMatchesPayment(payment, invoice)) {
-    console.error('[premium] Invoice amount/currency mismatch — refusing upgrade', {
+    console.error('[premium] Invoice amount/currency mismatch — refusing settlement', {
       paymentId: payment.id,
       paymentAmount: payment.amount,
       invoiceAmount: invoice && invoice.amount,
@@ -171,16 +171,59 @@ async function settlePaidPayment({ payment, invoice, source }) {
   }
 
   const paidAt = invoice && invoice.paid_at ? new Date(invoice.paid_at) : new Date();
+  const paymentUpdate = {
+    status: 'PAID',
+    paidAt,
+    paymentMethod: invoice && (invoice.payment_method || invoice.payment_channel) || null,
+    xenditInvoiceId: (invoice && invoice.id) || payment.xenditInvoiceId || undefined,
+    rawPayload: invoice ? { settledFrom: source, invoice } : { settledFrom: source },
+  };
+
+  if (payment.kind === 'coins') {
+    const coins = Math.max(0, Number(payment.coinsGranted) || 0);
+    if (coins <= 0) {
+      throw new Error('Coin pack is missing a server-side coin amount');
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const flipped = await tx.payment.updateMany({
+        where: { id: payment.id, status: 'PENDING' },
+        data: paymentUpdate,
+      });
+      if (flipped.count === 0) {
+        const existing = await tx.payment.findUnique({ where: { id: payment.id } });
+        return { alreadySettled: true, payment: existing };
+      }
+
+      const user = await tx.user.update({
+        where: { id: payment.userId },
+        data: { coins: { increment: coins } },
+      });
+
+      await tx.activityLog.create({
+        data: {
+          userId: payment.userId,
+          action: 'coins_purchased',
+          meta: {
+            paymentId: payment.id,
+            coins,
+            amount: payment.amount,
+            currency: payment.currency,
+            source,
+          },
+        },
+      });
+
+      const updatedPayment = await tx.payment.findUnique({ where: { id: payment.id } });
+      return { alreadySettled: false, payment: updatedPayment, user };
+    });
+
+    return result;
+  }
 
   const updatedPayment = await prisma.payment.update({
     where: { id: payment.id },
-    data: {
-      status: 'PAID',
-      paidAt,
-      paymentMethod: invoice && (invoice.payment_method || invoice.payment_channel) || null,
-      xenditInvoiceId: (invoice && invoice.id) || payment.xenditInvoiceId || undefined,
-      rawPayload: invoice ? { settledFrom: source, invoice } : { settledFrom: source },
-    },
+    data: paymentUpdate,
   });
 
   const user = await grantPremium({

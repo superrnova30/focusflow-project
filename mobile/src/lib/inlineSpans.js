@@ -269,7 +269,35 @@ export function htmlToBlocks(html) {
   };
 
   Array.from(root.childNodes || []).forEach(walkTop);
+  if (!blocks.length) {
+    const text = String(root.textContent || "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\n+/g, "\n")
+      .trim();
+    if (text) return [{ type: "text", text, marks: [], spans: [{ text, marks: [] }] }];
+  }
   return blocks;
+}
+
+export function blocksHaveContent(blocks) {
+  return (Array.isArray(blocks) ? blocks : []).some((block) => {
+    const text = String(block?.text || "").trim();
+    const spanText = Array.isArray(block?.spans)
+      ? block.spans.map((span) => String(span?.text || "")).join("").trim()
+      : "";
+    return Boolean(text || spanText);
+  });
+}
+
+export function descriptionBlocksForSave(blocks) {
+  const next = (Array.isArray(blocks) ? blocks : []).filter((block) => {
+    const text = String(block?.text || "").trim();
+    const spanText = Array.isArray(block?.spans)
+      ? block.spans.map((span) => String(span?.text || "")).join("").trim()
+      : "";
+    return Boolean(text || spanText);
+  });
+  return next.length ? next : null;
 }
 
 export function blocksToHtml(blocks) {

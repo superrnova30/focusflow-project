@@ -154,8 +154,14 @@ function todayKey() {
  * at least one registered push token. Called by the scheduler.
  */
 async function sendDailyReminders() {
+  // Respect both the daily-reminder preference and the master push toggle.
+  // Users who disabled Push notifications must never receive remote reminders.
   const users = await prisma.user.findMany({
-    where: { remindersEnabled: true, deviceTokens: { some: {} } },
+    where: {
+      remindersEnabled: true,
+      pushNotificationsEnabled: true,
+      deviceTokens: { some: {} },
+    },
     include: {
       deviceTokens: {
         select: { token: true, timezone: true, lastReminderKey: true },

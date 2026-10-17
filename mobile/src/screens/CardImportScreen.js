@@ -18,6 +18,8 @@ import { Input, Button } from "../components/Inputs";
 import { useTheme } from "../context/ThemeContext";
 import client from "../api/client";
 import { handleLimitError } from "../lib/upgradePrompt";
+import HighlightedAnswer from "../components/HighlightedAnswer";
+import { finalizeGeneratedCard, pickAnswerHighlight } from "../lib/flashcardAnswer";
 
 const SOURCES = [
   { key: "topic", emoji: "💡", label: "Type a topic" },
@@ -133,7 +135,9 @@ if (source === "notes" && !notes.trim()) {
       }
 
       const { data } = await client.post("/flashcards/magic-import", payload, { timeout: 120000 });
-      const cards = (data.flashcards || []).filter((c) => c.front && c.back);
+      const cards = (data.flashcards || [])
+        .map((card) => finalizeGeneratedCard(card) || card)
+        .filter((c) => c.front && c.back && c.answerHighlight);
       if (cards.length === 0) {
         Alert.alert("No cards", "The AI didn't return any flashcards. Please try again.");
         return;
@@ -150,7 +154,11 @@ if (source === "notes" && !notes.trim()) {
 
   const updateCard = (index, field, text) => {
     const next = [...generatedCards];
-    next[index] = { ...next[index], [field]: text };
+    const card = { ...next[index], [field]: text };
+    if (field === "back" || field === "front") {
+      card.answerHighlight = pickAnswerHighlight(card.front, card.back, card.answerHighlight);
+    }
+    next[index] = card;
     setGeneratedCards(next);
   };
 
@@ -187,7 +195,12 @@ if (source === "notes" && !notes.trim()) {
     setSaving(true);
     try {
       const { data } = await client.post("/flashcards/magic-import", {
-        cards: valid.map((c) => ({ front: c.front.trim(), back: c.back.trim() })),
+        cards: valid.map((c) => ({
+          front: c.front.trim(),
+          back: c.back.trim(),
+          answerHighlight: c.answerHighlight,
+          explanation: c.explanation || "",
+        })),
         collectionId: creatingNew ? undefined : collectionId,
         collectionName: creatingNew ? newCollectionName.trim() : undefined,
       });
@@ -318,6 +331,17 @@ if (source === "notes" && !notes.trim()) {
                 <Input value={card.front} onChangeText={(t) => updateCard(index, "front", t)} multiline style={{ minHeight: 60, textAlignVertical: "top" }} />
                 <Text style={styles.fieldLabel}>BACK</Text>
                 <Input value={card.back} onChangeText={(t) => updateCard(index, "back", t)} multiline style={{ minHeight: 60, textAlignVertical: "top" }} />
+                {card.back?.trim() ? (
+                  <View style={[styles.highlightPreview, { backgroundColor: colors.mintSoft, borderColor: colors.mint }]}>
+                    <Text style={[styles.highlightCaption, { color: colors.mint }]}>HIGHLIGHTED ANSWER</Text>
+                    <HighlightedAnswer
+                      card={card}
+                      text={card.back}
+                      highlight={card.answerHighlight}
+                      style={[styles.highlightBody, { color: colors.text }]}
+                    />
+                  </View>
+                ) : null}
               </Card>
             ))}
 
@@ -418,6 +442,15 @@ const useStyles = (colors) =>
     cardIndex: { fontSize: 11, fontWeight: "800", letterSpacing: 1 },
     removeText: { fontSize: 12.5, fontWeight: "700" },
     fieldLabel: { color: colors.textMuted, fontSize: 10.5, fontWeight: "700", letterSpacing: 0.5, marginBottom: 6, marginTop: 4 },
+    highlightPreview: {
+      marginTop: 10,
+      borderWidth: 1,
+      borderRadius: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+    },
+    highlightCaption: { fontSize: 10, fontWeight: "800", letterSpacing: 0.6, marginBottom: 4 },
+    highlightBody: { fontSize: 14, lineHeight: 21, fontWeight: "600" },
     collectionWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 4 },
     collectionChip: {
       borderWidth: 1, borderColor: colors.border, borderRadius: 999, paddingVertical: 8, paddingHorizontal: 14,

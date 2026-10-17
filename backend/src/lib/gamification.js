@@ -9,6 +9,7 @@ const { isPremiumActive } = require("./premium");
 
 const LEVEL_XP_STEP = 500;
 const MAX_HEARTS = 5;
+const MAX_STREAK_FREEZES = 5;
 const HEART_REFILL_MS = 24 * 60 * 60 * 1000;
 const STREAK_LEVELS = [
   { key: "starting", name: "Getting started", minDays: 0 },
@@ -23,16 +24,25 @@ const STREAK_LEVELS = [
   { key: "cyan", name: "Eternal", minDays: 1000 },
 ];
 
+function normalizeXpAmount(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  // Preserve half-EXP awards (e.g. 2.5) without float drift.
+  return Math.round(n * 10) / 10;
+}
+
 function levelForXp(xp) {
-  return Math.floor(xp / LEVEL_XP_STEP) + 1;
+  return Math.floor(Number(xp) / LEVEL_XP_STEP) + 1;
 }
 
 function xpWithinLevel(xp) {
-  return xp % LEVEL_XP_STEP;
+  const within = Number(xp) % LEVEL_XP_STEP;
+  return Math.round(within * 10) / 10;
 }
 
 function xpForNextLevel(xp) {
-  return LEVEL_XP_STEP - (xp % LEVEL_XP_STEP);
+  const remaining = LEVEL_XP_STEP - (Number(xp) % LEVEL_XP_STEP);
+  return Math.round(remaining * 10) / 10;
 }
 
 function normalizeTimezone(value) {
@@ -60,6 +70,14 @@ function previousDayKey(day) {
   const date = new Date(`${day}T12:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() - 1);
   return date.toISOString().slice(0, 10);
+}
+
+function daysBetweenKeys(from, to) {
+  if (!from || !to) return Number.POSITIVE_INFINITY;
+  const start = new Date(`${from}T12:00:00.000Z`);
+  const end = new Date(`${to}T12:00:00.000Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return Number.POSITIVE_INFINITY;
+  return Math.round((end.getTime() - start.getTime()) / 86400000);
 }
 
 function getStreakLevel(days) {
@@ -91,13 +109,24 @@ async function bumpStreakOnce(userId, timezoneOverride) {
     let resultingStreak = user.streakCount;
 
     const data = {};
+    let freezeUsed = 0;
     if (last !== today) {
       const yesterday = previousDayKey(today);
-      resultingStreak = timezoneChanged && last === yesterday
-        ? Math.max(1, user.streakCount)
-        : last === yesterday
-          ? user.streakCount + 1
-          : 1;
+      if (timezoneChanged && last === yesterday) {
+        resultingStreak = Math.max(1, user.streakCount);
+      } else if (last === yesterday) {
+        resultingStreak = user.streakCount + 1;
+      } else {
+        const missedDays = Math.max(0, daysBetweenKeys(last, today) - 1);
+        const availableFreezes = Math.max(0, user.streakFreezes || 0);
+        if (missedDays > 0 && availableFreezes >= missedDays) {
+          freezeUsed = missedDays;
+          resultingStreak = user.streakCount + 1;
+          data.streakFreezes = { decrement: missedDays };
+        } else {
+          resultingStreak = 1;
+        }
+      }
       data.streakCount = resultingStreak;
       data.longestStreak = Math.max(user.longestStreak, resultingStreak);
       data.lastActiveDate = today;
@@ -134,7 +163,17 @@ async function bumpStreakOnce(userId, timezoneOverride) {
       });
     }
 
-    return { ...updated, streakCoinsEarned, streakBumped: last !== today };
+    if (freezeUsed > 0) {
+      await tx.activityLog.create({
+        data: {
+          userId,
+          action: "streak_freeze_used",
+          meta: { used: freezeUsed, streak: resultingStreak },
+        },
+      });
+    }
+
+    return { ...updated, streakCoinsEarned, streakBumped: last !== today, freezeUsed };
   }, { isolationLevel: "Serializable" });
 }
 
@@ -301,19 +340,29 @@ async function syncHeartRefill(user) {
   });
 }
 
+/** Go Unlimited subscribers keep a full heart bar and are never locked out. */
+async function syncPremiumHearts(user) {
+  if (!user || !isPremiumActive(user)) return user;
+  if (user.hearts === MAX_HEARTS && !user.heartsDepletedAt) return user;
+  return prisma.user.update({
+    where: { id: user.id },
+    data: { hearts: MAX_HEARTS, heartsDepletedAt: null },
+  });
+}
+
 async function loadUserGamification(userId) {
   let user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) return null;
   const { syncDailyUsage } = require("./featureLimits");
   user = await syncDailyUsage(user);
   user = await syncHeartRefill(user);
+  user = await syncPremiumHearts(user);
   return user;
 }
 
 /**
  * Persist a missed-answer heart loss. Basic students lock at 0 for 24h.
- * Premium students still lose a heart so the HUD updates, but they are never
- * locked out — hitting 0 instantly refills the bar.
+ * Go Unlimited subscribers never lose hearts and are never locked out.
  */
 async function loseHeart(userId, source = "wrong_answer") {
   let user = await loadUserGamification(userId);
@@ -324,7 +373,37 @@ async function loseHeart(userId, source = "wrong_answer") {
   }
 
   const premium = isPremiumActive(user);
-  if (!premium && user.hearts <= 0) {
+  if (premium) {
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: {
+        hearts: MAX_HEARTS,
+        heartsDepletedAt: null,
+        wrongAnswers: { increment: 1 },
+        answerCombo: 0,
+      },
+    });
+    await prisma.activityLog.create({
+      data: {
+        userId,
+        action: "hearts_change",
+        meta: { from: user.hearts, to: MAX_HEARTS, source, unlimitedHearts: true },
+      },
+    });
+    return {
+      user: updated,
+      from: user.hearts,
+      hearts: MAX_HEARTS,
+      coins: updated.coins || 0,
+      gameOver: false,
+      heartsBlocked: false,
+      heartsRefillAt: null,
+      unlimitedHearts: true,
+      unlimitedRefill: false,
+    };
+  }
+
+  if (user.hearts <= 0) {
     const err = new Error(heartsDepletedPayload(user).error);
     err.status = 403;
     err.payload = heartsDepletedPayload(user);
@@ -340,12 +419,7 @@ async function loseHeart(userId, source = "wrong_answer") {
     answerCombo: 0,
   };
 
-  if (nextHearts <= 0 && premium) {
-    nextHearts = MAX_HEARTS;
-    data.hearts = MAX_HEARTS;
-    data.heartsDepletedAt = null;
-    unlimitedRefill = true;
-  } else if (nextHearts <= 0) {
+  if (nextHearts <= 0) {
     data.heartsDepletedAt = new Date();
   } else {
     data.heartsDepletedAt = null;
@@ -383,7 +457,7 @@ const COMBO_COIN_REWARD = 1;
 const COMBO_BONUS_XP = 50;
 
 async function awardCorrectAnswer(userId, { baseXp = 0 } = {}) {
-  const xpBase = Math.max(0, Math.floor(Number(baseXp) || 0));
+  const xpBase = Math.max(0, normalizeXpAmount(baseXp));
   const updated = await prisma.$transaction(async (tx) => {
     const user = await tx.user.findUnique({ where: { id: userId } });
     if (!user) return null;
@@ -391,8 +465,8 @@ async function awardCorrectAnswer(userId, { baseXp = 0 } = {}) {
     const comboHit = nextCombo % COMBO_STEP === 0;
     const bonusXp = comboHit ? COMBO_BONUS_XP : 0;
     const coinsEarned = comboHit ? COMBO_COIN_REWARD : 0;
-    const xpAwarded = xpBase + bonusXp;
-    const nextXp = (user.xp || 0) + xpAwarded;
+    const xpAwarded = normalizeXpAmount(xpBase + bonusXp);
+    const nextXp = normalizeXpAmount((user.xp || 0) + xpAwarded);
     const data = {
       correctAnswers: { increment: 1 },
       answerCombo: nextCombo,
@@ -419,8 +493,40 @@ async function awardCorrectAnswer(userId, { baseXp = 0 } = {}) {
   return updated;
 }
 
+async function adjustXp(userId, delta, { action, meta = {}, countCorrect = false } = {}) {
+  const amount = normalizeXpAmount(delta);
+  if (!amount) return null;
+  const updated = await prisma.$transaction(async (tx) => {
+    const user = await tx.user.findUnique({ where: { id: userId } });
+    if (!user) return null;
+    const nextXp = Math.max(0, normalizeXpAmount((user.xp || 0) + amount));
+    const data = {
+      xp: nextXp,
+      currentLevel: levelForXp(nextXp),
+    };
+    if (amount > 0) {
+      data.totalXpEarned = { increment: amount };
+    }
+    if (countCorrect) {
+      data.correctAnswers = { increment: 1 };
+      data.answerCombo = (user.answerCombo || 0) + 1;
+    }
+    const row = await tx.user.update({ where: { id: userId }, data });
+    await tx.activityLog.create({
+      data: {
+        userId,
+        action: action || (amount > 0 ? "xp_gain" : "xp_loss"),
+        meta: { amount, ...meta },
+      },
+    });
+    return { user: row, amount };
+  });
+  return updated;
+}
+
 module.exports = {
   bumpStreak,
+  normalizeXpAmount,
   levelForXp,
   xpWithinLevel,
   xpForNextLevel,
@@ -433,11 +539,13 @@ module.exports = {
   heartsDepletedPayload,
   loseHeart,
   awardCorrectAnswer,
+  adjustXp,
   COMBO_STEP,
   COMBO_COIN_REWARD,
   COMBO_BONUS_XP,
   LEVEL_XP_STEP,
   MAX_HEARTS,
+  MAX_STREAK_FREEZES,
   HEART_REFILL_MS,
   STREAK_LEVELS,
   getStreakLevel,

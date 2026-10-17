@@ -270,9 +270,9 @@ export default function NoteImportScreen({ navigation }) {
                 <Ionicons name="sparkles" size={26} color={colors.violet} />
               </View>
               <Text style={styles.title}>Magic Import</Text>
-              <Text style={styles.subtitle}>
+        <Text style={styles.subtitle}>
                 Turn a topic, pasted notes, or uploaded document into structured study notes with AI.
-              </Text>
+        </Text>
               {!importedNote ? (
                 <View style={styles.stepRow}>
                   <View style={[styles.stepPill, { backgroundColor: colors.surface, borderColor: colors.border }]}>
@@ -295,8 +295,8 @@ export default function NoteImportScreen({ navigation }) {
                   <View style={[styles.sourceGrid, isWide && styles.sourceGridWide]}>
                     {SOURCES.map((item) => {
                       const active = source === item.key;
-                      return (
-                        <Pressable
+                return (
+                  <Pressable
                           key={item.key}
                           onPress={() => !generating && setSource(item.key)}
                           disabled={generating}
@@ -315,10 +315,10 @@ export default function NoteImportScreen({ navigation }) {
                           </View>
                           <Text style={[styles.sourceTitle, { color: active ? colors.text : colors.textMuted }]}>{item.label}</Text>
                           <Text style={styles.sourceDesc}>{item.desc}</Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
+                  </Pressable>
+                );
+              })}
+            </View>
                 </View>
 
                 <View style={[styles.panel, { backgroundColor: colors.surface, borderColor: colors.border }]}>
@@ -339,12 +339,12 @@ export default function NoteImportScreen({ navigation }) {
 
                   {source === "notes" ? (
                     <TextInput
-                      value={notes}
-                      onChangeText={setNotes}
+                    value={notes}
+                    onChangeText={setNotes}
                       editable={!generating}
                       placeholder="Paste lecture notes, textbook excerpts, or study text here…"
                       placeholderTextColor={colors.textMuted}
-                      multiline
+                    multiline
                       textAlignVertical="top"
                       style={[styles.input, styles.textArea, { color: colors.text, borderColor: colors.border, backgroundColor: colors.bg }]}
                     />
@@ -368,15 +368,15 @@ export default function NoteImportScreen({ navigation }) {
                           </Text>
                           <Text style={styles.fileHint}>Max 10 MB · AI extracts text and builds your guide</Text>
                         </View>
-                      </Pressable>
+                  </Pressable>
                     </>
                   ) : null}
-                </View>
+            </View>
 
                 <View style={[styles.panel, { backgroundColor: colors.surface, borderColor: colors.border }]}>
                   <Text style={styles.panelLabel}>Visibility</Text>
                   <VisibilityPicker value={isPublic} onChange={setIsPublic} colors={colors} compact />
-                </View>
+              </View>
 
                 <Pressable
                   onPress={runImport}
@@ -395,8 +395,8 @@ export default function NoteImportScreen({ navigation }) {
                     <>
                       <Ionicons name="sparkles" size={20} color="#fff" />
                       <Text style={styles.primaryBtnText}>Import notes</Text>
-                    </>
-                  )}
+          </>
+        )}
                 </Pressable>
 
                 {generating ? (
@@ -449,7 +449,7 @@ export default function NoteImportScreen({ navigation }) {
 
                 <View style={[styles.panel, { backgroundColor: colors.surface, borderColor: colors.border }]}>
                   <NoteContentPreview blocks={importedNote.contentJson || []} />
-                </View>
+              </View>
 
                 <View style={[styles.actions, isWide && styles.actionsWide]}>
                   <Pressable
@@ -459,14 +459,14 @@ export default function NoteImportScreen({ navigation }) {
                     <Ionicons name="journal-outline" size={20} color="#fff" />
                     <Text style={styles.primaryBtnText}>Go to Your Notes</Text>
                   </Pressable>
-                  <Pressable
+              <Pressable
                     onPress={() => navigation.navigate("NoteView", { note: importedNote })}
                     style={({ pressed }) => [styles.secondaryBtn, { borderColor: colors.border, backgroundColor: colors.surface }, pressed && styles.pressed]}
-                  >
+              >
                     <Ionicons name="eye-outline" size={18} color={colors.text} />
                     <Text style={[styles.secondaryBtnText, { color: colors.text }]}>View note</Text>
-                  </Pressable>
-                </View>
+              </Pressable>
+            </View>
 
                 <Pressable onPress={editImportedNote} style={({ pressed }) => [styles.linkBtn, pressed && styles.pressed]}>
                   <Text style={[styles.linkBtnText, { color: colors.violet }]}>Edit imported note</Text>
@@ -478,7 +478,7 @@ export default function NoteImportScreen({ navigation }) {
               </>
             )}
           </View>
-        </ScrollView>
+      </ScrollView>
       </KeyboardAvoidingView>
 
     </Screen>

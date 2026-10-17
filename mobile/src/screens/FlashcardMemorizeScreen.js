@@ -22,22 +22,26 @@ import {
   resolveCollectionId,
   normalizeMemorizePayload,
   cardsToMemorizeQuestions,
+  applyQuestionStyle,
+  DEFAULT_MEMORIZE_SETTINGS,
 } from "../lib/collectionStudy";
 import { RADIUS, SPACING } from "../theme/theme";
 import { handleLimitError, startGoUnlimitedCheckout } from "../lib/upgradePrompt";
 import HeartsBlockedPanel from "../components/HeartsBlockedPanel";
-import { formatRefillCountdown } from "../lib/hearts";
+import { formatRefillCountdown, isHeartsBlocked } from "../lib/hearts";
 import { setCachedCoins } from "../lib/coins";
+import { notifyTasksChanged } from "../lib/tasks";
+import HighlightedAnswer from "../components/HighlightedAnswer";
 
 const MAX_HEARTS = 5;
-const XP_PER_CORRECT = 200;
+const XP_PER_CORRECT = 5;
 const OPTION_LABELS = ["A", "B", "C", "D"];
 
 const QUESTION_STYLE_OPTIONS = [
   { id: "mixed", label: "Mixed", desc: "Rotate MCQ, typing, and flashcards" },
   { id: "mcq", label: "Multiple choice only", desc: "Always show answer choices" },
   { id: "typing", label: "Typing preferred", desc: "Type the answer from memory" },
-  { id: "flashcards", label: "Flashcards only", desc: "Flip cards and self-check" },
+  { id: "flashcards", label: "Flashcards only", desc: "Reveal the answer, then continue" },
 ];
 
 const emptyQuestionState = () => ({
@@ -51,6 +55,9 @@ const emptyQuestionState = () => ({
   revealedAnswer: "",
   usedHint3: false,
   flipped: false,
+  revealed: false,
+  skipped: false,
+  xpAwarded: 0,
 });
 
 export default function FlashcardMemorizeScreen({ route, navigation }) {
@@ -69,7 +76,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
   const [questions, setQuestions] = useState([]);
   const [index, setIndex] = useState(0);
   const [game, setGame] = useState(null);
-  const [settings, setSettings] = useState(null);
+  const [settings, setSettings] = useState(DEFAULT_MEMORIZE_SETTINGS);
   const [lightningSeconds, setLightningSeconds] = useState(15);
   const [questionStates, setQuestionStates] = useState([]);
   const [sessionCorrect, setSessionCorrect] = useState(0);
@@ -78,6 +85,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
   const [phase, setPhase] = useState("quiz");
   const [showSettings, setShowSettings] = useState(false);
   const [showHints, setShowHints] = useState(false);
+  const [hintBusy, setHintBusy] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [timerLeft, setTimerLeft] = useState(null);
   const [refillLabel, setRefillLabel] = useState("");
@@ -98,18 +106,21 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
   useLayoutEffect(() => {
     navigation.setOptions({
       headerShown: true,
-      title: "Memorize",
+      title: phase === "complete" ? "Deck complete" : "Memorize",
       headerTitleStyle: { fontWeight: "800", fontSize: 17 },
       headerBackTitle: "Modes",
       headerTintColor: colors.text,
       headerStyle: { backgroundColor: colors.bg },
-      headerRight: () => (
-        <Pressable onPress={() => setShowSettings(true)} hitSlop={12} style={{ marginRight: 4 }}>
-          <Ionicons name="settings-outline" size={22} color={colors.text} />
-        </Pressable>
-      ),
+      headerRight:
+        phase === "complete"
+          ? undefined
+          : () => (
+              <Pressable onPress={() => setShowSettings(true)} hitSlop={12} style={{ marginRight: 4 }}>
+                <Ionicons name="settings-outline" size={22} color={colors.text} />
+              </Pressable>
+            ),
     });
-  }, [navigation, colors.text, colors.bg]);
+  }, [navigation, colors.text, colors.bg, phase]);
 
   const loadSession = useCallback(async () => {
     if (!collectionId) {
@@ -129,7 +140,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
         const { data: collectionData } = await client.get(`/flashcards/collections/${collectionId}`);
         const cards = collectionData.collection?.flashcards || [];
         setCollection(collectionData.collection);
-        qs = cardsToMemorizeQuestions(cards);
+        qs = cardsToMemorizeQuestions(cards, loadedGame?.settings?.questionStyle);
       }
 
       if (!qs.length) {
@@ -142,22 +153,23 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
       setQuestions(qs);
       setQuestionStates(qs.map(() => emptyQuestionState()));
       setGame(loadedGame);
-      setSettings(loadedGame?.settings || null);
+      setSettings(loadedGame?.settings || DEFAULT_MEMORIZE_SETTINGS);
       setLightningSeconds(seconds);
       setIndex(0);
       setSessionCorrect(0);
       setSessionXp(0);
-      setPhase(loadedGame?.heartsBlocked ? "blocked" : "quiz");
+      setPhase(isHeartsBlocked(loadedGame) ? "blocked" : "quiz");
     } catch (e) {
       try {
         const { data: stateRes } = await client.get("/game/state");
-        if (stateRes.state?.heartsBlocked || (stateRes.state?.hearts ?? 5) <= 0) {
+        if (isHeartsBlocked(stateRes.state)) {
           setGame((g) => ({
             ...(g || {}),
             hearts: 0,
             coins: stateRes.state.coins || 0,
             heartsBlocked: true,
             heartsRefillAt: stateRes.state.heartsRefillAt,
+            unlimitedHearts: stateRes.state.unlimitedHearts,
           }));
           setPhase("blocked");
           return;
@@ -169,7 +181,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
         const { data: collectionData } = await client.get(`/flashcards/collections/${collectionId}`);
         const cards = collectionData.collection?.flashcards || [];
         setCollection(collectionData.collection);
-        const qs = cardsToMemorizeQuestions(cards);
+        const qs = cardsToMemorizeQuestions(cards, settings?.questionStyle || game?.settings?.questionStyle);
         if (qs.length) {
           setQuestions(qs);
           setQuestionStates(qs.map(() => emptyQuestionState()));
@@ -227,14 +239,32 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
     });
   };
 
-  const saveSettings = async (nextSettings) => {
+  const saveSettings = async (nextSettings, { restyle = false, close = false } = {}) => {
+    const merged = { ...DEFAULT_MEMORIZE_SETTINGS, ...(settings || {}), ...nextSettings };
+    setSettings(merged);
+    if (restyle) {
+      setQuestions((currentQuestions) => applyQuestionStyle(currentQuestions, questionStates, merged.questionStyle));
+      setQuestionStates((prev) =>
+        prev.map((state) =>
+          state?.answered
+            ? state
+            : {
+                ...state,
+                optionsVisible: false,
+                eliminatedOptions: [],
+                flipped: false,
+                revealed: false,
+              }
+        )
+      );
+    }
+    if (close) setShowSettings(false);
     setSavingSettings(true);
     try {
-      const { data } = await client.put("/game/memorize-settings", nextSettings);
+      const { data } = await client.put("/game/memorize-settings", merged);
       setSettings(data.settings);
-      Alert.alert("Settings saved", "Your preferences will apply to future Memorize sessions.");
     } catch (e) {
-      Alert.alert("Error", e?.response?.data?.error || e.message);
+      Alert.alert("Could not save settings", e?.response?.data?.error || e.message);
     } finally {
       setSavingSettings(false);
     }
@@ -246,10 +276,10 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
     timedOut = false,
     skipped = false,
   } = {}) => {
-    if (!current || qState.answered || submitting || phase !== "quiz") return;
-    if (game?.heartsBlocked) {
+    if (!current || qState.answered || submitting || phase !== "quiz") return false;
+    if (isHeartsBlocked(game)) {
       setPhase("blocked");
-      return;
+      return false;
     }
 
     setSubmitting(true);
@@ -262,15 +292,20 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
         skipped,
         selfCorrect,
         usedHint3: qState.usedHint3,
+        answerRevealed: Boolean(qState.revealed || qState.usedHint3),
       });
 
       patchQuestionState({
         answered: true,
         correct: data.correct,
+        selfRatedKnown: Boolean(data.selfRatedKnown),
         selectedAnswer: answer,
+        xpAwarded: data.xpAwarded || 0,
+        skipped,
       });
 
       setGame(data.game);
+      if (data.game?.coins != null) setCachedCoins(data.game.coins);
       if (data.correct) {
         setSessionCorrect((c) => c + 1);
         if (data.xpAwarded) {
@@ -281,11 +316,17 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
         if (data.leveledUp) {
           Alert.alert("Level up!", `You reached level ${data.game.level.current}.`);
         }
-      } else {
-        showFloat("-1 ❤️");
+      } else if (!skipped) {
+        if (data.selfRatedKnown) {
+          showFloat("Reviewed");
+        } else if (current.type === "flashcard" && (qState.revealed || qState.usedHint3) && settings?.questionStyle === "flashcards") {
+          showFloat("Keep practicing");
+        } else {
+          showFloat(data.game?.unlimitedHearts ? "Keep going" : "-1 ❤️");
+        }
       }
 
-      if (data.gameOver) {
+      if (isHeartsBlocked(data.game || { heartsBlocked: data.heartsBlocked, hearts: data.game?.hearts })) {
         setGame((g) => ({
           ...(data.game || g),
           heartsBlocked: true,
@@ -294,7 +335,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
         setPhase("gameover");
       }
     } catch (e) {
-      if (e?.response?.data?.code === "HEARTS_DEPLETED" || e?.response?.data?.heartsBlocked) {
+      if ((e?.response?.data?.code === "HEARTS_DEPLETED" || e?.response?.data?.heartsBlocked) && !game?.unlimitedHearts) {
         setPhase("blocked");
         setGame((g) => ({
           ...g,
@@ -304,39 +345,64 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
           heartsBlocked: true,
           heartsRefillAt: e.response?.data?.heartsRefillAt,
         }));
-        return;
+        return false;
       }
-      if (e?.response?.status === 403 || e?.upgradeRequired) {
-        if (handleLimitError(navigation, e)) return;
+      if ((e?.response?.status === 403 || e?.upgradeRequired) && !game?.unlimitedHearts) {
+        if (handleLimitError(navigation, e)) return false;
         setPhase("blocked");
         setGame((g) => ({
           ...g,
           heartsBlocked: true,
           heartsRefillAt: e.heartsRefillAt || e.response?.data?.heartsRefillAt,
         }));
-      } else {
-        Alert.alert("Error", e?.response?.data?.error || e.message);
+        return false;
       }
+      Alert.alert("Error", e?.response?.data?.error || e.message);
+      return false;
     } finally {
       setSubmitting(false);
     }
+    return true;
+  };
+
+  const revealCard = () => {
+    if (!current || qState.answered || qState.revealed) return;
+    patchQuestionState({
+      revealed: true,
+      flipped: true,
+      revealedAnswer: current.answer,
+    });
   };
 
   const useHint = async (hintType) => {
-    if (!current || qState.answered) return;
+    if (!current || qState.answered || hintBusy) return;
+    if (hintType === 3 && qState.usedHint3 && qState.revealedAnswer) {
+      setShowHints(false);
+      return;
+    }
     if (!game?.unlimitedHints && (game?.hints ?? 0) <= 0) {
       handleLimitError(navigation, {
         upgradeRequired: true,
+        code: "NO_HINTS_REMAINING",
         message: "No hints remaining today. Upgrade to Go Unlimited for unlimited hints.",
       });
       return;
     }
 
+    const visibleOptions =
+      current.type === "mcq"
+        ? (current.options || []).filter((opt) => !qState.eliminatedOptions.includes(opt))
+        : [];
+    if (hintType === 1 && current.type === "mcq") {
+      const remainingWrong = visibleOptions.filter((opt) => opt !== current.answer);
+      if (!remainingWrong.length) {
+        Alert.alert("Already narrowed", "There are no more incorrect choices to remove.");
+        return;
+      }
+    }
+
+    setHintBusy(true);
     try {
-      const visibleOptions =
-        current.type === "mcq"
-          ? (current.options || []).filter((opt) => !qState.eliminatedOptions.includes(opt))
-          : [];
       const { data } = await client.post(`/flashcards/collections/${collectionId}/study/memorize/hint`, {
         cardId: current.cardId,
         hintType,
@@ -346,19 +412,33 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
       setGame((g) => ({ ...g, hints: data.hintsRemaining, unlimitedHints: data.unlimitedHints }));
 
       if (hintType === 1) {
+        const nextOptions = Array.isArray(data.options) && data.options.length >= 2 ? data.options : current.options;
+        if (current.type !== "mcq" && nextOptions?.length) {
+          setQuestions((qs) =>
+            qs.map((question, idx) => (idx === index ? { ...question, type: "mcq", options: nextOptions } : question))
+          );
+        }
         patchQuestionState({
+          optionsVisible: true,
           eliminatedOptions: [...new Set([...(qState.eliminatedOptions || []), ...(data.eliminatedOptions || [])])],
         });
       } else if (hintType === 2) {
-        patchQuestionState({ clue: data.clue });
+        patchQuestionState({ clue: data.clue || qState.clue || "Think about the core idea on this card." });
       } else if (hintType === 3) {
-        patchQuestionState({ revealedAnswer: data.answer, usedHint3: true });
+        const answer = data.answer || current.answer;
+        patchQuestionState({
+          revealedAnswer: answer,
+          usedHint3: true,
+          ...(current.type === "flashcard" ? { revealed: true, flipped: true } : {}),
+        });
       }
       setShowHints(false);
     } catch (e) {
       if (!handleLimitError(navigation, e)) {
         Alert.alert("Hint unavailable", e?.response?.data?.error || e.message);
       }
+    } finally {
+      setHintBusy(false);
     }
   };
 
@@ -392,7 +472,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
         ...(data.state || {}),
         heartsBlocked: data.state?.heartsBlocked,
       }));
-      if (!data.state?.heartsBlocked && (data.state?.hearts || 0) > 0) {
+      if (!isHeartsBlocked(data.state)) {
         setPhase("quiz");
       }
     } catch {
@@ -401,12 +481,19 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
   };
 
   const finishSession = async () => {
+    const answeredCount = (questionStates || []).filter((state) => state?.answered).length;
+    if (answeredCount < questions.length) {
+      Alert.alert("Keep going", "Review every flashcard in this deck before finishing Memorize.");
+      return;
+    }
     try {
       await client.post(`/flashcards/collections/${collectionId}/study/memorize/complete`, {
         correct: sessionCorrect,
         total: questions.length,
+        answered: answeredCount,
         xpEarned: sessionXp,
       });
+      notifyTasksChanged({ collectionId });
       setPhase("complete");
     } catch (e) {
       Alert.alert("Error", e?.response?.data?.error || e.message);
@@ -421,6 +508,15 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
     setIndex((i) => i + 1);
   };
 
+  const continueAfterReveal = async () => {
+    if (!current) return;
+    if (!qState.answered) {
+      const ok = await submitAnswer({ skipped: true });
+      if (ok === false) return;
+    }
+    goNext();
+  };
+
   const goPrev = () => {
     if (index > 0) setIndex((i) => i - 1);
   };
@@ -431,7 +527,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
 
   // Lightning round timer
   useEffect(() => {
-    if (phase !== "quiz" || !settings?.lightningRounds || !current || qState.answered) {
+    if (phase !== "quiz" || !settings?.lightningRounds || !current || qState.answered || qState.revealed) {
       setTimerLeft(null);
       return undefined;
     }
@@ -460,14 +556,21 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
   }, [current, qState.eliminatedOptions]);
 
   const renderHearts = () =>
-    [0, 1, 2, 3, 4].map((i) => (
-      <Ionicons
-        key={i}
-        name={i < (game?.hearts ?? 0) ? "heart" : "heart-outline"}
-        size={compact ? 16 : 18}
-        color={i < (game?.hearts ?? 0) ? "#FF5A76" : colors.border}
-      />
-    ));
+    game?.unlimitedHearts ? (
+      <>
+        <Ionicons name="heart" size={compact ? 16 : 18} color="#FF5A76" />
+        <Text style={{ color: "#FF5A76", fontWeight: "800", marginLeft: 2 }}>∞</Text>
+      </>
+    ) : (
+      [0, 1, 2, 3, 4].map((i) => (
+        <Ionicons
+          key={i}
+          name={i < (game?.hearts ?? 0) ? "heart" : "heart-outline"}
+          size={compact ? 16 : 18}
+          color={i < (game?.hearts ?? 0) ? "#FF5A76" : colors.border}
+        />
+      ))
+    );
 
   if (loading) {
     return (
@@ -512,21 +615,149 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
   }
 
   if (phase === "complete") {
-    const pct = questions.length ? Math.round((sessionCorrect / questions.length) * 100) : 0;
+    const total = questions.length;
+    const pct = total ? Math.round((sessionCorrect / total) * 100) : 0;
+    const missed = Math.max(0, total - sessionCorrect);
+    const skippedCount = questionStates.filter((state) => state?.skipped).length;
+    const tone = pct >= 80 ? "mint" : pct >= 50 ? "amber" : "tomato";
+    const toneColor = colors[tone];
+    const toneSoft = colors[`${tone}Soft`];
+    const headline =
+      pct >= 90
+        ? "Outstanding recall"
+        : pct >= 70
+          ? "Great work"
+          : pct >= 40
+            ? "Solid start"
+            : "Keep going";
+    const subtitle =
+      pct >= 90
+        ? "You know this deck cold. A quick review later will keep it fresh."
+        : pct >= 70
+          ? "This deck is sticking. One more round will lock in the rest."
+          : pct >= 40
+            ? "You're building memory. Review the missed cards and try again."
+            : "Review the answers, then run Memorize again to raise your score.";
+    const missedCards = questions
+      .map((item, idx) => ({ item, state: questionStates[idx] }))
+      .filter(({ state }) => state?.answered && !state.correct)
+      .slice(0, 6);
+    const stats = [
+      { label: "Correct", value: String(sessionCorrect), icon: "checkmark-circle", color: colors.mint, soft: colors.mintSoft },
+      { label: "Missed", value: String(missed), icon: "close-circle", color: colors.tomato, soft: colors.tomatoSoft },
+      { label: "XP earned", value: `+${sessionXp}`, icon: "flash", color: colors.amber, soft: colors.amberSoft },
+      { label: "Cards", value: String(total), icon: "layers", color: colors.violet, soft: colors.violetSoft },
+    ];
+
     return (
       <Screen>
-        <View style={styles.center}>
-          <View style={[styles.blockedIcon, { backgroundColor: colors.mintSoft }]}>
-            <Ionicons name="trophy" size={44} color={colors.mint} />
+        <ScrollView
+          contentContainerStyle={styles.completeScroll}
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.completePage}>
+            <View style={[styles.completeHero, { backgroundColor: toneSoft, borderColor: toneColor }]}>
+              <View style={[styles.completeIcon, { backgroundColor: colors.surface }]}>
+                <Ionicons name={pct >= 70 ? "trophy" : pct >= 40 ? "ribbon" : "refresh"} size={32} color={toneColor} />
+              </View>
+              <Text style={styles.completeKicker}>{collection?.name || "This deck"}</Text>
+              <Text style={styles.completeTitle}>Deck complete</Text>
+              <Text style={styles.completeHeadline}>{headline}</Text>
+              <Text style={styles.completeCopy}>{subtitle}</Text>
+            </View>
+
+            <View style={[styles.scorePanel, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+              <View style={[styles.scoreBadge, { backgroundColor: toneSoft, borderColor: toneColor }]}>
+                <Text style={[styles.scorePct, { color: toneColor }]}>{pct}%</Text>
+                <Text style={[styles.scorePctLabel, { color: toneColor }]}>accuracy</Text>
+              </View>
+              <View style={styles.scoreMeta}>
+                <Text style={styles.scoreMetaTitle}>
+                  {sessionCorrect} of {total} correct
+                </Text>
+                <Text style={styles.scoreMetaCopy}>
+                  {skippedCount > 0
+                    ? `${missed} missed · ${skippedCount} skipped · +${sessionXp} XP`
+                    : `${missed} missed · +${sessionXp} XP this round`}
+                </Text>
+                <View style={[styles.scoreTrack, { backgroundColor: colors.border }]}>
+                  <View style={[styles.scoreFill, { width: `${pct}%`, backgroundColor: toneColor }]} />
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.statGrid}>
+              {stats.map((stat) => (
+                <View
+                  key={stat.label}
+                  style={[styles.statCard, { backgroundColor: colors.surface, borderColor: colors.border }]}
+                >
+                  <View style={[styles.statIcon, { backgroundColor: stat.soft }]}>
+                    <Ionicons name={stat.icon} size={16} color={stat.color} />
+                  </View>
+                  <Text style={styles.statValue}>{stat.value}</Text>
+                  <Text style={styles.statLabel}>{stat.label}</Text>
+                </View>
+              ))}
+            </View>
+
+            {game?.level ? (
+              <View style={[styles.completeLevel, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                <Text style={styles.completeLevelLabel}>Level {game.level.current ?? 1}</Text>
+                <View style={[styles.levelTrack, { backgroundColor: colors.border }]}>
+                  <View style={[styles.levelFill, { width: `${levelPct}%`, backgroundColor: colors.amber }]} />
+                </View>
+                <Text style={styles.completeLevelMeta}>
+                  {game.level.xpWithinLevel ?? 0}/{game.level.step ?? 500} XP
+                </Text>
+              </View>
+            ) : null}
+
+            {missedCards.length > 0 ? (
+              <View style={[styles.reviewCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                <Text style={styles.reviewTitle}>Cards to review</Text>
+                {missedCards.map(({ item }, idx) => (
+                  <View
+                    key={item.id || `${item.question}-${idx}`}
+                    style={[styles.reviewRow, idx < missedCards.length - 1 && { borderBottomColor: colors.border, borderBottomWidth: StyleSheet.hairlineWidth }]}
+                  >
+                    <View style={[styles.reviewDot, { backgroundColor: colors.tomatoSoft }]}>
+                      <Ionicons name="close" size={12} color={colors.tomato} />
+                    </View>
+                    <Text style={styles.reviewText} numberOfLines={2}>
+                      {item.question}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+
+            <View style={styles.completeActions}>
+              <Pressable
+                onPress={loadSession}
+                style={({ pressed }) => [
+                  styles.completePrimary,
+                  { backgroundColor: accent.color },
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Ionicons name="refresh" size={18} color="#fff" />
+                <Text style={styles.completePrimaryText}>Study this deck again</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => navigation.goBack()}
+                style={({ pressed }) => [
+                  styles.completeSecondary,
+                  { borderColor: colors.border, backgroundColor: colors.surface },
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Ionicons name="grid-outline" size={18} color={colors.text} />
+                <Text style={[styles.completeSecondaryText, { color: colors.text }]}>Back to study modes</Text>
+              </Pressable>
+            </View>
           </View>
-          <Text style={styles.blockedTitle}>Deck complete!</Text>
-          <Text style={styles.muted}>
-            {sessionCorrect}/{questions.length} correct ({pct}%) · +{sessionXp} XP on {collection?.name || "this deck"}
-          </Text>
-          <Pressable onPress={() => navigation.goBack()} style={({ pressed }) => [styles.primaryBtn, { backgroundColor: colors.mint }, pressed && styles.pressed]}>
-            <Text style={styles.primaryBtnText}>Back to study modes</Text>
-          </Pressable>
-        </View>
+        </ScrollView>
       </Screen>
     );
   }
@@ -542,7 +773,11 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
   }
 
   const optionsShouldHide =
-    current.type === "mcq" && settings?.hideOptionsInitially && !qState.optionsVisible && !qState.answered;
+    current.type === "mcq"
+    && settings?.hideOptionsInitially
+    && settings?.questionStyle !== "mcq"
+    && !qState.optionsVisible
+    && !qState.answered;
 
   return (
     <Screen>
@@ -580,9 +815,9 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
                 </Text>
               </Pressable>
               <Pressable
-                onPress={() => (game?.hearts || 0) <= 0 && setPhase("blocked")}
+                onPress={() => isHeartsBlocked(game) && setPhase("blocked")}
                 accessibilityRole="button"
-                accessibilityLabel={(game?.hearts || 0) <= 0 ? "Out of hearts. Open revive options." : `${game?.hearts || 0} hearts remaining`}
+                accessibilityLabel={game?.unlimitedHearts ? "Unlimited hearts" : (game?.hearts || 0) <= 0 ? "Out of hearts. Open revive options." : `${game?.hearts || 0} hearts remaining`}
                 style={[styles.statPill, { backgroundColor: colors.tomatoSoft }]}
               >
                 {renderHearts()}
@@ -651,7 +886,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
               </View>
             ) : null}
 
-            {qState.revealedAnswer ? (
+            {qState.revealedAnswer && current.type !== "flashcard" ? (
               <View style={[styles.clueBox, { backgroundColor: colors.violetSoft, borderColor: colors.violet }]}>
                 <Ionicons name="eye-outline" size={16} color={colors.violet} />
                 <Text style={[styles.clueText, { color: colors.text }]}>{qState.revealedAnswer}</Text>
@@ -659,7 +894,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
             ) : null}
 
             {/* MCQ */}
-            {current.type === "mcq" ? (
+            {current.type === "mcq" && !qState.revealed ? (
               <>
                 {optionsShouldHide ? (
                   <Pressable
@@ -710,7 +945,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
             ) : null}
 
             {/* Typing */}
-            {current.type === "typing" ? (
+            {current.type === "typing" && !qState.revealed ? (
               <>
                 <TextInput
                   value={qState.typedAnswer}
@@ -736,52 +971,90 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
               </>
             ) : null}
 
-            {/* Flashcard */}
-            {current.type === "flashcard" ? (
-              <>
-                {qState.flipped ? (
-                  <View style={[styles.flipBack, { backgroundColor: colors.bg, borderColor: colors.border }]}>
-                    <Text style={styles.flipLabel}>Answer</Text>
-                    <Text style={styles.flipText}>{current.answer}</Text>
-                  </View>
-                ) : null}
-                {!qState.answered ? (
-                  <View style={styles.flashActions}>
-                    {!qState.flipped ? (
-                      <Pressable
-                        onPress={() => patchQuestionState({ flipped: true })}
-                        style={({ pressed }) => [styles.secondaryBtn, { borderColor: colors.border, flex: 1 }, pressed && styles.pressed]}
-                      >
-                        <Ionicons name="refresh-outline" size={16} color={colors.text} />
-                        <Text style={[styles.secondaryBtnText, { color: colors.text }]}>Flip card</Text>
-                      </Pressable>
-                    ) : (
-                      <>
-                        <Pressable
-                          onPress={() => submitAnswer({ selfCorrect: true })}
-                          style={({ pressed }) => [styles.primaryBtn, { backgroundColor: colors.mint, flex: 1 }, pressed && styles.pressed]}
-                        >
-                          <Text style={styles.primaryBtnText}>I knew it</Text>
-                        </Pressable>
-                        <Pressable
-                          onPress={() => submitAnswer({ selfCorrect: false })}
-                          style={({ pressed }) => [styles.dangerBtn, { borderColor: colors.tomato, flex: 1 }, pressed && styles.pressed]}
-                        >
-                          <Text style={[styles.dangerBtnText, { color: colors.tomato }]}>I missed it</Text>
-                        </Pressable>
-                      </>
-                    )}
-                  </View>
-                ) : null}
-              </>
+            {/* Flashcard — answer is shown after Reveal */}
+            {current.type === "flashcard" && (qState.revealed || qState.answered) ? (
+              <View style={[styles.flipBack, { backgroundColor: colors.bg, borderColor: colors.border }]}>
+                <Text style={styles.flipLabel}>Answer</Text>
+                <HighlightedAnswer
+                  card={current}
+                  text={current.back || current.answer}
+                  highlight={current.answerHighlight}
+                  style={styles.flipText}
+                />
+              </View>
+            ) : null}
+
+            {!qState.answered && !qState.revealed ? (
+              <Pressable
+                onPress={revealCard}
+                style={({ pressed }) => [
+                  styles.primaryBtn,
+                  { backgroundColor: accent.color, marginTop: SPACING.sm },
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Ionicons name="eye-outline" size={16} color="#fff" />
+                <Text style={styles.primaryBtnText}>Reveal</Text>
+              </Pressable>
+            ) : null}
+
+            {current.type === "flashcard" && qState.revealed && !qState.answered ? (
+              <View style={styles.flashActions}>
+                <Pressable
+                  onPress={() => submitAnswer({ selfCorrect: true })}
+                  disabled={submitting}
+                  style={({ pressed }) => [styles.primaryBtn, { backgroundColor: colors.mint, flex: 1 }, pressed && styles.pressed]}
+                >
+                  <Text style={styles.primaryBtnText}>I knew it</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => submitAnswer({ selfCorrect: false })}
+                  disabled={submitting}
+                  style={({ pressed }) => [styles.dangerBtn, { borderColor: colors.tomato, flex: 1 }, pressed && styles.pressed]}
+                >
+                  <Text style={[styles.dangerBtnText, { color: colors.tomato }]}>I missed it</Text>
+                </Pressable>
+              </View>
             ) : null}
 
             {/* Feedback */}
-            {qState.answered ? (
-              <View style={[styles.feedback, { backgroundColor: qState.correct ? colors.mintSoft : colors.tomatoSoft }]}>
-                <Text style={{ color: qState.correct ? colors.mint : colors.tomato, fontWeight: "800" }}>
-                  {qState.correct ? `Correct! +${qState.usedHint3 ? "100" : XP_PER_CORRECT} XP` : `Incorrect — ${current.answer}`}
+            {qState.answered && !qState.skipped ? (
+              <View
+                style={[
+                  styles.feedback,
+                  {
+                    backgroundColor: qState.correct
+                      ? colors.mintSoft
+                      : qState.selfRatedKnown
+                        ? colors.violetSoft
+                        : colors.tomatoSoft,
+                  },
+                ]}
+              >
+                <Text
+                  style={{
+                    color: qState.correct ? colors.mint : qState.selfRatedKnown ? colors.violet : colors.tomato,
+                    fontWeight: "800",
+                  }}
+                >
+                  {qState.correct
+                    ? `Correct! +${qState.xpAwarded || XP_PER_CORRECT} XP`
+                    : qState.selfRatedKnown
+                      ? "Reviewed — no EXP after revealing"
+                      : `Incorrect — ${current.answer}`}
                 </Text>
+              </View>
+            ) : null}
+
+            {qState.answered && current.type !== "flashcard" && (current.back || current.answer) ? (
+              <View style={[styles.flipBack, { backgroundColor: colors.bg, borderColor: colors.border }]}>
+                <Text style={styles.flipLabel}>Answer</Text>
+                <HighlightedAnswer
+                  card={current}
+                  text={current.back || current.answer}
+                  highlight={current.answerHighlight}
+                  style={styles.flipText}
+                />
               </View>
             ) : null}
 
@@ -789,18 +1062,28 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
               {floatText ? <Text style={styles.floatText}>{floatText}</Text> : null}
             </Animated.View>
 
-            {qState.answered ? (
+            {qState.answered || (qState.revealed && current.type !== "flashcard") ? (
               <Pressable
-                onPress={goNext}
-                style={({ pressed }) => [styles.primaryBtn, { backgroundColor: accent.color, marginTop: SPACING.sm }, pressed && styles.pressed]}
+                onPress={qState.answered ? goNext : continueAfterReveal}
+                disabled={submitting}
+                style={({ pressed }) => [
+                  styles.primaryBtn,
+                  { backgroundColor: accent.color, marginTop: SPACING.sm, opacity: submitting ? 0.7 : pressed ? 0.88 : 1 },
+                ]}
               >
-                <Text style={styles.primaryBtnText}>{index + 1 >= questions.length ? "Finish deck" : "Continue"}</Text>
-                <Ionicons name="arrow-forward" size={16} color="#fff" style={{ marginLeft: 6 }} />
+                {submitting ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <>
+                    <Text style={styles.primaryBtnText}>{index + 1 >= questions.length ? "Finish deck" : "Continue"}</Text>
+                    <Ionicons name="arrow-forward" size={16} color="#fff" style={{ marginLeft: 6 }} />
+                  </>
+                )}
               </Pressable>
             ) : null}
           </View>
 
-          {!qState.answered ? (
+          {!qState.answered && !qState.revealed ? (
             <Pressable onPress={() => setShowHints(true)} style={({ pressed }) => [styles.hintFab, { backgroundColor: colors.amberSoft, borderColor: colors.amber }, pressed && styles.pressed]}>
               <Ionicons name="key-outline" size={18} color={colors.amber} />
               <Text style={[styles.hintFabText, { color: colors.amber }]}>Use a hint</Text>
@@ -811,41 +1094,41 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
 
       {/* Hints modal */}
       <Modal visible={showHints} transparent animationType="fade" onRequestClose={() => setShowHints(false)}>
-        <Pressable style={styles.modalOverlay} onPress={() => setShowHints(false)}>
-          <Pressable style={[styles.modalCard, { backgroundColor: colors.surface, borderColor: colors.border }]} onPress={(e) => e.stopPropagation()}>
+        <View style={styles.modalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowHints(false)} accessibilityLabel="Close hints" />
+          <View style={[styles.modalCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
             <Text style={styles.modalTitle}>Hint keys</Text>
             <Text style={styles.modalSubtitle}>
               {game?.unlimitedHints ? "Unlimited hints with Go Unlimited" : `${game?.hints ?? 0} keys remaining`}
             </Text>
-            <Pressable onPress={() => useHint(1)} style={({ pressed }) => [styles.hintRow, pressed && styles.pressed]}>
-              <View style={[styles.hintIcon, { backgroundColor: colors.mintSoft }]}>
-                <Text style={{ fontWeight: "900", color: colors.mint }}>1</Text>
-              </View>
-              <View style={styles.hintCopy}>
-                <Text style={styles.hintTitle}>Eliminate choices</Text>
-                <Text style={styles.hintDesc}>Remove incorrect answers from the list.</Text>
-              </View>
-            </Pressable>
-            <Pressable onPress={() => useHint(2)} style={({ pressed }) => [styles.hintRow, pressed && styles.pressed]}>
-              <View style={[styles.hintIcon, { backgroundColor: colors.amberSoft }]}>
-                <Text style={{ fontWeight: "900", color: colors.amber }}>2</Text>
-              </View>
-              <View style={styles.hintCopy}>
-                <Text style={styles.hintTitle}>Reveal a clue</Text>
-                <Text style={styles.hintDesc}>Get a helpful nudge without the full answer.</Text>
-              </View>
-            </Pressable>
-            <Pressable onPress={() => useHint(3)} style={({ pressed }) => [styles.hintRow, pressed && styles.pressed]}>
-              <View style={[styles.hintIcon, { backgroundColor: colors.violetSoft }]}>
-                <Text style={{ fontWeight: "900", color: colors.violet }}>3</Text>
-              </View>
-              <View style={styles.hintCopy}>
-                <Text style={styles.hintTitle}>Show answer</Text>
-                <Text style={styles.hintDesc}>Reveals the answer · half XP if correct.</Text>
-              </View>
-            </Pressable>
-          </Pressable>
-        </Pressable>
+            {[
+              { type: 1, title: "Eliminate choices", desc: "Remove incorrect answers from the list.", color: colors.mint, soft: colors.mintSoft },
+              { type: 2, title: "Reveal a clue", desc: "Show the first letter of the highlighted correct answer.", color: colors.amber, soft: colors.amberSoft },
+              { type: 3, title: "Show answer", desc: "Shows the highlighted correct answer · +2.5 XP if you still answer correctly.", color: colors.violet, soft: colors.violetSoft },
+            ].map((hint) => (
+              <Pressable
+                key={hint.type}
+                onPress={() => useHint(hint.type)}
+                disabled={hintBusy}
+                accessibilityRole="button"
+                accessibilityLabel={hint.title}
+                style={({ pressed }) => [styles.hintRow, (pressed || hintBusy) && styles.pressed]}
+              >
+                <View style={[styles.hintIcon, { backgroundColor: hint.soft }]}>
+                  {hintBusy ? (
+                    <ActivityIndicator size="small" color={hint.color} />
+                  ) : (
+                    <Text style={{ fontWeight: "900", color: hint.color }}>{hint.type}</Text>
+                  )}
+                </View>
+                <View style={styles.hintCopy}>
+                  <Text style={styles.hintTitle}>{hint.title}</Text>
+                  <Text style={styles.hintDesc}>{hint.desc}</Text>
+                </View>
+              </Pressable>
+            ))}
+          </View>
+        </View>
       </Modal>
 
       {/* Settings modal */}
@@ -854,11 +1137,12 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
           <View style={[styles.settingsCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
             <View style={styles.settingsHeader}>
               <Text style={styles.modalTitle}>Quiz settings</Text>
-              <Pressable onPress={() => setShowSettings(false)} hitSlop={10}>
+              <Pressable onPress={() => setShowSettings(false)} hitSlop={10} accessibilityLabel="Close settings">
                 <Ionicons name="close" size={22} color={colors.textMuted} />
               </Pressable>
             </View>
 
+            <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
             <Text style={styles.settingsSection}>Preferred question style</Text>
             {QUESTION_STYLE_OPTIONS.map((opt) => {
               const active = settings?.questionStyle === opt.id;
@@ -866,9 +1150,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
                 <Pressable
                   key={opt.id}
                   onPress={() => {
-                    const next = { ...settings, questionStyle: opt.id };
-                    setSettings(next);
-                    saveSettings(next);
+                    saveSettings({ questionStyle: opt.id }, { restyle: true, close: true });
                   }}
                   style={({ pressed }) => [
                     styles.styleOption,
@@ -901,9 +1183,7 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
                 <Switch
                   value={Boolean(settings?.[row.key])}
                   onValueChange={(val) => {
-                    const next = { ...settings, [row.key]: val };
-                    setSettings(next);
-                    saveSettings(next);
+                    saveSettings({ [row.key]: val });
                   }}
                   trackColor={{ false: colors.border, true: accent.color }}
                   thumbColor="#fff"
@@ -912,7 +1192,8 @@ export default function FlashcardMemorizeScreen({ route, navigation }) {
               </View>
             ))}
 
-            <Text style={styles.settingsNote}>Changes apply the next time you start Memorize.</Text>
+            <Text style={styles.settingsNote}>Study mode updates this deck right away and is saved for next time.</Text>
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -1112,6 +1393,180 @@ const createStyles = (colors, isWide, compact) =>
       justifyContent: "center",
     },
     blockedTitle: { color: colors.text, fontSize: 22, fontWeight: "900", textAlign: "center" },
+    completeScroll: {
+      paddingBottom: SPACING.xl * 2,
+      flexGrow: 1,
+    },
+    completePage: {
+      width: "100%",
+      maxWidth: isWide ? 680 : 520,
+      alignSelf: "center",
+      paddingTop: SPACING.md,
+      gap: SPACING.md,
+    },
+    completeHero: {
+      borderWidth: 1,
+      borderRadius: RADIUS.xl,
+      padding: isWide ? SPACING.xl : SPACING.lg,
+      alignItems: "center",
+    },
+    completeIcon: {
+      width: compact ? 56 : 64,
+      height: compact ? 56 : 64,
+      borderRadius: RADIUS.lg,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: SPACING.sm,
+    },
+    completeKicker: {
+      color: colors.textMuted,
+      fontSize: 12,
+      fontWeight: "800",
+      letterSpacing: 0.4,
+      textTransform: "uppercase",
+      textAlign: "center",
+      marginBottom: 4,
+    },
+    completeTitle: {
+      color: colors.text,
+      fontSize: compact ? 24 : 28,
+      fontWeight: "900",
+      letterSpacing: -0.5,
+      textAlign: "center",
+    },
+    completeHeadline: {
+      color: colors.text,
+      fontSize: 16,
+      fontWeight: "800",
+      textAlign: "center",
+      marginTop: 6,
+    },
+    completeCopy: {
+      color: colors.textMuted,
+      fontSize: 14,
+      lineHeight: 20,
+      textAlign: "center",
+      marginTop: 6,
+      maxWidth: 420,
+    },
+    scorePanel: {
+      borderWidth: 1,
+      borderRadius: RADIUS.lg,
+      padding: SPACING.md,
+      flexDirection: isWide ? "row" : "column",
+      alignItems: isWide ? "center" : "stretch",
+      gap: SPACING.md,
+    },
+    scoreBadge: {
+      width: isWide ? 108 : "100%",
+      minHeight: compact ? 88 : 96,
+      borderWidth: 1,
+      borderRadius: RADIUS.lg,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingVertical: SPACING.md,
+    },
+    scorePct: {
+      fontSize: compact ? 36 : 42,
+      fontWeight: "900",
+      letterSpacing: -1,
+    },
+    scorePctLabel: {
+      fontSize: 11,
+      fontWeight: "800",
+      letterSpacing: 0.6,
+      textTransform: "uppercase",
+      marginTop: 2,
+    },
+    scoreMeta: { flex: 1, minWidth: 0 },
+    scoreMetaTitle: { color: colors.text, fontSize: 16, fontWeight: "800" },
+    scoreMetaCopy: { color: colors.textMuted, fontSize: 13, marginTop: 4, marginBottom: 12, lineHeight: 18 },
+    scoreTrack: { height: 8, borderRadius: 4, overflow: "hidden" },
+    scoreFill: { height: "100%", borderRadius: 4 },
+    statGrid: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 10,
+    },
+    statCard: {
+      flexGrow: 1,
+      flexBasis: compact ? "46%" : 148,
+      minWidth: compact ? 140 : 148,
+      borderWidth: 1,
+      borderRadius: RADIUS.lg,
+      padding: SPACING.md,
+    },
+    statIcon: {
+      width: 28,
+      height: 28,
+      borderRadius: 8,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: 8,
+    },
+    statValue: { color: colors.text, fontSize: 20, fontWeight: "900", letterSpacing: -0.3 },
+    statLabel: { color: colors.textMuted, fontSize: 12, fontWeight: "700", marginTop: 2 },
+    completeLevel: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      borderWidth: 1,
+      borderRadius: RADIUS.md,
+      paddingHorizontal: 10,
+      paddingVertical: 10,
+    },
+    completeLevelLabel: { color: colors.text, fontSize: 12, fontWeight: "800", minWidth: 58 },
+    completeLevelMeta: { color: colors.textMuted, fontSize: 11, fontWeight: "700", minWidth: 78, textAlign: "right" },
+    reviewCard: {
+      borderWidth: 1,
+      borderRadius: RADIUS.lg,
+      paddingHorizontal: SPACING.md,
+      paddingTop: SPACING.md,
+      paddingBottom: 4,
+    },
+    reviewTitle: {
+      color: colors.textMuted,
+      fontSize: 11,
+      fontWeight: "800",
+      letterSpacing: 0.5,
+      textTransform: "uppercase",
+      marginBottom: 4,
+    },
+    reviewRow: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 10,
+      paddingVertical: 10,
+    },
+    reviewDot: {
+      width: 22,
+      height: 22,
+      borderRadius: 7,
+      alignItems: "center",
+      justifyContent: "center",
+      marginTop: 1,
+    },
+    reviewText: { flex: 1, color: colors.text, fontSize: 14, fontWeight: "600", lineHeight: 20 },
+    completeActions: { gap: 10, marginTop: 4 },
+    completePrimary: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      height: 50,
+      borderRadius: RADIUS.lg,
+    },
+    completePrimaryText: { color: "#fff", fontWeight: "800", fontSize: 15 },
+    completeSecondary: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      height: 48,
+      borderRadius: RADIUS.lg,
+      borderWidth: 1,
+    },
+    completeSecondaryText: { fontWeight: "800", fontSize: 14 },
     summaryCard: { borderWidth: 1, borderRadius: RADIUS.lg, padding: SPACING.md, width: "100%", maxWidth: 320 },
     summaryRow: { color: colors.text, fontSize: 14, fontWeight: "700", marginBottom: 4 },
     modalOverlay: {
@@ -1125,6 +1580,7 @@ const createStyles = (colors, isWide, compact) =>
       borderRadius: RADIUS.lg,
       padding: SPACING.md,
       marginBottom: SPACING.lg,
+      zIndex: 2,
     },
     settingsCard: {
       borderWidth: 1,
@@ -1132,6 +1588,7 @@ const createStyles = (colors, isWide, compact) =>
       borderTopRightRadius: RADIUS.lg,
       padding: SPACING.md,
       maxHeight: "90%",
+      zIndex: 2,
     },
     settingsHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: SPACING.sm },
     modalTitle: { color: colors.text, fontSize: 17, fontWeight: "900" },

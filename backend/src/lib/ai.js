@@ -13,6 +13,13 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 // generous default so full responses complete in one call.
 const DEFAULT_MAX_OUTPUT_TOKENS = Number(process.env.AI_MAX_OUTPUT_TOKENS || 4096);
 const { clipStudySource, hasCompleteJsonObject } = require("./documentText");
+const {
+  normalizeGeneratedCards,
+  assembleTutorLesson,
+  canonicalAnswer,
+  displayHighlight,
+  sanitizeQuizList,
+} = require("./flashcardAnswer");
 
 function looksCutOff(text) {
   const value = String(text || "").trim();
@@ -74,14 +81,39 @@ function buildFallbackStudyPack(subject, notes) {
     "Create short memory cues for each concept and revisit them later in the day.",
     "Practice with a few recall questions to strengthen retention.",
   ];
-  const flashcards = keyConcepts.slice(0, 6).map((concept, index) => ({
-    front: concept.length > 40 ? `${concept.slice(0, 37)}...` : concept,
-    back: `Review ${concept} and connect it to a concrete example.`,
-  }));
+  const flashcards = normalizeGeneratedCards(
+    keyConcepts.slice(0, 6).map((concept) => {
+      const phrase = String(concept || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .split(/\s+/)
+        .slice(0, 5)
+        .join(" ");
+      return {
+        front: `Identify a key idea in ${subject || "this topic"}.`,
+        back: `${phrase}. This is a central idea in ${subject || "this topic"}. Review it and connect it to a concrete example.`,
+        answerHighlight: phrase,
+        explanation: `The highlighted answer is "${phrase}". It is a central idea in ${subject || "this topic"}.`,
+      };
+    })
+  );
+  const quizTerms = keyConcepts.slice(0, 4);
   const quiz = [
-    { type: "mcq", question: `What is the main idea of ${subject || "this topic"}?`, options: ["A core concept", "A random detail", "An unrelated example", "A guess"], answer: "A core concept" },
+    ...sanitizeQuizList(
+      quizTerms.map((concept, index) => ({
+        type: "mcq",
+        question: `Which idea is central to ${subject || "this topic"}?`,
+        options: [
+          concept,
+          ...quizTerms.filter((_, idx) => idx !== index),
+          `${subject || "this topic"} history`,
+          `${subject || "this topic"} vocabulary`,
+        ].slice(0, 4),
+        answer: concept,
+      }))
+    ),
     { type: "short_answer", question: "Explain one key idea in your own words.", answer: "A concise explanation is enough." },
-    { type: "identification", question: "Name one important term from the notes.", answer: "Use the main term that appears in the notes." },
+    { type: "identification", question: "Name one important term from the notes.", answer: quizTerms[0] || "Use the main term that appears in the notes." },
   ];
   const shortAnswer = quiz
     .filter((q) => q.type === "short_answer")
@@ -450,7 +482,7 @@ async function generateStudyPack(subject, notes) {
     '"learningObjectives": array of 3-4 short strings, ' +
     '"importantTerms": array of 4-6 objects {"term": string, "definition": string}, ' +
     '"studyTips": array of 3 short strings, ' +
-    '"flashcards": array of 6-8 objects {"front": string, "back": string}, ' +
+    '"flashcards": array of 6-8 objects {"front": string (a question), "back": string (the full answer), "answerHighlight": string (exact complete phrase copied from back that answers front), "explanation": string}, ' +
     '"quiz": array of 6-8 objects mixing types. Each: {"type": "mcq"|"true_false"|"identification"|"short_answer", ' +
     '"question": string, "options": array of 4 strings (ONLY for mcq), "answer": string}, ' +
     '"shortAnswer": array of 3 objects {"question": string, "answer": string}, ' +
@@ -459,7 +491,7 @@ async function generateStudyPack(subject, notes) {
       ? "Base everything strictly on the provided notes. No extra keys, no explanations outside the JSON."
       : "If only a topic is provided (no notes), use your general knowledge to create accurate, high-quality study materials about that topic. No extra keys, no explanations outside the JSON.");
 
-  return generateJSON({
+  const pack = await generateJSON({
     system,
     prompt: hasNotes
       ? `Subject: ${subject}\n\nNotes:\n${clipStudySource(notes, 16000)}`
@@ -467,6 +499,13 @@ async function generateStudyPack(subject, notes) {
     largeOutput: true,
     fallback: () => buildFallbackStudyPack(subject, notes),
   });
+  const flashcards = normalizeGeneratedCards(pack?.flashcards || []);
+  const quiz = sanitizeQuizList(pack?.quiz || []);
+  return {
+    ...pack,
+    flashcards: flashcards.length ? flashcards : normalizeGeneratedCards(buildFallbackStudyPack(subject, notes).flashcards),
+    quiz: quiz.length ? quiz : sanitizeQuizList(buildFallbackStudyPack(subject, notes).quiz),
+  };
 }
 
 function buildFallbackFlashcards(topic, notes) {
@@ -478,33 +517,69 @@ function buildFallbackFlashcards(topic, notes) {
         .filter(Boolean)
         .slice(0, 8)
     : [`Core definition of ${topic}`, `Key principles of ${topic}`, `Important examples of ${topic}`];
-  const cards = concepts.slice(0, 8).map((concept, index) => ({
-    front: concept.length > 60 ? `${concept.slice(0, 57)}...` : concept,
-    back:
-      index === 0
-        ? `The main idea in ${topic || "this topic"}, expressed in your own words.`
-        : `A supporting concept in ${topic || "this topic"}. Review it and connect it to an example.`,
-  }));
-  return cards;
+  const subject = String(topic || "this topic").trim() || "this topic";
+  const cards = normalizeGeneratedCards(
+    concepts.slice(0, 8).map((concept) => {
+      const phrase = String(concept || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .split(/\s+/)
+        .slice(0, 5)
+        .join(" ");
+      return {
+        front: `Identify a key idea in ${subject}.`,
+        back: `${phrase}. This is a central idea in ${subject}. Review it and connect it to an example.`,
+        answerHighlight: phrase,
+        explanation: `The highlighted answer is "${phrase}". Restate it in your own words and connect it to an example.`,
+      };
+    })
+  );
+  return { flashcards: cards };
 }
 
 // Magic Import — generate flashcards from a topic, notes, or study-pack text.
+const FLASHCARD_SYSTEM =
+  "You are an expert flashcard generator. " +
+  "You will receive a topic and/or study content from a student. " +
+  "Respond with ONLY a raw JSON object (no markdown fences, no preamble) with exactly this shape: " +
+  '{"flashcards": array of 8-12 objects {"front": string (a clear question), "back": string (the full answer or definition), "answerHighlight": string (the exact complete phrase copied verbatim from back that directly answers front), "explanation": string (2-3 sentences explaining why that highlighted phrase is correct)}}. ' +
+  "Every card MUST include all four fields. Identify the correct answer while writing the card and store it in answerHighlight, separately from the full back. " +
+  "Read the full question and the full answer before choosing answerHighlight. " +
+  "answerHighlight MUST be an exact contiguous substring of back and must be enough, by itself, to answer front. " +
+  "Never invent a different answer. Never highlight a fragment, trailing article, or unrelated words (bad: \"the cell\", \"The movement of\", \"class-based\"). " +
+  "Do NOT highlight the entire back unless the back is already a short term (about 1-5 words). " +
+  "If the answering phrase is two, three, or four words, copy the entire phrase. Never copy only part of it. " +
+  "If the back does not already contain a complete answering phrase, rewrite the back so it does, then copy that phrase into answerHighlight. Never leave answerHighlight empty. " +
+  'Example: front "What is Java?", back "A high-level, class-based, object-oriented programming language designed to have as few implementation dependencies as possible.", answerHighlight "programming language". ' +
+  'Example: front "What is the powerhouse of the cell?", back "The mitochondria is the powerhouse of the cell.", answerHighlight "mitochondria". ' +
+  "Extract the most important concepts, definitions, and facts.";
+
 async function generateFlashcards(topic, notes) {
   const hasNotes = notes && notes.trim().length > 0;
-  const system =
-    "You are an expert flashcard generator. " +
-    "You will receive a topic and/or study content from a student. " +
-    "Respond with ONLY a raw JSON object (no markdown fences, no preamble) with exactly this shape: " +
-    '{"flashcards": array of 8-12 objects {"front": string (a question, term, or prompt), "back": string (a concise answer or definition)}}. ' +
-    "Extract the most important concepts, definitions, and facts. Make the front a focused prompt and the back a clear, concise answer. No extra keys.";
+  const prompt = hasNotes
+    ? `Topic: ${topic || "General"}\n\nContent:\n${notes}`
+    : `Topic: ${topic || "General"}\n\nGenerate flashcards for this topic.`;
 
-  return generateJSON({
-    system,
-    prompt: hasNotes
-      ? `Topic: ${topic || "General"}\n\nContent:\n${notes}`
-      : `Topic: ${topic || "General"}\n\nGenerate flashcards for this topic.`,
-    fallback: () => buildFallbackFlashcards(topic, notes),
-  });
+  const run = (system) =>
+    generateJSON({
+      system,
+      prompt,
+      maxTokens: 2800,
+      fallback: () => buildFallbackFlashcards(topic, notes),
+    });
+
+  const pack = await run(FLASHCARD_SYSTEM);
+  const list = Array.isArray(pack) ? pack : pack?.flashcards;
+  let flashcards = normalizeGeneratedCards(list);
+  if (!flashcards.length) {
+    const retry = await run(
+      FLASHCARD_SYSTEM +
+        " Retry: every card must have a complete answerHighlight copied from back. Rewrite weak cards into a What is X / X is Y form."
+    );
+    flashcards = normalizeGeneratedCards(Array.isArray(retry) ? retry : retry?.flashcards);
+  }
+  if (!flashcards.length) return buildFallbackFlashcards(topic, notes);
+  return { flashcards };
 }
 
 async function generateCoachInsight(payload) {
@@ -584,29 +659,26 @@ async function generateStudyNotes(topic, notes) {
 function buildFallbackQuiz(topic, notes) {
   const hasNotes = notes && notes.trim().length > 0;
   const concepts = hasNotes
-    ? notes.split(/\n+/).map((l) => l.trim().replace(/^[-*•]\s*/, "")).filter(Boolean).slice(0, 4)
-    : [`${topic || "The topic"}`, "Its key principles", "Its main applications", "Its most important vocabulary"];
+    ? notes.split(/\n+/).map((l) => l.trim().replace(/^[-*•]\s*/, "")).filter(Boolean).slice(0, 6)
+    : [
+        `${topic || "The topic"}`,
+        `Key principles of ${topic || "the topic"}`,
+        `Main applications of ${topic || "the topic"}`,
+        `Important vocabulary in ${topic || "the topic"}`,
+      ];
 
-  const qs = concepts.slice(0, 6).map((concept, i) => {
-    const correct = concept.length > 60 ? `${concept.slice(0, 57)}...` : concept;
-    const distractors = [
-      "A random detail",
-      "An unrelated example",
-      "A common misconception",
-    ];
-    return {
-      type: "mcq",
-      question: `What is the main idea highlighted as "${correct}"?`,
-      options: [correct, ...distractors],
-      answer: correct,
-    };
-  });
-  // Shuffle option order deterministically-ish per question index.
-  return qs.map((q, i) => {
-    const opts = [...q.options];
-    if (i % 2 === 1) opts.push(opts.shift());
-    return { ...q, options: opts };
-  });
+  return sanitizeQuizList(
+    concepts.map((concept, index) => {
+      const correct = concept.length > 60 ? `${concept.slice(0, 57)}...` : concept;
+      const distractors = concepts.filter((_, idx) => idx !== index);
+      return {
+        type: "mcq",
+        question: `Which idea belongs in ${topic || "this topic"}?`,
+        options: [correct, ...distractors].slice(0, 4),
+        answer: correct,
+      };
+    })
+  );
 }
 
 // Gamified quiz — pure 4-option multiple-choice questions with exactly 4
@@ -617,13 +689,15 @@ async function generateQuiz(topic, notes) {
     "You are an expert quiz generator for a gamified study app. " +
     "You will receive a topic (and possibly lecture notes) from a student. " +
     "Respond with ONLY a raw JSON object (no markdown fences, no preamble) with exactly this shape: " +
-    '{"quiz": array of 8-10 objects, each {"type": "mcq", "question": string, "options": array of EXACTLY 4 strings (one correct, three plausible distractors), "answer": string (must be one of the four options, verbatim)}}. ' +
+    '{"quiz": array of 8-10 objects, each {"type": "mcq", "question": string, "options": array of EXACTLY 4 short strings (one correct, three plausible same-topic distractors), "answer": string (must be one of the four options, verbatim)}}. ' +
     "Base questions strictly on the provided topic/notes when notes exist. " +
     "Keep questions focused on key facts, definitions, and concepts. " +
+    "The correct option must be a complete 1-4 word answer phrase, not a fragment. " +
+    "Distractors must be relevant to the same topic, plausible, unique, and not also correct. Never use random, generic, or unrelated filler choices. " +
     "Make sure the answer string is EXACTLY one of the 4 options (no extra characters). " +
     "No extra keys, no explanations outside the JSON.";
 
-  return generateJSON({
+  const pack = await generateJSON({
     system,
     prompt: hasNotes
       ? `Topic: ${topic || "General"}\n\nContent:\n${notes}`
@@ -631,39 +705,67 @@ async function generateQuiz(topic, notes) {
     maxTokens: 2200,
     fallback: () => ({ quiz: buildFallbackQuiz(topic, notes) }),
   });
+  const quiz = sanitizeQuizList(Array.isArray(pack) ? pack : pack?.quiz);
+  return { quiz: quiz.length ? quiz : buildFallbackQuiz(topic, notes) };
 }
 
-function buildFallbackTutorLesson(collectionName, cards) {
-  const steps = cards.slice(0, 6).map((c, i) => ({
-    title: `Concept ${i + 1}: ${String(c.front).slice(0, 60)}`,
-    content: `Let's learn about "${c.front}". ${c.back}`,
-    tip: "Try explaining this in your own words before moving on.",
-  }));
-  return {
-    title: `Lesson: ${collectionName || "Flashcard deck"}`,
-    steps: steps.length
-      ? steps
-      : [{ title: "Getting started", content: "Add flashcards to this deck to generate a tutor lesson.", tip: "Use Magic Import to build a deck quickly." }],
-  };
+function formatDeckCardsForTutor(cards, maxChars = 12000) {
+  const lines = [];
+  let used = 0;
+  for (let i = 0; i < (cards || []).length; i += 1) {
+    const front = String(cards[i].front || "").replace(/\s+/g, " ").trim().slice(0, 180);
+    const back = String(cards[i].back || "").replace(/\s+/g, " ").trim().slice(0, 280);
+    const highlight = (displayHighlight(cards[i]) || canonicalAnswer(cards[i])).replace(/\s+/g, " ").trim().slice(0, 100);
+    const explanation = String(cards[i].explanation || "").replace(/\s+/g, " ").trim().slice(0, 360);
+    const line = [
+      `${i + 1}. id=${cards[i].id}`,
+      `topic=${front}`,
+      `answer=${back}`,
+      `highlight=${highlight}`,
+      explanation ? `explanation=${explanation}` : null,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    if (lines.length && used + line.length + 1 > maxChars) break;
+    lines.push(line);
+    used += line.length + 1;
+  }
+  return lines;
 }
 
 async function generateDeckTutorLesson(collectionName, cards) {
-  const limited = (cards || []).slice(0, 40);
-  const cardLines = limited.map((c, i) => `${i + 1}. ${c.front} → ${c.back}`).join("\n");
+  const list = Array.isArray(cards) ? cards : [];
+  const cardLinesList = formatDeckCardsForTutor(list);
+  const cardLines = cardLinesList.join("\n");
+  const limited = list.slice(0, Math.max(cardLinesList.length, 8));
   const system =
-    "You are an expert study tutor. A student wants to learn a flashcard deck step by step. " +
+    "You are an expert study tutor. For every flashcard, first carefully read and understand the topic, the full answer text, the highlighted key phrase, and the explanation. Only then write questions. Use those sources only. Do not invent facts. " +
     "Respond with ONLY a raw JSON object (no markdown fences) with exactly this shape: " +
-    '{"title": string, "steps": array of 5-8 objects, each {"title": string, "content": string, "tip": string}}. ' +
-    "Each step should teach one or two related concepts from the cards in plain language. " +
-    "Build from foundations to harder ideas. Keep each content field 2-4 sentences. " +
-    "Tips should be short actionable study advice.";
+    '{"title": string, "cards": array of objects, each {"index": number (1-based), "cardId": string, "explanation": string (2-4 sentences that teach the topic using the back, highlight, and any given explanation), "questions": array of EXACTLY 2 objects {"question": string, "options": array of EXACTLY 4 distinct strings, "answer": string (must equal one option verbatim), "why": string (1-2 sentences from the flashcard explaining why that correct option is right)}}}. ' +
+    "Write EXACTLY two specific, varied multiple-choice questions per card. They must both be about that topic and test different ideas, such as definition, purpose, a key characteristic, a use, a translation, or a fact from the explanation. Preserve the original meaning of the flashcard. " +
+    "CRITICAL — exactly ONE correct option per question: " +
+    "1) Identify the single fact being tested from the flashcard before writing. " +
+    "2) The answer field must be the exact text of that one correct option. " +
+    "3) The other three options must be clearly wrong for that question — never synonyms, equivalent translations, paraphrases, or alternate wordings of the correct answer. " +
+    "4) Never use meta/label choices such as 'the correct term', 'the best answer', 'Tagalog word for bird', 'translation of X', or 'the answer related to the topic'. If the question asks for a translation or term, the correct option must be that actual word or phrase (e.g. 'ibon'), not a description of it. " +
+    "5) All four options must answer the same question in a consistent format (all short terms, or all short phrases — do not mix a concrete term with a descriptive label). " +
+    "6) Before returning, verify: exactly one option is correct; answer is present verbatim in options; no distractor could reasonably also be correct; why supports only that correct option. " +
+    "You may use the highlighted phrase as the correct option when the question asks for that idea. You may also write a question from the explanation or back, with a correct option that is stated or clearly implied there. " +
+    "Do not repeat or reverse the original flashcard prompt. Never ask 'which term is defined as X' after 'what is X', and never reuse one question's answer as the next question. " +
+    "Never write vague prompts like 'which option best applies the idea on this card', 'which fact belongs with this flashcard', or 'what is the main idea of this card'. Name the topic in the question. " +
+    "If a question asks for a result, term, name, or translation, mark that concrete result/term/translation as correct — not a related process, object, or descriptive label. Distractors must be relevant, plausible, and clearly wrong. The two questions must have different correct answers. Never use random or generic filler. " +
+    "Every option must be a complete answer phrase. Never leave options unfinished, such as ending with 'as', 'to', 'of', 'for', 'a', or 'the'. Prefer concise answers like 'ibon' or 'marksman' over sentence stems. Do not include duplicate or nearly identical options. " +
+    "The why field must explain the correct option using the flashcard content in clear, non-repetitive wording so a student can learn why it is right.";
 
-  return generateJSON({
+  // No silent fake fallback — tutor lessons must come from the AI provider + deck content.
+  // assembleTutorLesson still repairs/validates MCQs from the generated JSON against real cards.
+  const generated = await generateJSON({
     system,
     prompt: `Deck name: ${collectionName || "Study deck"}\n\nFlashcards:\n${cardLines || "(empty deck)"}`,
-    maxTokens: 2800,
-    fallback: () => buildFallbackTutorLesson(collectionName, limited),
+    maxTokens: 4096,
+    largeOutput: true,
   });
+  return assembleTutorLesson(collectionName, list.length ? list : limited, generated);
 }
 
 module.exports = {

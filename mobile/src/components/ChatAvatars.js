@@ -10,7 +10,7 @@ export function AiAssistantAvatar({ size = 28, style }) {
   const box = {
     width: size,
     height: size,
-    borderRadius: size / 2.2,
+    borderRadius: size / 2,
   };
 
   return (

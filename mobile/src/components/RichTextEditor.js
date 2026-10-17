@@ -1,4 +1,4 @@
-import React from "react";
+import React, { forwardRef } from "react";
 import { View, Text, TextInput, Pressable, StyleSheet, ScrollView } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "../context/ThemeContext";
@@ -19,7 +19,7 @@ import InlineFormatEditor from "./InlineFormatEditor";
  *  - onChange: (blocks) => void
  *  - placeholder: string
  */
-export default function RichTextEditor({
+const RichTextEditor = forwardRef(function RichTextEditor({
   value = [],
   onChange,
   placeholder,
@@ -27,7 +27,7 @@ export default function RichTextEditor({
   embedded = false,
   scrollable = false,
   simple = false,
-}) {
+}, ref) {
   const { colors } = useTheme();
 
   if (simple) {
@@ -41,6 +41,7 @@ export default function RichTextEditor({
         ]}
       >
         <InlineFormatEditor
+          ref={ref}
           value={value}
           onChange={onChange}
           compact={compact}
@@ -275,7 +276,9 @@ export default function RichTextEditor({
       )}
     </View>
   );
-}
+});
+
+export default RichTextEditor;
 
 function IconButton({ name, onPress, color }) {
   return (

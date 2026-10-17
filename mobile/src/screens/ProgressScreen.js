@@ -43,7 +43,6 @@ export default function ProgressScreen({ navigation }) {
     return new Date(d.getFullYear(), d.getMonth(), 1);
   });
   const [selectedDate, setSelectedDate] = useState(null);
-  const [buying, setBuying] = useState(null);
   const heartsCountdown = useRefillCountdown(data?.user?.heartsRefillAt);
 
   // Progress bar animation — re-triggers whenever data refreshes.
@@ -101,34 +100,6 @@ useFocusEffect(
     fetchProgress(fmtMonth(next));
   };
 
-  const buyReward = async (item) => {
-    if (buying) return;
-    setBuying(item);
-    try {
-      const { data: result } = await client.post("/game/coins/spend", { item });
-      setData((current) => current ? {
-        ...current,
-        user: {
-          ...current.user,
-          coins: result.coins,
-          hearts: result.hearts,
-          hints: result.hints,
-          heartsBlocked: result.heartsBlocked,
-          heartsRefillAt: result.heartsRefillAt,
-        },
-      } : current);
-      if (result.coins != null) setCachedCoins(result.coins);
-      Alert.alert(
-        "Reward unlocked",
-        item === "heart" ? "You revived 1 heart." : "You received 1 hint."
-      );
-    } catch (e) {
-      Alert.alert("Unable to purchase", e.response?.data?.error || "Please try again.");
-    } finally {
-      setBuying(null);
-    }
-  };
-
   if (loading && !data) {
     return (
       <Screen>
@@ -145,6 +116,7 @@ useFocusEffect(
   const streak = data?.streak || { current: 0, longest: 0 };
   const streakLevel = getStreakLevel(streak.current);
   const hearts = user.hearts ?? MAX_HEARTS;
+  const unlimitedHearts = Boolean(user.unlimitedHearts);
   const heartsRefillAt = user.heartsRefillAt;
   const pct = Math.min(100, Math.round((level.xpWithinLevel / level.step) * 100));
   const barWidth = barAnim.interpolate({ inputRange: [0, 1], outputRange: ["0%", `${pct}%`] });
@@ -189,26 +161,32 @@ useFocusEffect(
             <Text style={styles.cardLabel}>HEARTS</Text>
             <View style={styles.heartRow}>
               <Ionicons name="heart" size={26} color="#FF5A76" />
-              <Text style={styles.heartCount}>{hearts}</Text>
+              <Text style={styles.heartCount}>{unlimitedHearts ? "∞" : hearts}</Text>
             </View>
-            <View style={styles.heartsDots}>
-              {[0, 1, 2, 3, 4].map((i) => (
-                <Ionicons
-                  key={i}
-                  name={i < hearts ? "heart" : "heart-outline"}
-                  size={16}
-                  color={i < hearts ? "#FF5A76" : colors.border}
-                />
-              ))}
-            </View>
-            {hearts <= 0 ? (
-              <Text style={styles.heartTimer}>
-                {heartsCountdown === "Ready now"
-                  ? "Hearts are ready to restore"
-                  : `Refills in ${heartsCountdown || "24 hours"}`}
-                {formatRefillClock(heartsRefillAt) ? `\nAvailable ${formatRefillClock(heartsRefillAt)}` : ""}
-              </Text>
-            ) : null}
+            {unlimitedHearts ? (
+              <Text style={styles.heartTimer}>Unlimited with Go Unlimited</Text>
+            ) : (
+              <>
+                <View style={styles.heartsDots}>
+                  {[0, 1, 2, 3, 4].map((i) => (
+                    <Ionicons
+                      key={i}
+                      name={i < hearts ? "heart" : "heart-outline"}
+                      size={16}
+                      color={i < hearts ? "#FF5A76" : colors.border}
+                    />
+                  ))}
+                </View>
+                {hearts <= 0 ? (
+                  <Text style={styles.heartTimer}>
+                    {heartsCountdown === "Ready now"
+                      ? "Hearts are ready to restore"
+                      : `Refills in ${heartsCountdown || "24 hours"}`}
+                    {formatRefillClock(heartsRefillAt) ? `\nAvailable ${formatRefillClock(heartsRefillAt)}` : ""}
+                  </Text>
+                ) : null}
+              </>
+            )}
           </Card>
 
           {/* Streak */}
@@ -246,42 +224,19 @@ useFocusEffect(
                 <Text style={styles.walletValue}>{user.coins || 0} coins</Text>
               </View>
             </View>
-            <Text style={styles.walletHint}>Earn 20 at each streak level</Text>
+            <Text style={styles.walletHint}>
+              {(user.streakFreezes || 0) > 0
+                ? `${user.streakFreezes} streak freeze${user.streakFreezes === 1 ? "" : "s"} ready`
+                : "Earn 20 at each streak level"}
+            </Text>
           </View>
-          <View style={[styles.shopRow, width < 430 && styles.shopRowCompact]}>
-            <Pressable
-              disabled={buying != null || hearts >= MAX_HEARTS || (user.coins || 0) < 5}
-              onPress={() => buyReward("heart")}
-              style={({ pressed }) => [
-                styles.shopButton,
-                (hearts >= MAX_HEARTS || (user.coins || 0) < 5) && styles.shopButtonDisabled,
-                pressed && styles.shopButtonPressed,
-              ]}
-            >
-              <Ionicons name="heart" size={22} color="#FF5A76" />
-              <View style={styles.shopCopy}>
-                <Text style={styles.shopTitle}>{hearts >= MAX_HEARTS ? "Hearts full" : "Revive 1 Heart"}</Text>
-                <Text style={styles.shopPrice}>5 coins</Text>
-              </View>
-              {buying === "heart" && <ActivityIndicator size="small" color={colors.tomato} />}
-            </Pressable>
-            <Pressable
-              disabled={buying != null || (user.coins || 0) < 10}
-              onPress={() => buyReward("hint")}
-              style={({ pressed }) => [
-                styles.shopButton,
-                (user.coins || 0) < 10 && styles.shopButtonDisabled,
-                pressed && styles.shopButtonPressed,
-              ]}
-            >
-              <Ionicons name="key" size={22} color={colors.amber} />
-              <View style={styles.shopCopy}>
-                <Text style={styles.shopTitle}>Get 1 Hint</Text>
-                <Text style={styles.shopPrice}>10 coins · {user.hints || 0} available</Text>
-              </View>
-              {buying === "hint" && <ActivityIndicator size="small" color={colors.amber} />}
-            </Pressable>
-          </View>
+          <Pressable
+            onPress={() => navigation.navigate("Shop")}
+            style={({ pressed }) => [styles.shopOpenBtn, pressed && styles.shopButtonPressed]}
+          >
+            <Ionicons name="storefront-outline" size={18} color="#fff" />
+            <Text style={styles.shopOpenText}>Open Shop</Text>
+          </Pressable>
         </Card>
 
         {/* XP + Level card with progress bar */}
@@ -389,14 +344,17 @@ const useStyles = (colors) =>
     walletLabel: { color: colors.textMuted, fontSize: 10, fontWeight: "800", letterSpacing: 0.6 },
     walletValue: { color: colors.text, fontSize: 20, fontWeight: "900", marginTop: 1 },
     walletHint: { color: colors.textMuted, fontSize: 10.5, flexShrink: 1, textAlign: "right" },
-    shopRow: { flexDirection: "row", gap: 10 },
-    shopRowCompact: { flexDirection: "column" },
-    shopButton: { flex: 1, minHeight: 62, flexDirection: "row", alignItems: "center", gap: 10, padding: 12, borderRadius: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.bg },
-    shopButtonDisabled: { opacity: 0.45 },
+    shopOpenBtn: {
+      minHeight: 44,
+      borderRadius: 12,
+      backgroundColor: colors.tomato,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+    },
+    shopOpenText: { color: "#fff", fontWeight: "800", fontSize: 13.5 },
     shopButtonPressed: { opacity: 0.72, transform: [{ scale: 0.99 }] },
-    shopCopy: { flex: 1 },
-    shopTitle: { color: colors.text, fontSize: 13, fontWeight: "800" },
-    shopPrice: { color: colors.textMuted, fontSize: 10.5, marginTop: 3 },
     xpCard: { padding: 18, marginBottom: 12 },
     xpHeader: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 16 },
     xpIconWrap: { width: 44, height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center" },

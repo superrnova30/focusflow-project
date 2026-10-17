@@ -30,6 +30,8 @@ import UserAvatar from "../components/UserAvatar";
 import { AIHistoryDrawer, AIHistorySidebar } from "../components/AIHistorySidebar";
 import { setCachedCoins } from "../lib/coins";
 import { useAIHistory } from "../context/AIHistoryContext";
+import { useScrollToTopOnFocus } from "../hooks/useScrollToTopOnFocus";
+import { deckAccent } from "../lib/deckColors";
 
 const MAX_HEARTS = 5;
 
@@ -39,6 +41,15 @@ const ITEM_ACCENTS_DARK = ["#9B8CFF", "#4ADE94", "#FFC15E", "#7EB6FF", "#FF8A96"
 function itemAccentColor(index, isDark) {
   const palette = isDark ? ITEM_ACCENTS_DARK : ITEM_ACCENTS_LIGHT;
   return palette[index % palette.length];
+}
+
+/** Required: photo, display name, school. Bio/studyGoals stay optional. */
+function isProfileComplete(user) {
+  if (!user) return false;
+  const hasName = Boolean(String(user.name || "").trim());
+  const hasPhoto = Boolean(String(user.profilePicture || "").trim());
+  const hasSchool = Boolean(user.schoolId || String(user.school || "").trim());
+  return hasName && hasPhoto && hasSchool;
 }
 
 export default function StudyHomeScreen({ navigation }) {
@@ -58,7 +69,7 @@ export default function StudyHomeScreen({ navigation }) {
   }, []);
 
   const { isPremium, refreshLimits } = usePremium();
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
   const { stats: historyStats, conversations, load: loadHistory, loadConversation } = useAIHistory();
   const [historyOpen, setHistoryOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -67,6 +78,7 @@ export default function StudyHomeScreen({ navigation }) {
   const [carouselWidth, setCarouselWidth] = useState(0);
   const [carouselIndex, setCarouselIndex] = useState(0);
   const carouselRef = useRef(null);
+  const listRef = useScrollToTopOnFocus();
 
   const [materials, setMaterials] = useState([]);
   const [quizzes, setQuizzes] = useState([]);
@@ -193,7 +205,9 @@ export default function StudyHomeScreen({ navigation }) {
 
   const fetchSchoolHub = useCallback(async () => {
     try {
-      const { data } = await client.get("/students/school", { params: { name: user?.school } });
+      const { data } = await client.get("/students/school", {
+        params: { name: user?.school, schoolId: user?.schoolId },
+      });
       setSchoolHub({
         school: data.school || user?.school || "",
         decks: data.decks || [],
@@ -202,11 +216,18 @@ export default function StudyHomeScreen({ navigation }) {
     } catch {
       setSchoolHub({ school: user?.school || "", decks: [], notes: [] });
     }
-  }, [user?.school]);
+  }, [user?.school, user?.schoolId]);
 
   const recentChats = useMemo(() => (conversations || []).slice(0, 6), [conversations]);
   const schoolName = schoolHub.school || user?.school || "Your School";
   const popularDecks = useMemo(() => (schoolHub.decks || []).slice(0, 12), [schoolHub.decks]);
+  const myDecks = useMemo(() => (collections || []).slice(0, 12), [collections]);
+  const hasAiChats = recentChats.length > 0;
+  const hasPopularDecks = popularDecks.length > 0;
+  const hasMyDecks = myDecks.length > 0;
+  const hasNotesOrFlashcards = collections.length > 0 || notes.length > 0;
+  const showEmptyState = !loading && !hasNotesOrFlashcards;
+  const profileComplete = isProfileComplete(user);
   const carouselGap = 12;
   const carouselPeek = compact ? 26 : isPhone ? 36 : 52;
   const deckCardWidth = useMemo(() => {
@@ -222,11 +243,12 @@ useFocusEffect(
       fetchGameState();
       fetchSchoolHub();
       loadHistory({ mode: "initial" });
+      refreshUser().catch(() => {});
       (async () => {
         await fetchStreakLevel();
         await fetchChallenge();
       })();
-    }, [fetchAll, fetchGameState, fetchSchoolHub, loadHistory, fetchStreakLevel, fetchChallenge])
+    }, [fetchAll, fetchGameState, fetchSchoolHub, loadHistory, refreshUser, fetchStreakLevel, fetchChallenge])
   );
 
   // When invoked, open the dedicated StudyChat page and hand off the topic.
@@ -298,7 +320,10 @@ useFocusEffect(
       navigation.navigate("Profile", { screen: "Settings" });
       return;
     }
-    navigation.navigate("SchoolHub", { school });
+    navigation.navigate("SchoolHub", {
+      school,
+      schoolId: user?.schoolId || user?.schoolRecord?.id,
+    });
   };
 
   const openPopularDeck = (deck) => {
@@ -306,6 +331,18 @@ useFocusEffect(
       collection: deck,
       readOnly: deck.userId !== user?.id,
     });
+  };
+
+  const openMyDeck = (deck) => {
+    navigation.navigate("FlashcardCollection", { collection: deck });
+  };
+
+  const openMyDecksFiles = () => {
+    navigation.navigate("Flashcards");
+  };
+
+  const openCompleteProfile = () => {
+    navigation.navigate("Profile", { screen: "Settings" });
   };
 
   const scrollPopularTo = (index) => {
@@ -363,7 +400,7 @@ useFocusEffect(
             soft: colors.mintSoft,
             onPress: () => {
               setSheetVisible(false);
-              navigation.navigate("FlashcardEdit", {});
+              navigation.navigate("FlashcardEdit", { createDeck: true });
             },
           })}
           <Pressable onPress={() => goStep("main")} style={styles.backLink}>
@@ -407,21 +444,21 @@ useFocusEffect(
       );
     }
 
-    // main
+    // main — Add New menu (shared by the + control and empty-state Create)
     return (
       <View style={{ paddingBottom: 8 }}>
         {renderOption({
           emoji: "🃏",
-          title: "Cards",
-          subtitle: "Create and study flashcards",
+          title: "Create Flashcards",
+          subtitle: "Generate with AI or write your own cards",
           color: colors.mint,
           soft: colors.mintSoft,
           onPress: () => goStep("cards"),
         })}
         {renderOption({
           emoji: "📝",
-          title: "Notes",
-          subtitle: "Capture ideas and study notes",
+          title: "Create Notes",
+          subtitle: "Generate a study guide or write freely",
           color: colors.amber,
           soft: colors.amberSoft,
           onPress: () => goStep("notes"),
@@ -481,6 +518,7 @@ useFocusEffect(
         ) : null}
         <View style={styles.studyMain}>
       <FlatList
+        ref={listRef}
         style={styles.list}
         data={materials}
         keyExtractor={(m) => m.id}
@@ -566,8 +604,8 @@ useFocusEffect(
 
             <View style={styles.jumpRow}>
               {[
-                ["layers-outline", "Flashcards", () => navigation.navigate("Files", { screen: "FilesHome", params: { section: "mine", kind: "flashcards" } }), colors.mint, colors.mintSoft],
-                ["document-text-outline", "Notes", () => navigation.navigate("Files", { screen: "FilesHome", params: { section: "mine", kind: "notes" } }), colors.amber, colors.amberSoft],
+                ["layers-outline", "Flashcards", () => navigation.navigate("Flashcards"), colors.mint, colors.mintSoft],
+                ["document-text-outline", "Notes", () => navigation.navigate("Notes"), colors.amber, colors.amberSoft],
                 ["school-outline", "Coach", () => navigation.navigate("Coach"), colors.violet, colors.violetSoft],
               ].map(([icon, label, onPress, color, soft]) => (
                 <Pressable
@@ -583,24 +621,19 @@ useFocusEffect(
               ))}
             </View>
 
-            <View style={styles.homeSection}>
-              <View style={styles.sectionHead}>
-                <Text style={styles.sectionHeading}>Jump Back In</Text>
-                <Pressable
-                  onPress={() => navigation.navigate("AIHistory")}
-                  hitSlop={8}
-                  accessibilityRole="button"
-                  accessibilityLabel="View all AI conversations"
-                >
-                  <Text style={styles.viewAllText}>View all</Text>
-                </Pressable>
-              </View>
-              {recentChats.length === 0 ? (
-                <View style={styles.inlineEmpty}>
-                  <Ionicons name="chatbubbles-outline" size={16} color={colors.textMuted} />
-                  <Text style={styles.inlineEmptyText}>Your recent AI chats will show up here.</Text>
+            {hasAiChats ? (
+              <View style={styles.homeSection}>
+                <View style={styles.sectionHead}>
+                  <Text style={styles.sectionHeading}>Jump Back In</Text>
+                  <Pressable
+                    onPress={() => navigation.navigate("AIHistory")}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="View all AI conversations"
+                  >
+                    <Text style={styles.viewAllText}>View all</Text>
+                  </Pressable>
                 </View>
-              ) : (
                 <View style={styles.recentRow}>
                   {recentChats.map((chat, index) => (
                     <Pressable
@@ -626,35 +659,24 @@ useFocusEffect(
                     </Pressable>
                   ))}
                 </View>
-              )}
-            </View>
-
-            <View style={styles.homeSection}>
-              <View style={styles.sectionHead}>
-                <Text style={styles.sectionHeading} numberOfLines={1}>
-                  Decks Popular at {schoolName}
-                </Text>
-                <Pressable
-                  onPress={openSchoolHub}
-                  hitSlop={8}
-                  accessibilityRole="button"
-                  accessibilityLabel={schoolHub.school || user?.school ? "View all school decks" : "Add your school"}
-                >
-                  <Text style={styles.viewAllText}>
-                    {schoolHub.school || user?.school ? "View all" : "Add school"}
-                  </Text>
-                </Pressable>
               </View>
-              {popularDecks.length === 0 ? (
-                <View style={styles.inlineEmpty}>
-                  <Ionicons name="school-outline" size={16} color={colors.textMuted} />
-                  <Text style={styles.inlineEmptyText}>
-                    {schoolHub.school || user?.school
-                      ? "No public decks from your school yet."
-                      : "Add your school in Settings to see popular decks."}
+            ) : null}
+
+            {hasPopularDecks ? (
+              <View style={styles.homeSection}>
+                <View style={styles.sectionHead}>
+                  <Text style={styles.sectionHeading} numberOfLines={1}>
+                    Decks Popular at {schoolName}
                   </Text>
+                  <Pressable
+                    onPress={openSchoolHub}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="View all school decks"
+                  >
+                    <Text style={styles.viewAllText}>View all</Text>
+                  </Pressable>
                 </View>
-              ) : (
                 <View
                   style={styles.popularCarousel}
                   onLayout={(event) => {
@@ -771,21 +793,107 @@ useFocusEffect(
                     </View>
                   ) : null}
                 </View>
-              )}
-            </View>
+              </View>
+            ) : null}
 
-            {loading && materials.length === 0 ? (
+            {hasMyDecks ? (
+              <View style={styles.homeSection}>
+                <View style={styles.sectionHead}>
+                  <Text style={styles.sectionHeading}>My Decks</Text>
+                  <Pressable
+                    onPress={openMyDecksFiles}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="View all my decks in Files"
+                  >
+                    <Text style={styles.viewAllText}>View all</Text>
+                  </Pressable>
+                </View>
+                <ScrollView
+                  horizontal
+                  nestedScrollEnabled
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.popularTrack}
+                >
+                  {myDecks.map((deck) => {
+                    const cards = deck._count?.flashcards ?? deck.flashcards?.length ?? 0;
+                    const accent = deckAccent(deck.color, colors);
+                    return (
+                      <Pressable
+                        key={deck.id}
+                        onPress={() => openMyDeck(deck)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${deck.name || "Deck"}, ${cards} cards`}
+                        style={({ pressed }) => [
+                          styles.popularCard,
+                          { width: compact ? 240 : 280 },
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <View
+                          pointerEvents="none"
+                          style={[styles.itemAccent, { backgroundColor: accent.color }]}
+                        />
+                        <View style={styles.popularBody}>
+                          <Text style={styles.popularTitle} numberOfLines={2}>
+                            {deck.name || "Untitled deck"}
+                          </Text>
+                          <View style={styles.popularMeta}>
+                            <Text style={styles.popularCards}>
+                              {cards} {cards === 1 ? "card" : "cards"}
+                            </Text>
+                            <View style={styles.popularAuthorRow}>
+                              <Ionicons name={accent.icon} size={14} color={accent.color} />
+                              <Text style={styles.popularAuthor} numberOfLines={1}>
+                                {deck.isPublic ? "Public" : "Private"}
+                              </Text>
+                            </View>
+                          </View>
+                        </View>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            ) : null}
+
+            {loading && !hasNotesOrFlashcards && materials.length === 0 ? (
               <View style={styles.loadingState}>
                 <ActivityIndicator color={colors.violet} />
               </View>
-            ) : materials.length === 0 && quizzes.length === 0 ? (
+            ) : showEmptyState ? (
               <View style={styles.emptyState}>
+                <View style={[styles.emptyIcon, { backgroundColor: colors.violetSoft }]}>
+                  <Ionicons name="layers-outline" size={22} color={colors.violet} />
+                </View>
                 <Text style={styles.emptyTitle}>Nothing here yet</Text>
                 <Text style={styles.mutedText}>Tap Create to add notes or flashcards.</Text>
+                <Pressable
+                  onPress={openSheet}
+                  accessibilityRole="button"
+                  accessibilityLabel="Create notes or flashcards"
+                  style={({ pressed }) => [styles.emptyCta, pressed && styles.pressed]}
+                >
+                  <Ionicons name="add" size={16} color="#fff" />
+                  <Text style={styles.emptyCtaText}>Create</Text>
+                </Pressable>
+                {!profileComplete ? (
+                  <Pressable
+                    onPress={openCompleteProfile}
+                    accessibilityRole="button"
+                    accessibilityLabel="Complete your profile"
+                    style={({ pressed }) => [styles.emptyProfileCta, pressed && styles.pressed]}
+                  >
+                    <Ionicons name="person-outline" size={15} color={colors.violet} />
+                    <Text style={[styles.emptyProfileCtaText, { color: colors.violet }]}>
+                      Complete Your Profile
+                    </Text>
+                  </Pressable>
+                ) : null}
               </View>
-            ) : (
+            ) : materials.length > 0 ? (
               <Text style={styles.sectionLabel}>Your library</Text>
-            )}
+            ) : null}
           </>
         }
         ListFooterComponent={
@@ -1373,13 +1481,15 @@ const createStyles = (colors, isWide, isNarrow, compact, isPhone, isDark) => {
     },
     emptyState: {
       alignItems: "center",
-      paddingHorizontal: 16,
-      paddingVertical: 16,
+      justifyContent: "center",
+      paddingHorizontal: compact ? 18 : 24,
+      paddingVertical: compact ? 28 : 36,
+      marginTop: 8,
       backgroundColor: cardFill,
       borderWidth: 1,
       borderStyle: "dashed",
       borderColor: cardBorder,
-      borderRadius: 18,
+      borderRadius: 20,
     },
     emptyStateCompact: {
       padding: 12,
@@ -1390,22 +1500,41 @@ const createStyles = (colors, isWide, isNarrow, compact, isPhone, isDark) => {
       borderRadius: 18,
     },
     emptyIcon: {
-      width: 48,
-      height: 48,
-      borderRadius: 16,
+      width: 52,
+      height: 52,
+      borderRadius: 18,
       alignItems: "center",
       justifyContent: "center",
-      marginBottom: 10,
+      marginBottom: 12,
     },
-    emptyTitle: type({ color: colors.text, fontSize: 15, fontWeight: "700" }),
+    emptyTitle: type({ color: colors.text, fontSize: compact ? 16 : 17, fontWeight: "700" }),
     emptyCta: {
-      marginTop: 10,
+      marginTop: 16,
+      minWidth: 148,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
       backgroundColor: colors.tomato,
-      borderRadius: 12,
-      paddingHorizontal: 14,
-      paddingVertical: 8,
+      borderRadius: 14,
+      paddingHorizontal: 18,
+      paddingVertical: 11,
     },
-    emptyCtaText: type({ color: "#fff", fontSize: 13, fontWeight: "700" }),
+    emptyCtaText: type({ color: "#fff", fontSize: 14, fontWeight: "700" }),
+    emptyProfileCta: {
+      marginTop: 10,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: colors.violet + "44",
+      backgroundColor: colors.violetSoft,
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+    },
+    emptyProfileCtaText: type({ fontSize: 13, fontWeight: "700" }),
     quizGrid: {
       flexDirection: "row",
       flexWrap: "wrap",

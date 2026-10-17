@@ -152,14 +152,14 @@ export default function HomeScreen({ navigation }) {
 
   useEffect(() => {
     Animated.parallel([
-      Animated.timing(heroOpacity, {
-        toValue: 1,
+    Animated.timing(heroOpacity, {
+      toValue: 1,
         duration: 600,
         easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
+      useNativeDriver: true,
       }),
-      Animated.timing(heroTranslate, {
-        toValue: 0,
+    Animated.timing(heroTranslate, {
+      toValue: 0,
         duration: 600,
         easing: Easing.out(Easing.cubic),
         useNativeDriver: true,
@@ -178,8 +178,8 @@ export default function HomeScreen({ navigation }) {
         Animated.timing(value, {
           toValue: 1,
           duration: 450,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
         })
       )
     ).start();
@@ -233,7 +233,7 @@ export default function HomeScreen({ navigation }) {
             <View>
               <Text style={styles.brandName}>FocusFlow</Text>
               {tablet && <Text style={styles.brandTagline}>AI study companion</Text>}
-            </View>
+          </View>
           </Pressable>
 
           <View style={styles.navActions}>
@@ -437,17 +437,17 @@ export default function HomeScreen({ navigation }) {
                   styles.featureCard,
                   {
                     opacity: cardStagger[index],
-                    transform: [
-                      {
+                  transform: [
+                    {
                         translateY: cardStagger[index].interpolate({
-                          inputRange: [0, 1],
+                        inputRange: [0, 1],
                           outputRange: [18, 0],
-                        }),
-                      },
-                    ],
-                  },
-                ]}
-              >
+                      }),
+                    },
+                  ],
+                },
+              ]}
+            >
                 <View style={[styles.featureIcon, { backgroundColor: feature.soft }]}>
                   <Ionicons name={feature.icon} size={22} color={feature.color} />
                 </View>
@@ -458,9 +458,9 @@ export default function HomeScreen({ navigation }) {
                     Included free
                   </Text>
                   <Ionicons name="checkmark-circle" size={14} color={feature.color} />
-                </View>
-              </Animated.View>
-            ))}
+              </View>
+            </Animated.View>
+          ))}
           </View>
         </View>
 
@@ -504,17 +504,17 @@ export default function HomeScreen({ navigation }) {
             <Text style={styles.finalSubtitle}>
               Create your free account and start your first focused study session today.
             </Text>
-            <Pressable
+        <Pressable
               onPress={() => navigation.navigate("Signup")}
               accessibilityRole="button"
-              style={({ pressed }) => [
+          style={({ pressed }) => [
                 styles.finalButton,
                 pressed && styles.buttonPressed,
-              ]}
-            >
+          ]}
+        >
               <Text style={styles.finalButtonText}>Create free account</Text>
               <Ionicons name="arrow-forward" size={18} color="#FFFFFF" />
-            </Pressable>
+        </Pressable>
           </View>
         </View>
 

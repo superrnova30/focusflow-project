@@ -17,10 +17,8 @@ router.post("/", async (req, res) => {
   });
 
   if (type === "focus" && taskId) {
-    await prisma.task.updateMany({
-      where: { id: taskId, userId: req.user.id },
-      data: { pomodorosSpent: { increment: 1 } },
-    });
+    const { applyFocusRoundToTask } = require("../lib/taskProgress");
+    await applyFocusRoundToTask(req.user.id, taskId);
   }
   await prisma.activityLog.create({ data: { userId: req.user.id, action: "session_complete" } });
   const { scheduleDailyChallengeCheck } = require("../lib/dailyChallenge");

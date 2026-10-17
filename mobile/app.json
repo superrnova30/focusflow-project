@@ -14,7 +14,10 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.focusflow.app"
+      "bundleIdentifier": "com.focusflow.app",
+      "infoPlist": {
+        "UIBackgroundModes": ["remote-notification"]
+      }
     },
     "android": {
       "package": "com.focusflow.app",
@@ -29,7 +32,17 @@
     "plugins": [
       "expo-audio",
       "expo-asset",
-      "expo-notifications"
-    ]
+      [
+        "expo-notifications",
+        {
+          "color": "#FF6B4A",
+          "defaultChannel": "daily-reminder",
+          "enableBackgroundRemoteNotifications": true
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {}
+    }
   }
 }

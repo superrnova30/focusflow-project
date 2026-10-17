@@ -237,11 +237,11 @@ export default function AdminUsersScreen({ navigation }) {
       <View style={styles.headerRow}>
         <View style={{ flex: 1 }}>
           <Text style={styles.eyebrow}>USER MANAGEMENT</Text>
-          <Text style={styles.header}>Users</Text>
+        <Text style={styles.header}>Users</Text>
           <Text style={styles.headerSubtitle}>Review accounts, update access, and open student profiles.</Text>
         </View>
-        <Pressable
-          onPress={() => setShowCreateUser(true)}
+          <Pressable
+            onPress={() => setShowCreateUser(true)}
           accessibilityRole="button"
           accessibilityLabel="Create user"
           style={({ pressed }) => [styles.headerButton, styles.primaryButton, pressed && styles.pressed]}
@@ -304,7 +304,7 @@ export default function AdminUsersScreen({ navigation }) {
                   <Text style={[styles.filterChipText, statusFilter === status && styles.filterChipTextActive]}>
                     {status === "ALL" ? "All" : status === "ACTIVE" ? "Active" : "Disabled"}
                   </Text>
-                </Pressable>
+          </Pressable>
               ))}
             </View>
           </View>

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -14,6 +14,7 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import Svg, { Circle } from "react-native-svg";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Screen } from "../components/Screen";
@@ -22,21 +23,40 @@ import TaskDescriptionEditor from "../components/TaskDescriptionEditor";
 import NoteContentPreview from "../components/NoteContentPreview";
 import { useTheme } from "../context/ThemeContext";
 import { usePremium } from "../context/PremiumContext";
+import { useFocusTimer } from "../context/FocusTimerContext";
 import client from "../api/client";
 import { handleLimitError, promptUpgradeLimit } from "../lib/upgradePrompt";
 import { RADIUS, SPACING } from "../theme/theme";
 import HeaderWallet from "../components/HeaderWallet";
 import NotificationBell from "../components/NotificationBell";
-import { notifyTasksChanged } from "../lib/tasks";
+import { notifyTasksChanged, subscribeTasksChanged } from "../lib/tasks";
+import ConfirmDialog from "../components/ConfirmDialog";
+import { descriptionBlocksForSave } from "../lib/inlineSpans";
+import { useScrollToTopOnFocus } from "../hooks/useScrollToTopOnFocus";
+
+function blockHasContent(block) {
+  const text = String(block?.text || "").trim();
+  const spanText = Array.isArray(block?.spans)
+    ? block.spans.map((span) => String(span?.text || "")).join("").trim()
+    : "";
+  return Boolean(text || spanText);
+}
 
 function parseDescriptionJson(raw) {
-  if (Array.isArray(raw)) return raw;
+  if (Array.isArray(raw)) return raw.filter(blockHasContent);
+  if (raw && typeof raw === "object") {
+    if (Array.isArray(raw.blocks)) return raw.blocks.filter(blockHasContent);
+    if (blockHasContent(raw)) return [raw];
+    return [];
+  }
   if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
     try {
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
+      const parsed = JSON.parse(trimmed);
+      return parseDescriptionJson(parsed);
     } catch {
-      return [];
+      return [{ type: "text", text: trimmed, marks: [] }];
     }
   }
   return [];
@@ -61,10 +81,61 @@ const STATUS_FILTERS = [
 
 const TIME_PRESETS = [15, 25, 45, 60];
 
+function TaskProgressRing({ progress, completed, inProgress = false, colors, size = 40 }) {
+  const strokeWidth = 3.5;
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const pct = completed ? 1 : Math.max(0, Math.min(1, (Number(progress) || 0) / 100));
+  const accent = completed ? colors.mint : colors.violet;
+  const showSpinner = !completed && (inProgress || (pct > 0 && pct < 1));
+  return (
+    <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}>
+      <Svg width={size} height={size} style={{ position: "absolute" }}>
+        <Circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          stroke={colors.border}
+          strokeWidth={strokeWidth}
+          fill="none"
+        />
+        <Circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          stroke={accent}
+          strokeWidth={strokeWidth}
+          fill="none"
+          strokeDasharray={`${circumference} ${circumference}`}
+          strokeDashoffset={circumference * (1 - pct)}
+          strokeLinecap="round"
+          rotation="-90"
+          origin={`${size / 2}, ${size / 2}`}
+        />
+      </Svg>
+      {completed ? (
+        <Ionicons name="checkmark" size={16} color={accent} />
+      ) : showSpinner ? (
+        <ActivityIndicator size="small" color={accent} />
+      ) : (
+        <Text style={{ color: accent, fontSize: 9, fontWeight: "900", fontVariant: ["tabular-nums"] }}>
+          {Math.round(pct * 100)}
+        </Text>
+      )}
+    </View>
+  );
+}
+
 export default function TasksScreen() {
   const navigation = useNavigation();
   const { colors, isDark } = useTheme();
   const { isPremium, refreshLimits } = usePremium();
+  const {
+    startFocusForTask,
+    running: focusRunning,
+    activeTaskId: focusActiveTaskId,
+    setTaskDeckCompleted,
+  } = useFocusTimer();
   const { width, height: windowHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const wide = width >= 900;
@@ -77,6 +148,7 @@ export default function TasksScreen() {
     () => createStyles(colors, isDark, wide, compact),
     [colors, isDark, wide, compact]
   );
+  const scrollRef = useScrollToTopOnFocus();
 
   const [tasks, setTasks] = useState([]);
   const [subjects, setSubjects] = useState([]);
@@ -97,13 +169,29 @@ export default function TasksScreen() {
   const [subjectFilter, setSubjectFilter] = useState(null);
   const [descriptionBlocks, setDescriptionBlocks] = useState([]);
   const [editDescriptionBlocks, setEditDescriptionBlocks] = useState([]);
+  const descriptionEditorRef = useRef(null);
   const [taskLimits, setTaskLimits] = useState(null);
+  const [taskToDelete, setTaskToDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deckOptions, setDeckOptions] = useState([]);
+  const [selectedDeckIds, setSelectedDeckIds] = useState([]);
+  const [editDeckIds, setEditDeckIds] = useState([]);
 
-  const fetchTasks = useCallback(async (archived = showArchived, silent = false) => {
+  const fetchTasks = useCallback(async (archived = showArchived, silent = false, keepTask = null) => {
     if (!silent) setRefreshing(true);
     try {
-      const { data } = await client.get(`/tasks?archived=${archived}`);
-      const nextTasks = (data.tasks || []).filter((task) => Boolean(task.archived) === Boolean(archived));
+      const { data } = await client.get("/tasks", {
+        params: { archived: String(Boolean(archived)), _: Date.now() },
+        headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+      });
+      let nextTasks = (data.tasks || []).filter((task) => Boolean(task.archived) === Boolean(archived));
+      if (
+        keepTask?.id &&
+        Boolean(keepTask.archived) === Boolean(archived) &&
+        !nextTasks.some((task) => task.id === keepTask.id)
+      ) {
+        nextTasks = [keepTask, ...nextTasks];
+      }
       setTasks(nextTasks);
       if (data.limits) setTaskLimits(data.limits);
       await refreshLimits();
@@ -116,10 +204,24 @@ export default function TasksScreen() {
 
   const fetchSubjects = useCallback(async () => {
     try {
-      const { data } = await client.get("/subjects");
+      const { data } = await client.get("/subjects", {
+        params: { _: Date.now() },
+        headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+      });
       setSubjects((data.subjects || []).filter((subject) => !subject.archived));
     } catch {
       // Subject picker is optional; tasks still work without it.
+    }
+  }, []);
+
+  const fetchDecks = useCallback(async () => {
+    try {
+      const { data } = await client.get("/flashcards/collections", {
+        params: { _: Date.now() },
+      });
+      setDeckOptions(data.collections || data.decks || []);
+    } catch {
+      setDeckOptions([]);
     }
   }, []);
 
@@ -127,14 +229,40 @@ export default function TasksScreen() {
     useCallback(() => {
       fetchTasks(showArchived);
       fetchSubjects();
-    }, [fetchTasks, fetchSubjects, showArchived])
+      fetchDecks();
+    }, [fetchTasks, fetchSubjects, fetchDecks, showArchived])
   );
+
+  // Keep All Tasks in sync when Memorize/Tutor/Timer marks decks complete.
+  useEffect(() => {
+    return subscribeTasksChanged((change = {}) => {
+      if (change?.task?.id) {
+        setTasks((current) => {
+          const idx = current.findIndex((item) => item.id === change.task.id);
+          if (change.task.archived && !showArchived) {
+            return current.filter((item) => item.id !== change.task.id);
+          }
+          if (idx === -1) {
+            return showArchived === Boolean(change.task.archived)
+              ? [change.task, ...current]
+              : current;
+          }
+          const next = current.slice();
+          next[idx] = { ...next[idx], ...change.task };
+          return next;
+        });
+        if (viewingTask?.id === change.task.id) setViewingTask((prev) => ({ ...prev, ...change.task }));
+      }
+      fetchTasks(showArchived, true);
+    });
+  }, [fetchTasks, showArchived, viewingTask?.id]);
 
   const resetNewTaskForm = () => {
     setTitle("");
     setSubjectName("");
     setEstMinutes("25");
     setDescriptionBlocks([]);
+    setSelectedDeckIds([]);
   };
 
   const resetEditTaskForm = () => {
@@ -143,6 +271,7 @@ export default function TasksScreen() {
     setEditSubjectName("");
     setEditEstMinutes("25");
     setEditDescriptionBlocks([]);
+    setEditDeckIds([]);
   };
 
   const closeTaskModal = () => {
@@ -163,7 +292,21 @@ export default function TasksScreen() {
     }
     resetEditTaskForm();
     resetNewTaskForm();
+    fetchSubjects();
+    fetchDecks();
     setShowAddModal(true);
+  };
+
+  const toggleFormDeck = (deckId) => {
+    if (editingTask) {
+      setEditDeckIds((current) =>
+        current.includes(deckId) ? current.filter((id) => id !== deckId) : [...current, deckId]
+      );
+      return;
+    }
+    setSelectedDeckIds((current) =>
+      current.includes(deckId) ? current.filter((id) => id !== deckId) : [...current, deckId]
+    );
   };
 
   const openTaskDetails = (task) => {
@@ -181,6 +324,9 @@ export default function TasksScreen() {
     setEditSubjectName(task.subject?.archived ? "" : task.subject?.name || "");
     setEditEstMinutes(String(task.estMinutes || 25));
     setEditDescriptionBlocks(parseDescriptionJson(task.descriptionJson));
+    setEditDeckIds((task.decks || []).map((d) => d.id).filter(Boolean));
+    fetchSubjects();
+    fetchDecks();
     setShowAddModal(true);
   };
 
@@ -198,6 +344,13 @@ export default function TasksScreen() {
     return data.subject.id;
   };
 
+  const readDescriptionBlocks = () => {
+    const fromState = editingTask ? editDescriptionBlocks : descriptionBlocks;
+    const live = descriptionEditorRef.current?.getValue?.();
+    if (descriptionBlocksForSave(live)) return live;
+    return fromState;
+  };
+
   const addTask = async () => {
     if (!title.trim()) {
       Alert.alert("Task name required", "Enter what you need to work on.");
@@ -211,13 +364,34 @@ export default function TasksScreen() {
         title: title.trim(),
         subjectId,
         estMinutes: Math.max(1, Number(estMinutes) || 25),
-        descriptionJson: descriptionBlocks.length ? descriptionBlocks : null,
+        descriptionJson: descriptionBlocksForSave(readDescriptionBlocks()),
+        collectionIds: selectedDeckIds,
+        progress: 0,
       });
-      setTasks((current) => [data.task, ...current]);
+      const created = data.task;
+      if (!created?.id) {
+        Alert.alert("Could not add task", "The task was created but could not be shown. Pull to refresh.");
+        return;
+      }
+      setShowArchived(false);
+      if (statusFilter === "done") setStatusFilter("all");
+      if (subjectFilter && created.subjectId && created.subjectId !== subjectFilter) {
+        setSubjectFilter(null);
+      }
+      const query = searchQuery.trim().toLowerCase();
+      if (query && !String(created.title || "").toLowerCase().includes(query)) {
+        setSearchQuery("");
+      }
+      const mergeCreated = (current) => [
+        created,
+        ...current.filter((task) => task.id !== created.id && !task.archived),
+      ];
+      setTasks(mergeCreated);
       notifyTasksChanged();
       if (data.limits) setTaskLimits(data.limits);
       closeTaskModal();
-      await fetchTasks(false, true);
+      await Promise.all([fetchTasks(false, true, created), fetchSubjects()]);
+      setTasks(mergeCreated);
     } catch (error) {
       if (handleLimitError(navigation, error, { title: "Unlimited tasks" })) return;
       Alert.alert("Could not add task", error.message);
@@ -242,7 +416,8 @@ export default function TasksScreen() {
         title: editTitle.trim(),
         subjectId,
         estMinutes: Math.max(1, Number(editEstMinutes) || 25),
-        descriptionJson: editDescriptionBlocks.length ? editDescriptionBlocks : null,
+        descriptionJson: descriptionBlocksForSave(readDescriptionBlocks()),
+        collectionIds: editDeckIds,
       });
       setTasks((current) =>
         current.map((task) =>
@@ -250,7 +425,7 @@ export default function TasksScreen() {
         )
       );
       closeTaskModal();
-      await fetchTasks(showArchived, true);
+      await Promise.all([fetchTasks(showArchived, true, data.task), fetchSubjects()]);
       notifyTasksChanged();
     } catch (error) {
       Alert.alert("Could not update task", error.message);
@@ -264,20 +439,112 @@ export default function TasksScreen() {
     const nextCompleted = !task.completed;
     setTasks((current) =>
       current.map((item) =>
-        item.id === task.id ? { ...item, completed: nextCompleted } : item
+        item.id === task.id
+          ? {
+              ...item,
+              completed: nextCompleted,
+              progress: nextCompleted ? 100 : item.progress,
+            }
+          : item
       )
     );
     try {
-      await client.patch(`/tasks/${task.id}`, { completed: nextCompleted });
+      await client.patch(`/tasks/${task.id}`, {
+        completed: nextCompleted,
+        ...(nextCompleted ? { progress: 100 } : {}),
+      });
       notifyTasksChanged();
     } catch (error) {
       setTasks((current) =>
         current.map((item) =>
-          item.id === task.id ? { ...item, completed: task.completed } : item
+          item.id === task.id ? { ...item, completed: task.completed, progress: task.progress } : item
         )
       );
       Alert.alert("Could not update task", error.message);
     }
+  };
+
+  const updateTaskProgress = async (task, nextProgress) => {
+    if (showArchived || task.completed) return;
+    // Deck-linked tasks derive progress from completed decks — don't override manually.
+    if ((task.decks || []).length > 0) return;
+    const progress = Math.max(0, Math.min(100, Math.round(Number(nextProgress) || 0)));
+    const completed = progress >= 100;
+    setTasks((current) =>
+      current.map((item) => (item.id === task.id ? { ...item, progress, completed } : item))
+    );
+    if (viewingTask?.id === task.id) {
+      setViewingTask((current) => (current ? { ...current, progress, completed } : current));
+    }
+    try {
+      await client.patch(`/tasks/${task.id}`, { progress });
+      notifyTasksChanged({ updatedTaskId: task.id });
+    } catch (error) {
+      setTasks((current) =>
+        current.map((item) =>
+          item.id === task.id ? { ...item, progress: task.progress, completed: task.completed } : item
+        )
+      );
+      Alert.alert("Could not update progress", error.message);
+    }
+  };
+
+  const toggleTaskDeckCompleted = async (task, deck) => {
+    if (showArchived || !task?.id || !deck?.id) return;
+    try {
+      const updated = await setTaskDeckCompleted(task.id, deck.id, !deck.completed);
+      if (!updated) return;
+      setTasks((current) =>
+        current.map((item) => (item.id === updated.id ? { ...item, ...updated } : item))
+      );
+      if (viewingTask?.id === updated.id) setViewingTask(updated);
+    } catch (error) {
+      Alert.alert("Could not update deck", error.message || "Please try again.");
+    }
+  };
+
+  const promptProgress = (task) => {
+    if (showArchived) return;
+    if (task.completed) {
+      toggleTask(task);
+      return;
+    }
+    const hasDecks = (task.decks || []).length > 0;
+    if (hasDecks) {
+      Alert.alert(
+        "Task progress",
+        "Progress is based on completed study decks. Mark decks done below, or complete the whole task.",
+        [
+          { text: "Complete task", onPress: () => toggleTask(task) },
+          { text: "Cancel", style: "cancel" },
+        ]
+      );
+      return;
+    }
+    // Android Alert supports only 3 buttons — use a short menu + follow-up.
+    Alert.alert("Update progress", task.title, [
+      {
+        text: "Set %",
+        onPress: () => {
+          Alert.alert("Progress", "How far along are you?", [
+            { text: "0%", onPress: () => updateTaskProgress(task, 0) },
+            { text: "50%", onPress: () => updateTaskProgress(task, 50) },
+            {
+              text: "More…",
+              onPress: () => {
+                Alert.alert("Progress", undefined, [
+                  { text: "25%", onPress: () => updateTaskProgress(task, 25) },
+                  { text: "75%", onPress: () => updateTaskProgress(task, 75) },
+                  { text: "Cancel", style: "cancel" },
+                ]);
+              },
+            },
+          ]);
+        },
+      },
+      { text: "Complete", onPress: () => toggleTask(task) },
+      { text: "Cancel", style: "cancel" },
+    ]);
   };
 
   const archiveTask = async (task) => {
@@ -303,28 +570,24 @@ export default function TasksScreen() {
     }
   };
 
-  const deleteTask = async (task) => {
-    Alert.alert(
-      "Delete task permanently?",
-      `Permanently delete “${task.title}”? This cannot be undone.`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              const { data } = await client.delete(`/tasks/${task.id}`);
-              setTasks((current) => current.filter((item) => item.id !== task.id));
-              if (data.limits) setTaskLimits(data.limits);
-              notifyTasksChanged();
-            } catch (error) {
-              Alert.alert("Could not delete task", error.message);
-            }
-          },
-        },
-      ]
-    );
+  const deleteTask = (task) => setTaskToDelete(task);
+
+  const confirmDeleteTask = async () => {
+    const task = taskToDelete;
+    if (!task?.id || deleting) return;
+    setDeleting(true);
+    try {
+      const { data } = await client.delete(`/tasks/${task.id}`);
+      setTasks((current) => current.filter((item) => item.id !== task.id));
+      if (viewingTask?.id === task.id) setViewingTask(null);
+      if (data.limits) setTaskLimits(data.limits);
+      notifyTasksChanged({ removedTaskId: task.id });
+      setTaskToDelete(null);
+    } catch (error) {
+      Alert.alert("Could not delete task", error.message);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const completedCount = tasks.filter((task) => task.completed).length;
@@ -337,11 +600,14 @@ export default function TasksScreen() {
     0
   );
 
+  const isHiddenBySubject = (task) => Boolean(task.subject?.archived);
+
   const filteredTasks = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    return tasks.filter((task) => {
-      if (!showArchived && task.archived) return false;
-      if (showArchived && !task.archived) return false;
+    const filtered = tasks.filter((task) => {
+      const archivedAway = Boolean(task.archived) || isHiddenBySubject(task);
+      if (!showArchived && archivedAway) return false;
+      if (showArchived && !archivedAway) return false;
       if (statusFilter === "todo" && task.completed) return false;
       if (statusFilter === "done" && !task.completed) return false;
       if (subjectFilter && task.subjectId !== subjectFilter) return false;
@@ -357,7 +623,36 @@ export default function TasksScreen() {
       }
       return true;
     });
+    // Incomplete tasks stay on top; completed move to the bottom.
+    return filtered.slice().sort((a, b) => {
+      const aDone = a.completed ? 1 : 0;
+      const bDone = b.completed ? 1 : 0;
+      if (aDone !== bDone) return aDone - bDone;
+      const aTime = new Date(a.createdAt || 0).getTime();
+      const bTime = new Date(b.createdAt || 0).getTime();
+      return bTime - aTime;
+    });
   }, [tasks, searchQuery, statusFilter, subjectFilter, showArchived]);
+
+  const subjectsWithTasks = useMemo(() => {
+    const ids = new Set(
+      tasks
+        .filter((task) => !task.archived && !task.subject?.archived && task.subjectId)
+        .map((task) => task.subjectId)
+    );
+    return subjects.filter((subject) => ids.has(subject.id));
+  }, [subjects, tasks]);
+
+  const formSubjects = useMemo(() => {
+    const selectedName = (editingTask ? editSubjectName : subjectName).trim().toLowerCase();
+    const byId = new Map(subjectsWithTasks.map((subject) => [subject.id, subject]));
+    subjects.forEach((subject) => {
+      if (selectedName && subject.name.toLowerCase() === selectedName) {
+        byId.set(subject.id, subject);
+      }
+    });
+    return Array.from(byId.values());
+  }, [subjectsWithTasks, subjects, editingTask, editSubjectName, subjectName]);
 
   const selectSubjectName = (name) => {
     if (editingTask) setEditSubjectName(name);
@@ -367,6 +662,7 @@ export default function TasksScreen() {
   return (
     <Screen>
       <ScrollView
+        ref={scrollRef}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={styles.page}
@@ -559,7 +855,7 @@ export default function TasksScreen() {
                 })}
               </ScrollView>
 
-              {subjects.length > 0 && (
+              {subjectsWithTasks.length > 0 && (
                 <ScrollView
                   horizontal
                   showsHorizontalScrollIndicator={false}
@@ -577,7 +873,7 @@ export default function TasksScreen() {
                   >
                     <Text style={styles.subjectFilterText}>All subjects</Text>
                   </Pressable>
-                  {subjects.map((subject) => {
+                  {subjectsWithTasks.map((subject) => {
                     const selected = subjectFilter === subject.id;
                     return (
                       <Pressable
@@ -617,7 +913,15 @@ export default function TasksScreen() {
         <View style={styles.listHeader}>
           <View style={styles.listHeaderCopy}>
             <Text style={styles.listTitle}>
-              {showArchived ? "Archived" : statusFilter === "done" ? "Completed" : statusFilter === "todo" ? "To do" : "All tasks"}
+              {showArchived
+                ? "Archived"
+                : subjectFilter
+                  ? subjects.find((subject) => subject.id === subjectFilter)?.name || "Subject"
+                  : statusFilter === "done"
+                    ? "Completed"
+                    : statusFilter === "todo"
+                      ? "To do"
+                      : "All tasks"}
             </Text>
             <Text style={styles.listMeta}>
               {filteredTasks.length} {filteredTasks.length === 1 ? "task" : "tasks"}
@@ -697,25 +1001,30 @@ export default function TasksScreen() {
               >
                 <View style={styles.taskCardTop}>
                   <Pressable
-                    onPress={() => toggleTask(task)}
+                    onPress={() => promptProgress(task)}
                     disabled={showArchived}
-                    accessibilityRole="checkbox"
-                    accessibilityState={{ checked: task.completed, disabled: showArchived }}
-                    accessibilityLabel={`${task.completed ? "Mark incomplete" : "Mark complete"}: ${task.title}`}
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      task.completed
+                        ? `Completed ${task.title}. Tap to mark incomplete.`
+                        : `Progress ${task.progress || 0} percent for ${task.title}`
+                    }
                     style={[
-                      styles.checkbox,
-                      task.completed && {
-                        backgroundColor: colors.mint,
-                        borderColor: colors.mint,
-                      },
+                      styles.progressControl,
                       showArchived && styles.archivedCheckbox,
                     ]}
                   >
                     {showArchived ? (
                       <Ionicons name="archive-outline" size={14} color={colors.textMuted} />
-                    ) : task.completed ? (
-                      <Ionicons name="checkmark" size={14} color="#FFFFFF" />
-                    ) : null}
+                    ) : (
+                      <TaskProgressRing
+                        progress={task.progress}
+                        completed={Boolean(task.completed)}
+                        inProgress={Boolean(focusRunning && focusActiveTaskId === task.id)}
+                        colors={colors}
+                        size={40}
+                      />
+                    )}
                   </Pressable>
 
                   <Pressable
@@ -750,6 +1059,81 @@ export default function TasksScreen() {
                         <Text style={styles.taskBadgeText}>{task.estMinutes || 25} min</Text>
                       </View>
                     </View>
+                    {(task.decks || []).length > 0 ? (
+                      <View style={styles.deckChipList}>
+                        {(task.decks || []).map((deck) => {
+                          const done = Boolean(deck.completed);
+                          return (
+                            <Pressable
+                              key={deck.id}
+                              onPress={() => !showArchived && toggleTaskDeckCompleted(task, deck)}
+                              disabled={showArchived}
+                              accessibilityRole="checkbox"
+                              accessibilityState={{ checked: done }}
+                              accessibilityLabel={`${deck.name}${done ? " completed" : ""}`}
+                              style={({ pressed }) => [
+                                styles.deckChip,
+                                {
+                                  borderColor: done ? colors.mint : colors.border,
+                                  backgroundColor: done ? colors.mintSoft : colors.bg,
+                                },
+                                pressed && !showArchived && styles.pressed,
+                              ]}
+                            >
+                              <Ionicons
+                                name={done ? "checkmark-circle" : "ellipse-outline"}
+                                size={13}
+                                color={done ? colors.mint : colors.textMuted}
+                              />
+                              <Text
+                                numberOfLines={1}
+                                style={[
+                                  styles.deckChipText,
+                                  { color: done ? colors.textMuted : colors.text },
+                                  done && styles.deckChipTextDone,
+                                ]}
+                              >
+                                {deck.name}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    ) : null}
+                    {!showArchived ? (
+                      <View style={styles.taskProgressBlock}>
+                        <View style={styles.taskProgressHeader}>
+                          <Text style={[styles.taskProgressLabel, { color: colors.textMuted }]}>
+                            {(task.decks || []).length > 0
+                              ? `${(task.decks || []).filter((d) => d.completed).length}/${(task.decks || []).length} decks`
+                              : task.completed
+                                ? "Completed"
+                                : "In progress"}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.taskProgressPct,
+                              { color: task.completed ? colors.mint : colors.violet },
+                            ]}
+                          >
+                            {task.completed
+                              ? "100%"
+                              : `${Math.max(0, Math.min(100, Number(task.progress) || 0))}%`}
+                          </Text>
+                        </View>
+                        <View style={[styles.taskProgressTrack, { backgroundColor: colors.bg }]}>
+                          <View
+                            style={[
+                              styles.taskProgressFill,
+                              {
+                                width: `${task.completed ? 100 : Math.max(0, Math.min(100, Number(task.progress) || 0))}%`,
+                                backgroundColor: task.completed ? colors.mint : colors.violet,
+                              },
+                            ]}
+                          />
+                        </View>
+                      </View>
+                    ) : null}
                   </Pressable>
                 </View>
 
@@ -808,6 +1192,19 @@ export default function TasksScreen() {
                       </>
                     ) : (
                       <>
+                        {!task.completed ? (
+                          <Pressable
+                            onPress={() => startFocusForTask(task, { autoStart: true })}
+                            disabled={focusRunning}
+                            accessibilityLabel={`Start focus for ${task.title}`}
+                            style={({ pressed }) => [
+                              styles.taskAction,
+                              (pressed || focusRunning) && styles.pressed,
+                            ]}
+                          >
+                            <Ionicons name="play" size={17} color={colors.tomato} />
+                          </Pressable>
+                        ) : null}
                         <Pressable
                           onPress={() => openEditTaskModal(task)}
                           accessibilityLabel={`Edit ${task.title}`}
@@ -937,7 +1334,7 @@ export default function TasksScreen() {
                         None
                       </Text>
                     </Pressable>
-                    {subjects.map((subject) => {
+                    {formSubjects.map((subject) => {
                       const currentName = editingTask ? editSubjectName : subjectName;
                       const selected = currentName.trim().toLowerCase() === subject.name.toLowerCase();
                       return (
@@ -975,7 +1372,7 @@ export default function TasksScreen() {
 
                 <View style={styles.fieldGroup}>
                   <View style={styles.fieldHead}>
-                    <Text style={styles.fieldLabel}>Time estimate</Text>
+                    <Text style={styles.fieldLabel}>Focus time</Text>
                   </View>
                   <View style={styles.estimateRow}>
                     {TIME_PRESETS.map((mins) => {
@@ -1008,10 +1405,58 @@ export default function TasksScreen() {
                       <Text style={styles.estimateUnit}>min</Text>
                     </View>
                   </View>
+                  <Text style={styles.fieldHint}>
+                    Used when you start focus from this task on the Timer tab. Decks are optional.
+                  </Text>
+                </View>
+
+                <View style={styles.fieldGroup}>
+                  <View style={styles.fieldHead}>
+                    <Text style={styles.fieldLabel}>Flashcard decks</Text>
+                    <Text style={styles.optionalBadge}>Optional</Text>
+                  </View>
+                  {deckOptions.length === 0 ? (
+                    <Text style={styles.fieldHint}>
+                      No decks yet. Create one in Files, or save this task with focus time only.
+                    </Text>
+                  ) : (
+                    <View style={styles.subjectChipWrap}>
+                      {deckOptions.map((deck) => {
+                        const ids = editingTask ? editDeckIds : selectedDeckIds;
+                        const selected = ids.includes(deck.id);
+                        return (
+                          <Pressable
+                            key={deck.id}
+                            onPress={() => toggleFormDeck(deck.id)}
+                            style={[
+                              styles.modalSubjectChip,
+                              selected && styles.modalSubjectChipSelected,
+                            ]}
+                          >
+                            <Ionicons
+                              name={selected ? "checkbox" : "square-outline"}
+                              size={14}
+                              color={selected ? colors.violet : colors.textMuted}
+                            />
+                            <Text
+                              style={[
+                                styles.modalSubjectText,
+                                selected && styles.modalSubjectTextSelected,
+                              ]}
+                              numberOfLines={1}
+                            >
+                              {deck.name}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  )}
                 </View>
 
                 <View style={styles.descriptionSection}>
                   <TaskDescriptionEditor
+                    ref={descriptionEditorRef}
                     compact={compact}
                     inModal
                     value={editingTask ? editDescriptionBlocks : descriptionBlocks}
@@ -1184,6 +1629,15 @@ export default function TasksScreen() {
                         <Text style={styles.detailsMetaValue}>{viewingTask.pomodorosSpent || 0}</Text>
                       </View>
                     </View>
+                    <View style={styles.detailsMeta}>
+                      <Ionicons name="stats-chart-outline" size={16} color={colors.violet} />
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.detailsMetaLabel}>Progress</Text>
+                        <Text style={styles.detailsMetaValue}>
+                          {viewingTask.completed ? "100%" : `${Math.max(0, Math.min(100, Number(viewingTask.progress) || 0))}%`}
+                        </Text>
+                      </View>
+                    </View>
                     {formatTaskDate(viewingTask.createdAt) ? (
                       <View style={styles.detailsMeta}>
                         <Ionicons name="calendar-outline" size={16} color={colors.mint} />
@@ -1194,6 +1648,76 @@ export default function TasksScreen() {
                       </View>
                     ) : null}
                   </View>
+
+                  {(viewingTask.decks || []).length > 0 ? (
+                    <View style={styles.detailsNotes}>
+                      <Text style={styles.detailsNotesLabel}>Study decks</Text>
+                      <View style={styles.deckChipList}>
+                        {(viewingTask.decks || []).map((deck) => {
+                          const done = Boolean(deck.completed);
+                          return (
+                            <Pressable
+                              key={deck.id}
+                              onPress={() =>
+                                !showArchived &&
+                                !viewingTask.archived &&
+                                toggleTaskDeckCompleted(viewingTask, deck)
+                              }
+                              disabled={showArchived || viewingTask.archived}
+                              style={({ pressed }) => [
+                                styles.deckChip,
+                                {
+                                  borderColor: done ? colors.mint : colors.border,
+                                  backgroundColor: done ? colors.mintSoft : colors.bg,
+                                },
+                                pressed && styles.pressed,
+                              ]}
+                            >
+                              <Ionicons
+                                name={done ? "checkmark-circle" : "ellipse-outline"}
+                                size={14}
+                                color={done ? colors.mint : colors.textMuted}
+                              />
+                              <Text
+                                numberOfLines={1}
+                                style={[
+                                  styles.deckChipText,
+                                  { color: done ? colors.textMuted : colors.text },
+                                  done && styles.deckChipTextDone,
+                                ]}
+                              >
+                                {deck.name}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                      <View style={[styles.taskProgressBlock, { marginTop: 12 }]}>
+                        <View style={styles.taskProgressHeader}>
+                          <Text style={[styles.taskProgressLabel, { color: colors.textMuted }]}>
+                            {(viewingTask.decks || []).filter((d) => d.completed).length}/
+                            {(viewingTask.decks || []).length} decks complete
+                          </Text>
+                          <Text style={[styles.taskProgressPct, { color: colors.violet }]}>
+                            {viewingTask.completed
+                              ? "100%"
+                              : `${Math.max(0, Math.min(100, Number(viewingTask.progress) || 0))}%`}
+                          </Text>
+                        </View>
+                        <View style={[styles.taskProgressTrack, { backgroundColor: colors.bg }]}>
+                          <View
+                            style={[
+                              styles.taskProgressFill,
+                              {
+                                width: `${viewingTask.completed ? 100 : Math.max(0, Math.min(100, Number(viewingTask.progress) || 0))}%`,
+                                backgroundColor: viewingTask.completed ? colors.mint : colors.violet,
+                              },
+                            ]}
+                          />
+                        </View>
+                      </View>
+                    </View>
+                  ) : null}
 
                   <View style={styles.detailsNotes}>
                     <Text style={styles.detailsNotesLabel}>Notes</Text>
@@ -1213,16 +1737,72 @@ export default function TasksScreen() {
                     >
                       <Text style={styles.cancelButtonText}>Close</Text>
                     </Pressable>
-                    {!viewingTask.archived && !showArchived ? (
+                    {viewingTask.archived || showArchived ? (
                       <Pressable
-                        onPress={() => openEditTaskModal(viewingTask)}
-                        accessibilityLabel={`Edit ${viewingTask.title}`}
-                        style={({ pressed }) => [styles.saveButton, pressed && styles.pressed]}
+                        onPress={() => {
+                          closeTaskDetails();
+                          deleteTask(viewingTask);
+                        }}
+                        accessibilityLabel={`Delete ${viewingTask.title} permanently`}
+                        style={({ pressed }) => [styles.saveButton, { backgroundColor: "#EF4444" }, pressed && styles.pressed]}
                       >
-                        <Ionicons name="create-outline" size={18} color="#FFFFFF" />
-                        <Text style={styles.saveButtonText}>Edit task</Text>
+                        <Ionicons name="trash-outline" size={18} color="#FFFFFF" />
+                        <Text style={styles.saveButtonText}>Delete</Text>
                       </Pressable>
-                    ) : null}
+                    ) : (
+                      <>
+                        {!viewingTask.completed ? (
+                          <Pressable
+                            onPress={() => {
+                              closeTaskDetails();
+                              startFocusForTask(viewingTask, { autoStart: true });
+                            }}
+                            disabled={focusRunning}
+                            accessibilityLabel={`Start focus for ${viewingTask.title}`}
+                            style={({ pressed }) => [
+                              styles.cancelButton,
+                              { borderColor: colors.tomato },
+                              (pressed || focusRunning) && styles.pressed,
+                            ]}
+                          >
+                            <Text style={[styles.cancelButtonText, { color: colors.tomato }]}>
+                              {focusRunning ? "Focusing…" : "Start focus"}
+                            </Text>
+                          </Pressable>
+                        ) : (
+                          <Pressable
+                            onPress={() => {
+                              toggleTask(viewingTask);
+                              setViewingTask((current) =>
+                                current
+                                  ? {
+                                      ...current,
+                                      completed: false,
+                                    }
+                                  : current
+                              );
+                            }}
+                            style={({ pressed }) => [
+                              styles.cancelButton,
+                              { borderColor: colors.mint },
+                              pressed && styles.pressed,
+                            ]}
+                          >
+                            <Text style={[styles.cancelButtonText, { color: colors.mint }]}>
+                              Reopen
+                            </Text>
+                          </Pressable>
+                        )}
+                        <Pressable
+                          onPress={() => openEditTaskModal(viewingTask)}
+                          accessibilityLabel={`Edit ${viewingTask.title}`}
+                          style={({ pressed }) => [styles.saveButton, pressed && styles.pressed]}
+                        >
+                          <Ionicons name="create-outline" size={18} color="#FFFFFF" />
+                          <Text style={styles.saveButtonText}>Edit task</Text>
+                        </Pressable>
+                      </>
+                    )}
                   </View>
                 </View>
               </View>
@@ -1230,6 +1810,20 @@ export default function TasksScreen() {
           </KeyboardAvoidingView>
         </View>
       </Modal>
+
+      <ConfirmDialog
+        visible={Boolean(taskToDelete)}
+        title="Delete task permanently?"
+        message={`Permanently delete “${taskToDelete?.title || "this task"}”? This cannot be undone.`}
+        cancelText="Cancel"
+        confirmText="Delete"
+        destructive
+        loading={deleting}
+        onCancel={() => {
+          if (!deleting) setTaskToDelete(null);
+        }}
+        onConfirm={confirmDeleteTask}
+      />
     </Screen>
   );
 }
@@ -1500,6 +2094,55 @@ const createStyles = (colors, isDark, wide, compact) =>
     taskCardTop: { flexDirection: "row", alignItems: "flex-start", gap: 11 },
     taskMain: { flex: 1, minWidth: 0 },
     taskTitleRow: { flexDirection: "row", alignItems: "flex-start", gap: 6 },
+    progressControl: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      alignItems: "center",
+      justifyContent: "center",
+      marginTop: 2,
+      backgroundColor: "transparent",
+    },
+    deckChipList: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 6,
+      marginTop: 10,
+    },
+    deckChip: {
+      maxWidth: "100%",
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 5,
+      paddingHorizontal: 9,
+      paddingVertical: 5,
+      borderRadius: RADIUS.pill,
+      borderWidth: 1,
+    },
+    deckChipText: { fontSize: 11, fontWeight: "700", maxWidth: 160 },
+    deckChipTextDone: { textDecorationLine: "line-through", fontWeight: "600" },
+    taskProgressBlock: { marginTop: 12, gap: 6 },
+    taskProgressHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 8,
+    },
+    taskProgressLabel: { fontSize: 11, fontWeight: "700" },
+    taskProgressPct: { fontSize: 12, fontWeight: "900", fontVariant: ["tabular-nums"] },
+    taskProgressTrack: {
+      height: 6,
+      borderRadius: 4,
+      overflow: "hidden",
+    },
+    taskProgressFill: { height: "100%", borderRadius: 4 },
+    fieldHint: {
+      color: colors.textMuted,
+      fontSize: 11.5,
+      lineHeight: 16,
+      fontWeight: "500",
+      marginTop: 8,
+    },
     checkbox: {
       width: 25,
       height: 25,

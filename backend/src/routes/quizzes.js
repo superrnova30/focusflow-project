@@ -3,11 +3,29 @@ const prisma = require("../lib/prisma");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { bumpStreak, loadUserGamification, heartsDepletedPayload, heartsRefillAtFrom, loseHeart, awardCorrectAnswer, MAX_HEARTS } = require("../lib/gamification");
 const { isPremiumActive } = require("../lib/premium");
+const { consumeHint } = require("../lib/featureLimits");
+const { buildGameState } = require("../lib/memorize");
 
 const router = express.Router();
 router.use(requireAuth);
 
-const QUIZ_XP_PER_CORRECT = 100;
+const QUIZ_XP_PER_CORRECT = 20;
+const QUIZ_XP_WITH_HINT = 10;
+
+async function quizQuestionXpAlreadyAwarded(userId, awardKey) {
+  if (!userId || !awardKey) return false;
+  const rows = await prisma.activityLog.findMany({
+    where: {
+      userId,
+      action: "quiz_question_xp",
+      createdAt: { gte: new Date(Date.now() - 12 * 60 * 60 * 1000) },
+    },
+    select: { meta: true },
+    orderBy: { createdAt: "desc" },
+    take: 300,
+  });
+  return rows.some((row) => row?.meta && String(row.meta.awardKey || "") === String(awardKey));
+}
 
 // Role-aware quiz listing:
 //  - Students see published quizzes assigned to them (or their own generated ones)
@@ -142,6 +160,74 @@ router.get("/:id/take", async (req, res) => {
   res.json({ quiz: { ...quiz, questions, total: quiz.questions.length } });
 });
 
+router.post("/:id/hint", async (req, res) => {
+  const quiz = await prisma.quiz.findUnique({
+    where: { id: req.params.id },
+    include: { questions: true, assignments: true },
+  });
+  if (!quiz) return res.status(404).json({ error: "Quiz not found" });
+
+  if (req.user.role === "STUDENT") {
+    const eligible =
+      quiz.createdById === req.user.id ||
+      quiz.isPublished ||
+      quiz.assignments.some((a) => a.studentId === req.user.id);
+    if (!eligible) return res.status(403).json({ error: "This quiz hasn't been assigned to you yet" });
+  }
+
+  const question = quiz.questions.find((q) => q.id === req.body?.questionId);
+  if (!question) return res.status(404).json({ error: "Question not found" });
+
+  const alreadyEliminated = Array.isArray(req.body?.eliminatedOptions)
+    ? req.body.eliminatedOptions.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const options =
+    question.type === "true_false"
+      ? ["True", "False"]
+      : Array.isArray(question.options)
+        ? question.options.map((item) => String(item || "").trim()).filter(Boolean)
+        : [];
+  if (options.length < 2) {
+    return res.status(400).json({ error: "Hints are only available for multiple-choice questions." });
+  }
+
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  const answer = String(question.answer || "").trim();
+  const remainingWrong = options.filter(
+    (opt) => norm(opt) !== norm(answer) && !alreadyEliminated.some((item) => norm(item) === norm(opt))
+  );
+  if (!remainingWrong.length) {
+    return res.status(400).json({ error: "No incorrect choices left to remove." });
+  }
+
+  let hintState;
+  try {
+    hintState = await consumeHint(req.user.id);
+  } catch (err) {
+    if (err.status === 403) {
+      return res.status(403).json({
+        error: err.message || "No hints remaining.",
+        code: err.code || "NO_HINTS_REMAINING",
+        upgradeRequired: true,
+        limits: err.limits,
+      });
+    }
+    throw err;
+  }
+
+  const eliminated = remainingWrong[Math.floor(Math.random() * remainingWrong.length)];
+  const player = await loadUserGamification(req.user.id);
+  const premium = isPremiumActive(player);
+  const game = buildGameState(player, premium);
+
+  res.json({
+    eliminated,
+    eliminatedOptions: [...alreadyEliminated, eliminated],
+    hints: hintState.hints,
+    unlimitedHints: Boolean(hintState.unlimitedHints || game.unlimitedHints),
+  });
+});
+
 router.post("/:id/check", async (req, res) => {
   const quiz = await prisma.quiz.findUnique({
     where: { id: req.params.id },
@@ -166,11 +252,13 @@ router.post("/:id/check", async (req, res) => {
   const question = quiz.questions.find((q) => q.id === req.body?.questionId);
   if (!question) return res.status(404).json({ error: "Question not found" });
 
+  const usedHint = Boolean(req.body?.usedHint);
   const norm = (s) => (s || "").toString().trim().toLowerCase();
   const correct = norm(req.body?.answer) === norm(question.answer);
   let lost = null;
 
   let reward = null;
+  let alreadyAwarded = false;
   if (req.user.role === "STUDENT" && !correct) {
     try {
       lost = await loseHeart(req.user.id, "quiz_check");
@@ -179,7 +267,27 @@ router.post("/:id/check", async (req, res) => {
       throw err;
     }
   } else if (req.user.role === "STUDENT" && correct) {
-    reward = await awardCorrectAnswer(req.user.id, { baseXp: QUIZ_XP_PER_CORRECT });
+    const awardKey = `${quiz.id}:${question.id}`;
+    if (await quizQuestionXpAlreadyAwarded(req.user.id, awardKey)) {
+      alreadyAwarded = true;
+    } else {
+      const baseXp = usedHint ? QUIZ_XP_WITH_HINT : QUIZ_XP_PER_CORRECT;
+      reward = await awardCorrectAnswer(req.user.id, { baseXp });
+      await prisma.activityLog.create({
+        data: {
+          userId: req.user.id,
+          action: "quiz_question_xp",
+          meta: {
+            awardKey,
+            quizId: quiz.id,
+            questionId: question.id,
+            usedHint,
+            baseXp,
+            xpAwarded: reward?.xpAwarded || 0,
+          },
+        },
+      });
+    }
   }
 
   const hearts = lost?.hearts ?? (premium ? MAX_HEARTS : player?.hearts ?? 0);
@@ -193,9 +301,12 @@ router.post("/:id/check", async (req, res) => {
     coinsEarned: reward?.coinsEarned || 0,
     bonusXp: reward?.bonusXp || 0,
     xpAwarded: reward?.xpAwarded || 0,
+    alreadyAwarded,
+    usedHint,
     gameOver: Boolean(lost?.gameOver),
     heartsBlocked: Boolean(lost?.heartsBlocked),
     heartsRefillAt: lost?.heartsRefillAt || null,
+    unlimitedHearts: premium,
   });
 });
 
@@ -242,7 +353,7 @@ router.post("/:id/attempt", async (req, res) => {
   // counters so quiz performance automatically feeds the progress dashboard.
   if (req.user.role === "STUDENT") {
 
-    const xpGained = heartsAlreadyApplied ? 0 : score * QUIZ_XP_PER_CORRECT;
+    // Per-question XP is awarded on /check. Final submit must not re-award EXP.
     const wrong = quiz.questions.length - score;
     const heartLoss = !premium && !heartsAlreadyApplied ? Math.min(wrong, player?.hearts || 0) : 0;
     const nextHearts = heartLoss > 0 ? Math.max(0, player.hearts - heartLoss) : player?.hearts;
@@ -255,19 +366,12 @@ router.post("/:id/attempt", async (req, res) => {
         : {
             correctAnswers: { increment: score },
             wrongAnswers: { increment: wrong },
-            xp: { increment: xpGained },
-            totalXpEarned: { increment: xpGained },
           }),
       ...heartData,
     };
     const updated = Object.keys(updateData).length
       ? await prisma.user.update({ where: { id: req.user.id }, data: updateData })
       : player;
-    if (xpGained > 0) {
-      await prisma.activityLog.create({
-        data: { userId: req.user.id, action: "xp_gain", meta: { amount: xpGained, source: "quiz_attempt" } },
-      });
-    }
     if (heartLoss > 0) {
       await prisma.activityLog.create({
         data: { userId: req.user.id, action: "hearts_change", meta: { from: player.hearts, to: nextHearts, source: "quiz_attempt" } },
@@ -275,10 +379,11 @@ router.post("/:id/attempt", async (req, res) => {
     }
     await bumpStreak(req.user.id);
     heartsState = {
-      hearts: updated.hearts,
+      hearts: premium ? MAX_HEARTS : updated.hearts,
       coins: updated.coins || 0,
       heartsBlocked: !premium && updated.hearts <= 0,
       heartsRefillAt: !premium && updated.hearts <= 0 ? heartsRefillAtFrom(updated) : null,
+      unlimitedHearts: premium,
     };
   }
 
@@ -293,7 +398,7 @@ router.post("/:id/attempt", async (req, res) => {
     attempt,
     score,
     total: quiz.questions.length,
-    xpEarned: req.user.role === "STUDENT" ? score * QUIZ_XP_PER_CORRECT : 0,
+    xpEarned: 0,
     ...(heartsState || {}),
   });
 });

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useLayoutEffect } from "react";
+import React, { useState, useCallback, useMemo, useLayoutEffect, useEffect } from "react";
 import {
   View,
   Text,
@@ -21,7 +21,7 @@ import HeartsBlockedPanel from "../components/HeartsBlockedPanel";
 import { fetchHeartsState, isHeartsBlocked, spendCoinsForHearts } from "../lib/hearts";
 import { startGoUnlimitedCheckout } from "../lib/upgradePrompt";
 
-const PRACTICE_TARGET = 247;
+const PRACTICE_TARGET = 100;
 
 export default function FlashcardStudyModesScreen({ route, navigation }) {
   const { colors } = useTheme();
@@ -31,7 +31,7 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
 
   const routeCollection = route.params?.collection;
   const collectionId = resolveCollectionId(route.params);
-  const accent = deckAccent(routeCollection?.color, colors);
+  const openedAt = route.params?.openedAt;
 
   const [loading, setLoading] = useState(true);
   const [progress, setProgress] = useState(null);
@@ -40,7 +40,30 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
   const [publicUnlocked, setPublicUnlocked] = useState(false);
   const [heartsState, setHeartsState] = useState(null);
   const [buying, setBuying] = useState(null);
+  const [practiceTarget, setPracticeTarget] = useState(PRACTICE_TARGET);
+  const [practiceUnlocked, setPracticeUnlocked] = useState(false);
   const heartsLocked = isHeartsBlocked(heartsState);
+  const accent = deckAccent(collection?.color || routeCollection?.color, colors);
+  const deckTitle =
+    routeCollection?.name || collection?.name || "Study deck";
+
+  // When Start Focus opens a different deck, adopt its name/id immediately.
+  useEffect(() => {
+    if (!collectionId) return;
+    setCollection((prev) => {
+      if (prev?.id === collectionId) {
+        if (routeCollection?.name && prev?.name !== routeCollection.name) {
+          return { ...prev, ...routeCollection };
+        }
+        return prev;
+      }
+      return routeCollection
+        ? { ...routeCollection, id: collectionId }
+        : { id: collectionId, name: routeCollection?.name };
+    });
+    if (routeCollection) setCardCount(resolveCardCount(routeCollection));
+    setProgress(null);
+  }, [collectionId, openedAt, routeCollection?.name, routeCollection?.color]);
 
   const fetchStudyData = useCallback(async () => {
     if (!collectionId) {
@@ -58,7 +81,9 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
       const loadedCollection = collectionRes.data.collection;
       setCollection(loadedCollection);
       setProgress(progressRes.data.progress);
+      setPracticeTarget(Number(progressRes.data.target) > 0 ? Number(progressRes.data.target) : PRACTICE_TARGET);
       setPublicUnlocked(Boolean(progressRes.data.unlocked && !progressRes.data.isOwner));
+      setPracticeUnlocked(Boolean(progressRes.data.unlocked));
       const count =
         progressRes.data.cardCount ??
         loadedCollection?.flashcards?.length ??
@@ -70,18 +95,18 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
     } finally {
       setLoading(false);
     }
-  }, [collectionId, routeCollection]);
+  }, [collectionId, routeCollection, openedAt]);
 
   useLayoutEffect(() => {
     navigation.setOptions({
       headerShown: true,
-      title: "Study deck",
+      title: deckTitle,
       headerTitleStyle: { fontWeight: "800", fontSize: 17 },
       headerBackTitle: "Back",
       headerTintColor: colors.text,
       headerStyle: { backgroundColor: colors.bg },
     });
-  }, [navigation, colors.text, colors.bg]);
+  }, [navigation, colors.text, colors.bg, deckTitle]);
 
   useFocusEffect(
     useCallback(() => {
@@ -90,8 +115,12 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
   );
 
   const practiceAnswered = progress?.practiceAnswered || 0;
-  const practiceUnlocked = progress?.practiceUnlocked || practiceAnswered >= PRACTICE_TARGET || publicUnlocked;
-  const practicePct = Math.min(100, Math.round((practiceAnswered / PRACTICE_TARGET) * 100));
+  const unlockedPractice =
+    practiceUnlocked ||
+    Boolean(progress?.practiceUnlocked) ||
+    practiceAnswered >= practiceTarget ||
+    publicUnlocked;
+  const practicePct = Math.min(100, Math.round((practiceAnswered / Math.max(1, practiceTarget)) * 100));
   const hasCards = cardCount > 0;
 
   const buyHearts = async (quantity) => {
@@ -119,6 +148,13 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
       return;
     }
     if (heartsLocked && (screen === "FlashcardMemorize" || screen === "FlashcardPracticeTest")) {
+      return;
+    }
+    if (screen === "FlashcardPracticeTest" && !unlockedPractice) {
+      Alert.alert(
+        "Practice Test locked",
+        `Answer ${practiceTarget} questions to unlock Practice Test. You've answered ${practiceAnswered}/${practiceTarget}.`
+      );
       return;
     }
     const deck = collection || routeCollection || {};
@@ -158,14 +194,14 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
       id: "practice",
       screen: "FlashcardPracticeTest",
       title: "Practice Test",
-      subtitle: practiceUnlocked
+      subtitle: unlockedPractice
         ? "Full practice test unlocked — keep sharpening your knowledge."
-        : `Answer ${PRACTICE_TARGET} questions to unlock. ${practiceAnswered}/${PRACTICE_TARGET} done.`,
-      icon: practiceUnlocked ? "ribbon-outline" : "lock-closed-outline",
+        : `Answer ${practiceTarget} questions to unlock. ${practiceAnswered}/${practiceTarget} done.`,
+      icon: unlockedPractice ? "ribbon-outline" : "lock-closed-outline",
       color: colors.amber,
       soft: colors.amberSoft,
-      badge: practiceUnlocked ? "Unlocked" : `${practicePct}%`,
-      locked: !practiceUnlocked,
+      badge: unlockedPractice ? "Unlocked" : `${practicePct}%`,
+      locked: !unlockedPractice,
     },
   ];
 
@@ -187,7 +223,7 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
           <View style={[styles.heroIcon, { backgroundColor: colors.surface }]}>
             <Ionicons name={accent.icon} size={24} color={accent.color} />
           </View>
-          <Text style={styles.heroTitle} numberOfLines={2}>{collection?.name || "Deck"}</Text>
+          <Text style={styles.heroTitle} numberOfLines={2}>{deckTitle}</Text>
           <Text style={styles.heroMeta}>
             {cardCount} {cardCount === 1 ? "card" : "cards"} · Choose a study mode
           </Text>
@@ -250,7 +286,7 @@ export default function FlashcardStudyModesScreen({ route, navigation }) {
                   ) : null}
                 </View>
                 <Text style={styles.modeSubtitle}>{mode.subtitle}</Text>
-                {mode.id === "practice" && !practiceUnlocked && hasCards ? (
+                {mode.id === "practice" && !unlockedPractice && hasCards ? (
                   <View style={styles.progressTrack}>
                     <View style={[styles.progressFill, { width: `${practicePct}%`, backgroundColor: mode.color }]} />
                   </View>

@@ -19,7 +19,7 @@ import HeartsBlockedPanel from "../components/HeartsBlockedPanel";
 import { fetchHeartsState, isHeartsBlocked, spendCoinsForHearts } from "../lib/hearts";
 import { startGoUnlimitedCheckout } from "../lib/upgradePrompt";
 
-const PRACTICE_TARGET = 247;
+const PRACTICE_TARGET = 100;
 
 export default function FlashcardPracticeTestScreen({ route, navigation }) {
   const { colors } = useTheme();
@@ -39,16 +39,21 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
   const [submitting, setSubmitting] = useState(false);
   const [batchDone, setBatchDone] = useState(false);
   const [hearts, setHearts] = useState(5);
+  const [unlimitedHearts, setUnlimitedHearts] = useState(false);
   const [coins, setCoins] = useState(0);
   const [heartsRefillAt, setHeartsRefillAt] = useState(null);
   const [buying, setBuying] = useState(null);
   const [blocked, setBlocked] = useState(false);
+  const [locked, setLocked] = useState(false);
+  const [unlockTarget, setUnlockTarget] = useState(PRACTICE_TARGET);
 
   const applyHearts = (state = {}) => {
+    const unlimited = Boolean(state.unlimitedHearts);
+    setUnlimitedHearts(unlimited);
     setHearts(state.hearts ?? 0);
     if (state.coins != null) setCoins(state.coins);
     setHeartsRefillAt(state.heartsRefillAt || null);
-    setBlocked(isHeartsBlocked(state));
+    setBlocked(isHeartsBlocked({ ...state, unlimitedHearts: unlimited }));
   };
 
   const loadQuestions = useCallback(async () => {
@@ -59,8 +64,8 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
     setLoading(true);
     try {
       const state = await fetchHeartsState(client).catch(() => null);
+      if (state) applyHearts(state);
       if (state && isHeartsBlocked(state)) {
-        applyHearts(state);
         setLoading(false);
         return;
       }
@@ -78,6 +83,7 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
       setQuestions(qs);
       setProgress(data.progress);
       setUnlocked(Boolean(data.unlocked));
+      if (Number(data.target) > 0) setUnlockTarget(Number(data.target));
       setQIndex(0);
       setSelected(null);
       setRevealed(false);
@@ -85,9 +91,15 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
       setBatchDone(false);
       setJustUnlocked(false);
       setBlocked(false);
+      setLocked(false);
     } catch (e) {
       const payload = e?.response?.data || {};
-      if (payload.code === "HEARTS_DEPLETED" || payload.heartsBlocked) {
+      if (payload.code === "PRACTICE_LOCKED") {
+        setLocked(true);
+        setProgress(payload.progress || null);
+        if (Number(payload.target) > 0) setUnlockTarget(Number(payload.target));
+        setUnlocked(false);
+      } else if (payload.code === "HEARTS_DEPLETED" || payload.heartsBlocked) {
         applyHearts(payload);
       } else {
         Alert.alert("Error", payload.error || e.message);
@@ -116,7 +128,7 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
 
   const current = questions[qIndex];
   const answered = progress?.practiceAnswered || 0;
-  const pct = Math.min(100, Math.round((answered / PRACTICE_TARGET) * 100));
+  const pct = Math.min(100, Math.round((answered / Math.max(1, unlockTarget)) * 100));
 
   const submitAnswer = async (option) => {
     if (revealed || submitting || !current) return;
@@ -135,6 +147,7 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
             coins: heartData.coins ?? heartData.state?.coins,
             heartsRefillAt: heartData.heartsRefillAt,
             heartsBlocked: heartData.gameOver || heartData.heartsBlocked,
+            unlimitedHearts: heartData.unlimitedHearts ?? heartData.state?.unlimitedHearts,
           });
           if (heartData.gameOver || heartData.heartsBlocked) {
             setBlocked(true);
@@ -182,7 +195,7 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
   };
 
   const nextQuestion = () => {
-    if (hearts <= 0) {
+    if (isHeartsBlocked({ hearts, unlimitedHearts })) {
       setBlocked(true);
       return;
     }
@@ -201,6 +214,31 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
         <View style={styles.center}>
           <ActivityIndicator color={colors.amber} size="large" />
           <Text style={styles.muted}>Loading practice questions…</Text>
+        </View>
+      </Screen>
+    );
+  }
+
+  if (locked) {
+    return (
+      <Screen>
+        <View style={styles.center}>
+          <View style={[styles.resultIcon, { backgroundColor: colors.amberSoft }]}>
+            <Ionicons name="lock-closed" size={40} color={colors.amber} />
+          </View>
+          <Text style={styles.resultTitle}>Practice Test locked</Text>
+          <Text style={styles.muted}>
+            Answer {unlockTarget} questions to unlock. You've answered {answered}/{unlockTarget}.
+          </Text>
+          <View style={[styles.progressTrack, { width: "100%", maxWidth: 280 }]}>
+            <View style={[styles.progressFill, { width: `${pct}%`, backgroundColor: colors.amber }]} />
+          </View>
+          <Pressable
+            onPress={() => navigation.goBack()}
+            style={({ pressed }) => [styles.primaryBtn, { backgroundColor: colors.amber }, pressed && styles.pressed]}
+          >
+            <Text style={styles.primaryBtnText}>Back to study modes</Text>
+          </Pressable>
         </View>
       </Screen>
     );
@@ -249,7 +287,7 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
           <Text style={styles.muted}>
             {unlocked
               ? `You've answered ${answered} questions total. Keep practicing ${collection?.name || "this deck"}.`
-              : `${answered}/${PRACTICE_TARGET} questions answered toward unlock.`}
+              : `${answered}/${unlockTarget} questions answered toward unlock.`}
           </Text>
           <Pressable
             onPress={loadQuestions}
@@ -287,7 +325,7 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
               {unlocked ? "Practice Test unlocked" : "Unlock progress"}
             </Text>
             <Text style={[styles.progressCount, { color: colors.amber }]}>
-              {answered}/{PRACTICE_TARGET}
+              {answered}/{unlockTarget}
             </Text>
           </View>
           <View style={styles.progressTrack}>
@@ -296,19 +334,26 @@ export default function FlashcardPracticeTestScreen({ route, navigation }) {
         </View>
 
         <Pressable
-          onPress={() => hearts <= 0 && setBlocked(true)}
+          onPress={() => isHeartsBlocked({ hearts, unlimitedHearts }) && setBlocked(true)}
           accessibilityRole="button"
-          accessibilityLabel={hearts <= 0 ? "Out of hearts. Open revive options." : `${hearts} hearts remaining`}
+          accessibilityLabel={unlimitedHearts ? "Unlimited hearts" : hearts <= 0 ? "Out of hearts. Open revive options." : `${hearts} hearts remaining`}
           style={styles.heartRow}
         >
-          {[0, 1, 2, 3, 4].map((i) => (
-            <Ionicons
-              key={i}
-              name={i < hearts ? "heart" : "heart-outline"}
-              size={18}
-              color={i < hearts ? "#FF5A76" : colors.border}
-            />
-          ))}
+          {unlimitedHearts ? (
+            <>
+              <Ionicons name="heart" size={18} color="#FF5A76" />
+              <Text style={{ color: "#FF5A76", fontWeight: "800", marginLeft: 4 }}>∞</Text>
+            </>
+          ) : (
+            [0, 1, 2, 3, 4].map((i) => (
+              <Ionicons
+                key={i}
+                name={i < hearts ? "heart" : "heart-outline"}
+                size={18}
+                color={i < hearts ? "#FF5A76" : colors.border}
+              />
+            ))
+          )}
         </Pressable>
         <Text style={styles.qMeta}>
           Question {qIndex + 1} of {questions.length}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useLayoutEffect } from "react";
 import {
   View,
   Text,
@@ -9,9 +9,9 @@ import {
   Switch,
   Image,
   Alert,
+  ActivityIndicator,
   useWindowDimensions,
 } from "react-native";
-import Constants from "expo-constants";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
 import Svg, { Circle } from "react-native-svg";
@@ -19,13 +19,16 @@ import { Screen, Card } from "../components/Screen";
 import { Input, Button } from "../components/Inputs";
 import { useTheme } from "../context/ThemeContext";
 import { useAuth } from "../context/AuthContext";
-import { loadAlarmPrefs, getAlarmSound, saveAlarmPrefs, ALARM_SOUNDS } from "../lib/alarmPrefs";
-import { playAlarm, stopAlarm, previewAlarm } from "../lib/alarmPlayer";
-import client, { queueRequest } from "../api/client";
+import { useFocusTimer } from "../context/FocusTimerContext";
+import { getAlarmSound, saveAlarmPrefs, ALARM_SOUNDS } from "../lib/alarmPrefs";
+import { previewAlarm } from "../lib/alarmPlayer";
+import client from "../api/client";
 import { RADIUS, SPACING } from "../theme/theme";
 import StreakBalance from "../components/StreakBalance";
 import NotificationBell from "../components/NotificationBell";
-import { isSelectableTask, subscribeTasksChanged } from "../lib/tasks";
+import { notifyTasksChanged } from "../lib/tasks";
+import { saveTimerPrefs, TIMER_ACCENT_COLORS } from "../lib/timerPrefs";
+import { useScrollToTopOnFocus } from "../hooks/useScrollToTopOnFocus";
 
 const fmtClock = (secs) => {
   const m = Math.floor(secs / 60).toString().padStart(2, "0");
@@ -33,7 +36,53 @@ const fmtClock = (secs) => {
   return `${m}:${s}`;
 };
 
-const isExpoGo = Constants.appOwnership === "expo";
+function DeckStatusRing({ done, progress = 0, selected = false, running = false, colors, size = 28 }) {
+  const strokeWidth = 3;
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const pct = done ? 1 : Math.max(0, Math.min(1, (Number(progress) || 0) / 100));
+  const accent = done ? colors.mint : colors.violet;
+  // Spinner while this deck is the active focus target; otherwise show % when partial.
+  const showSpinner = !done && selected && running;
+  return (
+    <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}>
+      <Svg width={size} height={size} style={{ position: "absolute" }}>
+        <Circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          stroke={selected && !done ? accent : colors.border}
+          strokeWidth={strokeWidth}
+          fill="none"
+        />
+        <Circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          stroke={accent}
+          strokeWidth={strokeWidth}
+          fill="none"
+          strokeDasharray={`${circumference} ${circumference}`}
+          strokeDashoffset={circumference * (1 - pct)}
+          strokeLinecap="round"
+          rotation="-90"
+          origin={`${size / 2}, ${size / 2}`}
+        />
+      </Svg>
+      {done ? (
+        <Ionicons name="checkmark" size={14} color={accent} />
+      ) : showSpinner ? (
+        <ActivityIndicator size="small" color={accent} />
+      ) : pct > 0 ? (
+        <Text style={{ color: accent, fontSize: 8, fontWeight: "900", fontVariant: ["tabular-nums"] }}>
+          {Math.round(pct * 100)}
+        </Text>
+      ) : selected ? (
+        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: accent }} />
+      ) : null}
+    </View>
+  );
+}
 
 function CountdownRing({ size, progress, color, colors, time, label, running }) {
   const strokeWidth = size >= 280 ? 11 : 9;
@@ -106,47 +155,60 @@ export default function TimerScreen() {
   const wide = width >= 900;
   const compact = width < 380;
   const styles = useMemo(() => createStyles(colors, wide, compact), [colors, wide, compact]);
+  const scrollRef = useScrollToTopOnFocus();
+  const navigation = useNavigation();
+  const { user, refreshUser } = useAuth();
+
+  const timer = useFocusTimer();
+  const {
+    mode,
+    secondsLeft,
+    running,
+    cyclesDone,
+    activeTaskId,
+    activeSubjectId,
+    selectedTask,
+    selectedDeckIds,
+    taskDecks,
+    visibleTasks,
+    visibleSubjects,
+    focusMinutesForTask,
+    totalSeconds,
+    sessionsBeforeLongBreak,
+    alarmVisible,
+    finishedMode,
+    alarmPrefs,
+    setAlarmPrefs,
+    autoStartBreak,
+    setAutoStartBreak,
+    timerModeColors,
+    timerModeColorHex,
+    setTimerModeColorsAll,
+    fetchTasks,
+    fetchSubjects,
+    setActiveTaskId,
+    toggleActiveTask,
+    setActiveSubjectId,
+    toggleDeckSelection,
+    setSelectedDeckIds,
+    switchMode,
+    toggleRunning,
+    resetTimer,
+    restartCountdown,
+    startFocusSession,
+    openSelectedDecks,
+    navigateToDeckStudy,
+    setTaskDeckCompleted,
+    dismissAlarm,
+    notifyDurationChange,
+  } = timer;
 
   const MODES = {
-    focus: { label: "Focus", color: colors.tomato },
-    short: { label: "Short Break", color: colors.mint },
-    long: { label: "Long Break", color: colors.mint },
+    focus: { label: "Focus", color: timerModeColorHex?.focus || colors.tomato },
+    short: { label: "Short Break", color: timerModeColorHex?.short || colors.mint },
+    long: { label: "Long Break", color: timerModeColorHex?.long || colors.mint },
   };
 
-  const [NotificationsModule, setNotificationsModule] = useState(null);
-
-  useEffect(() => {
-    if (!isExpoGo) {
-      import("expo-notifications")
-        .then((module) => {
-          setNotificationsModule(module);
-          module.setNotificationHandler({
-            handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: false }),
-          });
-        })
-        .catch(() => {});
-    }
-  }, []);
-
-  const { user, refreshUser } = useAuth();
-  const durations = {
-    focus: user?.focusMinutes ?? 25,
-    short: user?.shortBreakMinutes ?? 5,
-    long: user?.longBreakMinutes ?? 15,
-  };
-  const sessionsBeforeLongBreak = user?.sessionsBeforeLongBreak ?? 4;
-
-  const [mode, setMode] = useState("focus");
-  const [secondsLeft, setSecondsLeft] = useState(durations.focus * 60);
-  const [running, setRunning] = useState(false);
-  const [cyclesDone, setCyclesDone] = useState(0);
-  const [tasks, setTasks] = useState([]);
-  const [subjects, setSubjects] = useState([]);
-  const [activeTaskId, setActiveTaskId] = useState(null);
-  const [activeSubjectId, setActiveSubjectId] = useState(null);
-  const [alarmVisible, setAlarmVisible] = useState(false);
-  const [finishedMode, setFinishedMode] = useState("focus");
-  const [alarmPrefs, setAlarmPrefs] = useState({ enabled: true, soundId: "chime", volume: 0.8 });
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [editFocus, setEditFocus] = useState(String(user?.focusMinutes ?? 25));
   const [editShort, setEditShort] = useState(String(user?.shortBreakMinutes ?? 5));
@@ -155,18 +217,14 @@ export default function TimerScreen() {
   const [editAlarmEnabled, setEditAlarmEnabled] = useState(true);
   const [editAlarmSoundId, setEditAlarmSoundId] = useState("chime");
   const [editAlarmVolume, setEditAlarmVolume] = useState(0.8);
+  const [editAutoStartBreak, setEditAutoStartBreak] = useState(false);
+  const [editModeColors, setEditModeColors] = useState({
+    focus: "violet",
+    short: "mint",
+    long: "teal",
+  });
+  const [restarting, setRestarting] = useState(false);
 
-  const intervalRef = useRef(null);
-  const completingRef = useRef(false);
-
-useEffect(() => {
-    if (NotificationsModule) {
-      NotificationsModule.requestPermissionsAsync().catch(() => {});
-    }
-    loadAlarmPrefs().then((p)=>{ setAlarmPrefs(p); }).catch(() => {});
-  }, [NotificationsModule]);
-
-  const navigation = useNavigation();
   useLayoutEffect(() => {
     navigation.setOptions({
       headerRight: () => (
@@ -182,39 +240,6 @@ useEffect(() => {
     });
   }, [navigation, colors.text]);
 
-  const fetchTasks = useCallback(async () => {
-    try {
-      const { data } = await client.get("/tasks?archived=false");
-      const open = (data.tasks || []).filter(isSelectableTask);
-      setTasks(open);
-      setActiveTaskId((current) =>
-        current && !open.some((t) => t.id === current) ? null : current
-      );
-    } catch (e) {
-      // Non-fatal — timer still works without task assignment
-    }
-  }, []);
-
-  const fetchSubjects = useCallback(async () => {
-    try {
-      const { data } = await client.get("/subjects");
-      // Filter out the legacy "Data Structures" subject so it does not
-      // appear in the Timer section UI.
-      const filtered = (data.subjects || []).filter(
-        (s) => !s.archived && (s.name || "").toLowerCase().trim() !== "data structures"
-      );
-      setSubjects(filtered);
-      setActiveSubjectId((current) =>
-        current && !filtered.some((s) => s.id === current) ? null : current
-      );
-    } catch (e) {
-      // Non-fatal
-    }
-  }, []);
-
-  // Refetch tasks AND subjects whenever the screen gains focus so newly
-  // added/archived/deleted items from the Tasks / Study tabs appear
-  // immediately — no manual refresh or app restart required.
   useFocusEffect(
     useCallback(() => {
       fetchTasks();
@@ -223,208 +248,105 @@ useEffect(() => {
   );
 
   useEffect(() => {
-    return subscribeTasksChanged((change) => {
-      if (change?.removedTaskId) {
-        setTasks((current) => current.filter((task) => task.id !== change.removedTaskId));
-        setActiveTaskId((current) => (current === change.removedTaskId ? null : current));
-      }
-      fetchTasks();
-      fetchSubjects();
-    });
-  }, [fetchTasks, fetchSubjects]);
-
-  const openTasks = useMemo(() => tasks.filter(isSelectableTask), [tasks]);
-  const selectedTask = openTasks.find((task) => task.id === activeTaskId);
-
-  const focusMinutesForTask = useMemo(() => {
-    const minutes = Number(selectedTask?.estMinutes);
-    if (Number.isFinite(minutes) && minutes > 0) return Math.max(1, Math.round(minutes));
-    return user?.focusMinutes ?? 25;
-  }, [selectedTask?.estMinutes, user?.focusMinutes]);
-
-  const durationFor = useCallback(
-    (m) => {
-      if (m === "focus") return focusMinutesForTask;
-      if (m === "short") return user?.shortBreakMinutes ?? 5;
-      return user?.longBreakMinutes ?? 15;
-    },
-    [focusMinutesForTask, user]
-  );
-
-  // Only subjects that still have an open, non-archived task. Archiving the
-  // last task for a subject removes that chip from Timer immediately.
-  const visibleSubjects = useMemo(() => {
-    const byId = new Map();
-    openTasks.forEach((task) => {
-      if (!task.subjectId || task.subject?.archived) return;
-      const subject = task.subject || subjects.find((item) => item.id === task.subjectId);
-      if (subject && !subject.archived) byId.set(subject.id, subject);
-    });
-    return Array.from(byId.values());
-  }, [openTasks, subjects]);
-
-  // When a subject is selected, only show tasks assigned to that subject.
-  // Otherwise show all open tasks so every task is reachable.
-  const visibleTasks = useMemo(() => {
-    if (!activeSubjectId) return openTasks;
-    return openTasks.filter((t) => t.subjectId === activeSubjectId);
-  }, [openTasks, activeSubjectId]);
-
-  useEffect(() => {
-    setActiveSubjectId((current) =>
-      current && !visibleSubjects.some((subject) => subject.id === current) ? null : current
-    );
-  }, [visibleSubjects]);
-
-  useEffect(() => {
-    if (running || mode !== "focus") return;
-    setSecondsLeft(focusMinutesForTask * 60);
-  }, [activeTaskId, focusMinutesForTask, running, mode]);
-
-  const dismissAlarm = useCallback(() => {
-    setAlarmVisible(false);
-    stopAlarm();
-  }, []);
-
-  // When opening settings modal, initialize editable state from user + stored prefs
-  useEffect(() => {
     if (settingsVisible) {
-      setEditFocus(String(user?.focusMinutes ?? 25));
+      setEditFocus(String(focusMinutesForTask));
       setEditShort(String(user?.shortBreakMinutes ?? 5));
       setEditLong(String(user?.longBreakMinutes ?? 15));
       setEditSessionsBeforeLong(String(user?.sessionsBeforeLongBreak ?? 4));
-      loadAlarmPrefs().then((p) => {
-        setEditAlarmEnabled(p.enabled);
-        setEditAlarmSoundId(p.soundId);
-        setEditAlarmVolume(p.volume);
-      }).catch(()=>{});
+      setEditAutoStartBreak(autoStartBreak);
+      setEditModeColors({
+        focus: timerModeColors?.focus || "violet",
+        short: timerModeColors?.short || "mint",
+        long: timerModeColors?.long || "teal",
+      });
+      setEditAlarmEnabled(alarmPrefs.enabled);
+      setEditAlarmSoundId(alarmPrefs.soundId);
+      setEditAlarmVolume(alarmPrefs.volume);
     }
-  }, [settingsVisible, user]);
+  }, [settingsVisible, user, focusMinutesForTask, autoStartBreak, timerModeColors, alarmPrefs]);
 
   const saveTimerSettings = async () => {
     try {
-      const nextFocus = Number(editFocus) || 25;
-      const nextShort = Number(editShort) || 5;
-      const nextLong = Number(editLong) || 15;
-      const nextSessions = Number(editSessionsBeforeLong) || 4;
-      await client.patch('/auth/me', {
-        focusMinutes: nextFocus,
+      const nextFocus = Math.max(1, Number(editFocus) || 25);
+      const nextShort = Math.max(1, Number(editShort) || 5);
+      const nextLong = Math.max(1, Number(editLong) || 15);
+      const nextSessions = Math.max(1, Number(editSessionsBeforeLong) || 4);
+      await client.patch("/auth/me", {
+        focusMinutes: selectedTask ? user?.focusMinutes ?? nextFocus : nextFocus,
         shortBreakMinutes: nextShort,
         longBreakMinutes: nextLong,
         sessionsBeforeLongBreak: nextSessions,
       });
+      if (selectedTask) {
+        await client.patch(`/tasks/${selectedTask.id}`, { estMinutes: nextFocus });
+        notifyTasksChanged({ updatedTaskId: selectedTask.id });
+        fetchTasks();
+      }
       await saveAlarmPrefs({ enabled: editAlarmEnabled, soundId: editAlarmSoundId, volume: editAlarmVolume });
       setAlarmPrefs({ enabled: editAlarmEnabled, soundId: editAlarmSoundId, volume: editAlarmVolume });
+      await saveTimerPrefs({
+        autoStartBreak: editAutoStartBreak,
+        modeColors: editModeColors,
+        accentColorId: editModeColors.focus,
+      });
+      setAutoStartBreak(editAutoStartBreak);
+      setTimerModeColorsAll(editModeColors);
       await refreshUser();
-      const nextDuration = mode === "focus" ? nextFocus : mode === "short" ? nextShort : nextLong;
-      setRunning(false);
-      setSecondsLeft(nextDuration * 60);
+      notifyDurationChange(mode === "focus" ? nextFocus : mode === "short" ? nextShort : nextLong);
+      if (!running) resetTimer();
       setSettingsVisible(false);
     } catch (e) {
-      Alert.alert('Error', e.message);
+      Alert.alert("Error", e.message);
     }
   };
 
-  const handleSessionComplete = useCallback(async () => {
-    if (completingRef.current) return;
-    completingRef.current = true;
-    setRunning(false);
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
+  const onPrimaryPress = () => {
+    if (running || secondsLeft < totalSeconds) {
+      toggleRunning();
+      return;
     }
+    const selectedId = selectedDeckIds[0] || null;
+    const selectedDeck =
+      (selectedId && taskDecks.find((d) => d.id === selectedId)) || null;
+    startFocusSession({
+      openDeck: mode === "focus" && Boolean(selectedId) && !selectedDeck?.completed,
+      deckId: mode === "focus" ? selectedId : null,
+      deckIds: selectedId ? [selectedId] : [],
+      decks: selectedDeck
+        ? [selectedDeck, ...taskDecks.filter((d) => d.id !== selectedDeck.id)]
+        : taskDecks,
+    });
+  };
 
-    const endedMode = mode;
-    setFinishedMode(endedMode);
-
-    if (alarmPrefs.enabled) {
-      try {
-        await playAlarm(alarmPrefs.soundId, alarmPrefs.volume);
-        setAlarmVisible(true);
-      } catch (e) {
-        setAlarmVisible(true);
-      }
-    }
-
-    if (NotificationsModule) {
-      try {
-        await NotificationsModule.scheduleNotificationAsync({
-          content: {
-            title: endedMode === "focus" ? "Focus session complete" : endedMode === "long" ? "Long break is over" : "Short break is over",
-            body: endedMode === "focus" ? "Nice work. Time for a break." : "Let's start the next focus block.",
-          },
-          trigger: null,
-        });
-      } catch (e) {}
-    }
-
+  const onRestartPress = async () => {
+    if (restarting) return;
+    setRestarting(true);
     try {
-      await client.post("/sessions", {
-        type: endedMode,
-        minutes: durationFor(endedMode),
-        taskId: endedMode === "focus" ? activeTaskId : null,
-        subjectId: activeSubjectId,
-      });
+      restartCountdown();
+      await new Promise((resolve) => setTimeout(resolve, 420));
+    } finally {
+      setRestarting(false);
+    }
+  };
+
+  const markDeckCompleted = async (deck, completed) => {
+    if (!selectedTask?.id || !deck?.id) return;
+    try {
+      const task = await setTaskDeckCompleted(selectedTask.id, deck.id, completed);
+      if (completed && selectedDeckIds[0] === deck.id) {
+        const next = (task?.decks || []).find((d) => d.id !== deck.id && !d.completed);
+        setSelectedDeckIds(next?.id ? [next.id] : []);
+      }
     } catch (e) {
-      await queueRequest("POST", "/sessions", {
-        type: endedMode,
-        minutes: durationFor(endedMode),
-        taskId: endedMode === "focus" ? activeTaskId : null,
-        subjectId: activeSubjectId,
-      });
+      Alert.alert("Could not update deck", e.message || "Please try again.");
     }
-
-    if (endedMode === "focus") {
-      const nextCycles = cyclesDone + 1;
-      setCyclesDone(nextCycles);
-      const nextMode = nextCycles % sessionsBeforeLongBreak === 0 ? "long" : "short";
-      setMode(nextMode);
-      setSecondsLeft(durationFor(nextMode) * 60);
-    } else {
-      setMode("focus");
-      setSecondsLeft(durationFor("focus") * 60);
-    }
-    completingRef.current = false;
-  }, [mode, activeTaskId, activeSubjectId, cyclesDone, durationFor, sessionsBeforeLongBreak, alarmPrefs, NotificationsModule]);
-
-  const completeRef = useRef(handleSessionComplete);
-  useEffect(() => {
-    completeRef.current = handleSessionComplete;
-  }, [handleSessionComplete]);
-
-  useEffect(() => {
-    if (running) {
-      intervalRef.current = setInterval(() => {
-        setSecondsLeft((prev) => {
-          if (prev <= 1) {
-            if (intervalRef.current) {
-              clearInterval(intervalRef.current);
-              intervalRef.current = null;
-            }
-            setTimeout(() => completeRef.current(), 0);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    } else if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-    }
-    return () => intervalRef.current && clearInterval(intervalRef.current);
-  }, [running]);
-
-  const switchMode = (m) => {
-    setRunning(false);
-    setMode(m);
-    setSecondsLeft(durationFor(m) * 60);
   };
 
   const modeColor = MODES[mode].color;
   const alarmModeColor = MODES[finishedMode]?.color || modeColor;
   const alarmSound = getAlarmSound(alarmPrefs.soundId);
   const selectedSubject = visibleSubjects.find((subject) => subject.id === activeSubjectId);
-  const totalSeconds = Math.max(1, durationFor(mode) * 60);
-  const remainingProgress = secondsLeft / totalSeconds;
+  const remainingProgress = secondsLeft / Math.max(1, totalSeconds);
   const ringSize = wide ? 292 : compact ? 218 : 258;
   const cycleProgress = cyclesDone % sessionsBeforeLongBreak;
   const nextBreakLabel =
@@ -432,13 +354,14 @@ useEffect(() => {
   return (
     <Screen>
       <ScrollView
+        ref={scrollRef}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.page}
       >
         <View style={styles.header}>
           <View style={styles.logoWrap}>
-            <Image source={require("../theme/logo.png")} style={styles.logo} />
-          </View>
+          <Image source={require("../theme/logo.png")} style={styles.logo} />
+            </View>
           <View style={styles.headerActions}>
             <StreakBalance compact={compact} />
             <NotificationBell />
@@ -456,13 +379,13 @@ useEffect(() => {
         <View style={styles.layout}>
           <View style={styles.timerColumn}>
             <View style={styles.timerCard}>
-              <View style={styles.modeRow}>
+        <View style={styles.modeRow}>
                 {Object.entries(MODES).map(([key, meta]) => {
                   const selected = mode === key;
                   return (
-                    <Pressable
-                      key={key}
-                      onPress={() => switchMode(key)}
+            <Pressable
+              key={key}
+              onPress={() => switchMode(key)}
                       accessibilityRole="button"
                       accessibilityState={{ selected }}
                       style={({ pressed }) => [
@@ -479,27 +402,31 @@ useEffect(() => {
                       <Text style={[styles.modeButtonText, selected && { color: "#FFFFFF" }]}>
                         {meta.label}
                       </Text>
-                    </Pressable>
+            </Pressable>
                   );
                 })}
-              </View>
+        </View>
 
               {(selectedTask || selectedSubject) && (
                 <View style={styles.activeContext}>
                   <View style={[styles.activeContextIcon, { backgroundColor: modeColor + "18" }]}>
                     <Ionicons name="bookmark-outline" size={15} color={modeColor} />
-                  </View>
+          </View>
                   <View style={{ flex: 1, minWidth: 0 }}>
                     <Text style={styles.activeContextLabel}>CURRENT SESSION</Text>
                     <Text style={styles.activeContextTitle} numberOfLines={1}>
                       {selectedTask?.title || selectedSubject?.name}
                     </Text>
-                  </View>
-                  {selectedSubject && selectedTask && (
+        </View>
+                  {selectedTask ? (
+                    <Text style={styles.activeContextSubject}>
+                      {focusMinutesForTask} min
+                    </Text>
+                  ) : selectedSubject ? (
                     <Text style={styles.activeContextSubject} numberOfLines={1}>
                       {selectedSubject.name}
                     </Text>
-                  )}
+                  ) : null}
                 </View>
               )}
 
@@ -520,29 +447,38 @@ useEffect(() => {
                   ? mode === "focus"
                     ? "Stay with it — distractions can wait."
                     : "Breathe, reset, and recharge."
-                  : mode === "focus"
+                  : secondsLeft < totalSeconds
+                    ? "Paused. Resume to continue from this time."
+                    : mode === "focus"
                     ? "When you're ready, begin your focus session."
                     : "Take a well-earned break."}
               </Text>
 
-              <View style={styles.controlsRow}>
-                <Pressable
-                  onPress={() => {
-                    setRunning(false);
-                    setSecondsLeft(durationFor(mode) * 60);
-                  }}
+        <View style={styles.controlsRow}>
+          <Pressable
+                  onPress={onRestartPress}
+                  disabled={restarting}
                   accessibilityRole="button"
-                  accessibilityLabel="Reset timer"
-                  style={({ pressed }) => [styles.iconControl, pressed && styles.pressed]}
+                  accessibilityLabel="Restart timer countdown"
+                  style={({ pressed }) => [
+                    styles.iconControl,
+                    (pressed || restarting) && styles.pressed,
+                  ]}
                 >
-                  <Ionicons name="refresh" size={20} color={colors.textMuted} />
-                  <Text style={styles.iconControlText}>Reset</Text>
-                </Pressable>
+                  {restarting ? (
+                    <ActivityIndicator size="small" color={colors.textMuted} />
+                  ) : (
+                    <Ionicons name="refresh" size={20} color={colors.textMuted} />
+                  )}
+                  <Text style={styles.iconControlText}>Restart</Text>
+          </Pressable>
 
-                <Pressable
-                  onPress={() => setRunning((current) => !current)}
+          <Pressable
+                  onPress={onPrimaryPress}
                   accessibilityRole="button"
-                  accessibilityLabel={running ? "Pause timer" : "Start timer"}
+                  accessibilityLabel={
+                    running ? "Pause timer" : secondsLeft < totalSeconds ? "Resume timer" : "Start timer"
+                  }
                   style={({ pressed }) => [
                     styles.playButton,
                     { backgroundColor: modeColor, shadowColor: modeColor },
@@ -550,14 +486,43 @@ useEffect(() => {
                   ]}
                 >
                   <Ionicons name={running ? "pause" : "play"} size={22} color="#FFFFFF" />
-                  <Text style={styles.playButtonText}>{running ? "Pause" : "Start focus"}</Text>
-                </Pressable>
+                  <Text style={styles.playButtonText}>
+                    {running ? "Pause" : secondsLeft < totalSeconds ? "Resume" : mode === "focus" ? "Start focus" : "Start break"}
+                  </Text>
+          </Pressable>
 
                 <View style={styles.iconControl}>
                   <Text style={styles.cycleValue}>{cycleProgress}/{sessionsBeforeLongBreak}</Text>
                   <Text style={styles.iconControlText}>Rounds</Text>
-                </View>
-              </View>
+          </View>
+        </View>
+
+              {mode === "focus" && selectedDeckIds.length === 1 ? (
+                <Pressable
+                  onPress={() =>
+                    openSelectedDecks({
+                      deckId: selectedDeckIds[0],
+                      decks: taskDecks,
+                    })
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open ${
+                    taskDecks.find((d) => d.id === selectedDeckIds[0])?.name || "study deck"
+                  }`}
+                  style={({ pressed }) => [
+                    styles.studyCta,
+                    { borderColor: modeColor, backgroundColor: modeColor + "18" },
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Ionicons name="layers-outline" size={16} color={modeColor} />
+                  <Text style={[styles.studyCtaText, { color: modeColor }]} numberOfLines={1}>
+                    Open{" "}
+                    {taskDecks.find((d) => d.id === selectedDeckIds[0])?.name || "study deck"}
+                  </Text>
+                  <Ionicons name="chevron-forward" size={16} color={modeColor} />
+                </Pressable>
+              ) : null}
 
               <View style={styles.roundProgress}>
                 <View style={styles.roundHeader}>
@@ -604,14 +569,129 @@ useEffect(() => {
                 )}
               </View>
 
+              {taskDecks.length > 0 ? (
+                <View style={styles.contextSection}>
+                  <Text style={styles.sectionLabel}>TASK DECKS</Text>
+                  <Text style={[styles.emptyText, { textAlign: "left", marginBottom: 8, marginTop: 0 }]}>
+                    Work one deck at a time. Mark it done when finished — progress updates automatically.
+                  </Text>
+                  <View style={styles.taskList}>
+                    {taskDecks.map((deck) => {
+                      const selected = selectedDeckIds.includes(deck.id);
+                      const done = Boolean(deck.completed);
+                      const studyPercent = done
+                        ? 100
+                        : Math.max(0, Math.min(99, Number(deck.studyPercent) || 0));
+                      return (
+                        <View
+                          key={deck.id}
+                          style={[
+                            styles.taskRow,
+                            selected && !done && {
+                              borderColor: colors.violet,
+                              backgroundColor: colors.violetSoft,
+                            },
+                            done && {
+                              borderColor: colors.mint,
+                              backgroundColor: colors.mintSoft,
+                            },
+                          ]}
+                        >
+                          <Pressable
+                            onPress={() => !done && toggleDeckSelection(deck.id)}
+                            disabled={done}
+                            accessibilityRole="button"
+                            accessibilityState={{ selected, disabled: done }}
+                            accessibilityLabel={
+                              done
+                                ? `${deck.name} completed`
+                                : `${selected ? "Deselect" : "Select"} ${deck.name}, ${studyPercent}% progress`
+                            }
+                            style={({ pressed }) => [
+                              { flex: 1, flexDirection: "row", alignItems: "center", gap: 10, minWidth: 0 },
+                              pressed && !done && { opacity: 0.78 },
+                            ]}
+                          >
+                            <DeckStatusRing
+                              done={done}
+                              progress={studyPercent}
+                              selected={selected}
+                              running={running}
+                              colors={colors}
+                              size={28}
+                            />
+                            <View style={{ flex: 1, minWidth: 0 }}>
+                              <Text
+                                numberOfLines={1}
+                                style={[
+                                  styles.taskTitle,
+                                  selected && !done && { color: colors.violet },
+                                  done && {
+                                    color: colors.textMuted,
+                                    textDecorationLine: "line-through",
+                                  },
+                                ]}
+                              >
+                                {deck.name}
+                              </Text>
+                              <Text style={styles.taskMeta}>
+                                {done
+                                  ? "Completed"
+                                  : studyPercent > 0
+                                    ? `${studyPercent}% complete`
+                                    : deck.cardCount != null
+                                      ? `${deck.cardCount} cards`
+                                      : "Flashcard deck"}
+                              </Text>
+                            </View>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => markDeckCompleted(deck, !done)}
+                            hitSlop={8}
+                            accessibilityRole="button"
+                            accessibilityLabel={
+                              done ? `Mark ${deck.name} incomplete` : `Mark ${deck.name} complete`
+                            }
+                            style={({ pressed }) => [
+                              styles.deckOpenBtn,
+                              pressed && { opacity: 0.7 },
+                            ]}
+                          >
+                            <Ionicons
+                              name={done ? "refresh-outline" : "checkmark-circle-outline"}
+                              size={18}
+                              color={done ? colors.textMuted : colors.mint}
+                            />
+                          </Pressable>
+                          {!done ? (
+                            <Pressable
+                              onPress={() => navigateToDeckStudy(deck)}
+                              hitSlop={8}
+                              accessibilityRole="button"
+                              accessibilityLabel={`Open ${deck.name}`}
+                              style={({ pressed }) => [
+                                styles.deckOpenBtn,
+                                pressed && { opacity: 0.7 },
+                              ]}
+                            >
+                              <Ionicons name="book-outline" size={16} color={colors.violet} />
+                            </Pressable>
+                          ) : null}
+                        </View>
+                      );
+                    })}
+                  </View>
+                </View>
+              ) : null}
+
               {visibleSubjects.length > 0 && (
                 <View style={styles.contextSection}>
-                  <Text style={styles.sectionLabel}>SUBJECT</Text>
+            <Text style={styles.sectionLabel}>SUBJECT</Text>
                   <View style={styles.chipWrap}>
                     {visibleSubjects.map((subject) => {
                       const selected = activeSubjectId === subject.id;
-                      return (
-                        <Pressable
+                return (
+                  <Pressable
                           key={subject.id}
                           onPress={() => {
                             const nextSubjectId = selected ? null : subject.id;
@@ -645,9 +725,9 @@ useEffect(() => {
                           >
                             {subject.name}
                           </Text>
-                        </Pressable>
-                      );
-                    })}
+                  </Pressable>
+                );
+              })}
                   </View>
                 </View>
               )}
@@ -657,26 +737,27 @@ useEffect(() => {
                   <Text style={styles.sectionLabel}>OPEN TASKS</Text>
                   <Text style={styles.taskCount}>{visibleTasks.length}</Text>
                 </View>
-                {visibleTasks.length === 0 ? (
+        {visibleTasks.length === 0 ? (
                   <View style={styles.emptyState}>
                     <View style={styles.emptyIcon}>
                       <Ionicons name="checkmark-done-outline" size={22} color={colors.mint} />
                     </View>
                     <Text style={styles.emptyTitle}>You're all clear</Text>
                     <Text style={styles.emptyText}>
-                      {activeSubjectId
+              {activeSubjectId
                         ? "No open tasks for this subject."
                         : "Add a task from the Tasks tab, or focus without one."}
-                    </Text>
+            </Text>
                   </View>
                 ) : (
                   <View style={styles.taskList}>
                     {visibleTasks.map((task) => {
                       const selected = task.id === activeTaskId;
+                      const deckNames = (task.decks || []).map((d) => d.name).filter(Boolean);
                       return (
-                        <Pressable
+              <Pressable
                           key={task.id}
-                          onPress={() => setActiveTaskId(selected ? null : task.id)}
+                          onPress={() => toggleActiveTask(task.id)}
                           style={({ pressed }) => [
                             styles.taskRow,
                             selected && {
@@ -687,7 +768,7 @@ useEffect(() => {
                           ]}
                         >
                           <View
-                            style={[
+                style={[
                               styles.taskSelect,
                               selected && {
                                 borderColor: colors.tomato,
@@ -704,10 +785,12 @@ useEffect(() => {
                             >
                               {task.title}
                             </Text>
-                            <Text style={styles.taskMeta}>
-                              {task.subject?.name ||
-                                visibleSubjects.find((subject) => subject.id === task.subjectId)?.name ||
-                                "General"}
+                            <Text style={styles.taskMeta} numberOfLines={1}>
+                              {deckNames.length
+                                ? deckNames.join(" · ")
+                                : task.subject?.name ||
+                                  visibleSubjects.find((subject) => subject.id === task.subjectId)?.name ||
+                                  "General"}
                             </Text>
                           </View>
                           {task.estMinutes ? (
@@ -716,7 +799,7 @@ useEffect(() => {
                               <Text style={styles.estimateText}>{task.estMinutes}m</Text>
                             </View>
                           ) : null}
-                        </Pressable>
+              </Pressable>
                       );
                     })}
                   </View>
@@ -768,9 +851,12 @@ useEffect(() => {
             </View>
             <Pressable
               style={[styles.modalButton, { backgroundColor: alarmModeColor }]}
-              onPress={dismissAlarm}
+              onPress={() => {
+                dismissAlarm();
+                navigation.navigate("Timer");
+              }}
             >
-              <Text style={styles.modalButtonText}>Dismiss alarm</Text>
+              <Text style={styles.modalButtonText}>Dismiss</Text>
             </Pressable>
           </View>
         </View>
@@ -808,14 +894,25 @@ useEffect(() => {
                   <View style={[styles.settingsSectionIcon, { backgroundColor: colors.violetSoft }]}>
                     <Ionicons name="timer-outline" size={17} color={colors.violet} />
                   </View>
-                  <View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
                     <Text style={styles.cardTitle}>Session lengths</Text>
-                    <Text style={styles.cardSubtitle}>Set durations in minutes</Text>
+                    <Text style={styles.cardSubtitle}>
+                      {selectedTask
+                        ? `Focus uses ${selectedTask.title}'s duration`
+                        : "Set durations in minutes"}
+                    </Text>
                   </View>
                 </View>
                 <View style={styles.inputGrid}>
                   <View style={styles.inputCell}>
-                    <Input label="Focus" value={editFocus} onChangeText={setEditFocus} placeholder="25" keyboardType="number-pad" compact />
+                    <Input
+                      label={selectedTask ? "Focus (from task)" : "Focus"}
+                      value={editFocus}
+                      onChangeText={setEditFocus}
+                      placeholder="25"
+                      keyboardType="number-pad"
+                      compact
+                    />
                   </View>
                   <View style={styles.inputCell}>
                     <Input label="Short break" value={editShort} onChangeText={setEditShort} placeholder="5" keyboardType="number-pad" compact />
@@ -827,13 +924,99 @@ useEffect(() => {
                     <Input label="Rounds" value={editSessionsBeforeLong} onChangeText={setEditSessionsBeforeLong} placeholder="4" keyboardType="number-pad" compact />
                   </View>
                 </View>
+                {selectedTask ? (
+                  <Text style={styles.settingsHint}>
+                    Changing Focus updates this task’s duration so the timer stays in sync.
+                  </Text>
+                ) : (
+                  <Text style={styles.settingsHint}>
+                    Select a task to use that task’s estimated time as the focus duration.
+                  </Text>
+                )}
+            </Card>
+
+              <Card style={styles.settingsSection}>
+                <View style={styles.settingsSectionTitle}>
+                  <View style={[styles.settingsSectionIcon, { backgroundColor: colors.mintSoft }]}>
+                    <Ionicons name="play-forward-outline" size={17} color={colors.mint} />
+              </View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.cardTitle}>Auto-start break</Text>
+                    <Text style={styles.cardSubtitle}>
+                      Start the break timer automatically after a focus session ends
+                    </Text>
+                  </View>
+                  <Switch
+                    value={editAutoStartBreak}
+                    onValueChange={setEditAutoStartBreak}
+                    trackColor={{ false: colors.border, true: colors.tomato }}
+                    thumbColor="#FFFFFF"
+                  />
+                </View>
+              </Card>
+
+              <Card style={styles.settingsSection}>
+                <View style={styles.settingsSectionTitle}>
+                  <View style={[styles.settingsSectionIcon, { backgroundColor: colors.violetSoft }]}>
+                    <Ionicons name="color-palette-outline" size={17} color={colors.violet} />
+                  </View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.cardTitle}>Timer colors</Text>
+                    <Text style={styles.cardSubtitle}>
+                      Separate accents for Focus, Short Break, and Long Break
+                    </Text>
+                  </View>
+                </View>
+                {[
+                  { key: "focus", label: "Focus" },
+                  { key: "short", label: "Short Break" },
+                  { key: "long", label: "Long Break" },
+                ].map((modeRow) => {
+                  const selectedId = editModeColors[modeRow.key];
+                  return (
+                    <View key={modeRow.key} style={styles.modeColorBlock}>
+                      <Text style={styles.subLabel}>{modeRow.label.toUpperCase()}</Text>
+                      <View style={styles.colorPalette}>
+                        {TIMER_ACCENT_COLORS.map((swatch) => {
+                          const selected = selectedId === swatch.id;
+                          return (
+                            <Pressable
+                              key={swatch.id}
+                              onPress={() =>
+                                setEditModeColors((current) => ({
+                                  ...current,
+                                  [modeRow.key]: swatch.id,
+                                }))
+                              }
+                              accessibilityRole="button"
+                              accessibilityState={{ selected }}
+                              accessibilityLabel={`${modeRow.label} ${swatch.label}`}
+                              style={({ pressed }) => [
+                                styles.colorSwatch,
+                                {
+                                  backgroundColor: swatch.hex,
+                                  borderColor: selected ? colors.text : "transparent",
+                                },
+                                pressed && { opacity: 0.85 },
+                              ]}
+                            >
+                              {selected ? (
+                                <Ionicons name="checkmark" size={16} color="#FFFFFF" />
+                              ) : null}
+                    </Pressable>
+                  );
+                })}
+              </View>
+                    </View>
+                  );
+                })}
               </Card>
 
               <Card style={styles.settingsSection}>
                 <View style={styles.settingsSectionTitle}>
                   <View style={[styles.settingsSectionIcon, { backgroundColor: colors.amberSoft }]}>
                     <Ionicons name="notifications-outline" size={17} color={colors.amber} />
-                  </View>
+                </View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.cardTitle}>Alarm</Text>
                     <Text style={styles.cardSubtitle}>Know when a session ends</Text>
@@ -902,21 +1085,21 @@ useEffect(() => {
                       >
                         <Ionicons name="add" size={17} color={colors.text} />
                       </Pressable>
-                      <Text style={styles.volumePct}>{Math.round(editAlarmVolume * 100)}%</Text>
-                    </View>
+                <Text style={styles.volumePct}>{Math.round(editAlarmVolume * 100)}%</Text>
+              </View>
                   </>
                 )}
-              </Card>
+            </Card>
 
               <View style={styles.settingsActions}>
                 <View style={{ flex: 1 }}>
-                  <Button title="Cancel" onPress={() => setSettingsVisible(false)} variant="secondary" />
+              <Button title="Cancel" onPress={() => setSettingsVisible(false)} variant="secondary" />
                 </View>
                 <View style={{ flex: 1 }}>
                   <Button title="Save changes" onPress={saveTimerSettings} />
                 </View>
-              </View>
-            </ScrollView>
+            </View>
+          </ScrollView>
           </View>
         </View>
       </Modal>
@@ -1057,6 +1240,44 @@ const createStyles = (colors, wide, compact) =>
       alignItems: "center",
       justifyContent: "center",
       gap: compact ? 8 : 12,
+    },
+    studyCta: {
+      marginTop: 12,
+      width: "100%",
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      paddingHorizontal: 14,
+      paddingVertical: 11,
+      borderRadius: RADIUS.md,
+      borderWidth: 1,
+    },
+    studyCtaText: {
+      flex: 1,
+      fontSize: 13,
+      fontWeight: "800",
+    },
+    deckOpenBtn: {
+      width: 34,
+      height: 34,
+      borderRadius: 10,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    modeColorBlock: { marginTop: 12 },
+    colorPalette: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 10,
+      marginTop: 8,
+    },
+    colorSwatch: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      alignItems: "center",
+      justifyContent: "center",
+      borderWidth: 2.5,
     },
     iconControl: {
       width: compact ? 60 : 68,
@@ -1364,6 +1585,12 @@ const createStyles = (colors, wide, compact) =>
     },
     cardTitle: { color: colors.text, fontSize: 13, fontWeight: "900" },
     cardSubtitle: { color: colors.textMuted, fontSize: 10.5, marginTop: 2 },
+    settingsHint: {
+      color: colors.textMuted,
+      fontSize: 11,
+      lineHeight: 16,
+      marginTop: 8,
+    },
     inputGrid: { flexDirection: "row", flexWrap: "wrap", gap: 9 },
     inputCell: { width: compact ? "100%" : "48.8%" },
     subLabel: {

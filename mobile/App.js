@@ -19,7 +19,6 @@ import ForgotPasswordScreen from "./src/screens/ForgotPasswordScreen";
 import VerifyEmailScreen from "./src/screens/VerifyEmailScreen";
 import TimerScreen from "./src/screens/TimerScreen";
 import TasksScreen from "./src/screens/TasksScreen";
-import StatsScreen from "./src/screens/StatsScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
 import StudyHomeScreen from "./src/screens/StudyHomeScreen";
 import CoachScreen from "./src/screens/CoachScreen";
@@ -45,6 +44,7 @@ import NoteImportScreen from "./src/screens/NoteImportScreen";
 import CardImportScreen from "./src/screens/CardImportScreen";
 import GamifiedQuizScreen from "./src/screens/GamifiedQuizScreen";
 import ProgressScreen from "./src/screens/ProgressScreen";
+import ShopScreen from "./src/screens/ShopScreen";
 import LeaderboardScreen from "./src/screens/LeaderboardScreen";
 import StudentProfileScreen from "./src/screens/StudentProfileScreen";
 import FindFriendsScreen from "./src/screens/FindFriendsScreen";
@@ -56,14 +56,17 @@ import { AIChatProvider } from './src/context/AIChatContext';
 import { AIHistoryProvider } from './src/context/AIHistoryContext';
 import { PremiumProvider } from './src/context/PremiumContext';
 import { NotificationProvider } from './src/context/NotificationContext';
+import { FocusTimerProvider } from './src/context/FocusTimerContext';
+import FloatingFocusBubble from './src/components/FloatingFocusBubble';
 import NotificationsScreen from './src/screens/NotificationsScreen';
 import NotificationPanel from './src/components/NotificationPanel';
 import { UpgradeLimitProvider } from './src/context/UpgradeLimitContext';
-import { refreshPushRegistration } from './src/lib/push';
 import PremiumScreen from './src/screens/PremiumScreen';
 import PremiumCheckoutScreen from './src/screens/PremiumCheckoutScreen';
 import AIHistoryScreen from './src/screens/AIHistoryScreen';
 import AIHistoryDetailScreen from './src/screens/AIHistoryDetailScreen';
+import ContactSupportScreen from './src/screens/ContactSupportScreen';
+import SupportTicketScreen from './src/screens/SupportTicketScreen';
 
 const AuthStack = createNativeStackNavigator();
 const StudentTabs = createBottomTabNavigator();
@@ -145,11 +148,15 @@ function StudyNavigator() {
       <StudyStack.Screen name="CardImport" component={CardImportScreen} />
       <StudyStack.Screen name="GamifiedQuiz" component={GamifiedQuizScreen} />
       <StudyStack.Screen name="Progress" component={ProgressScreen} />
+      <StudyStack.Screen name="Shop" component={ShopScreen} options={{ title: "Shop" }} />
       <StudyStack.Screen name="Leaderboard" component={LeaderboardScreen} />
       <StudyStack.Screen name="StudentProfile" component={StudentProfileScreen} options={{ title: "Student profile" }} />
       <StudyStack.Screen name="FollowList" component={FollowListScreen} options={{ headerShown: false }} />
       <StudyStack.Screen name="FindFriends" component={FindFriendsScreen} options={{ headerShown: false }} />
       <StudyStack.Screen name="SchoolHub" component={SchoolHubScreen} options={{ headerShown: false }} />
+      {/* Support lives on Study — not Profile — so the Profile tab never shows Support UI */}
+      <StudyStack.Screen name="ContactSupport" component={ContactSupportScreen} options={{ headerShown: false }} />
+      <StudyStack.Screen name="SupportTicket" component={SupportTicketScreen} options={{ headerShown: false }} />
     </StudyStack.Navigator>
   );
 }
@@ -168,6 +175,7 @@ function FilesNavigator() {
       }}
     >
       <FilesStack.Screen name="FilesHome" component={FilesScreen} options={{ headerShown: false }} />
+      <FilesStack.Screen name="Material" component={MaterialDetailScreen} />
       <FilesStack.Screen name="Flashcards" component={FlashcardCollectionsScreen} />
       <FilesStack.Screen name="FlashcardCollection" component={FlashcardCollectionScreen} />
       <FilesStack.Screen name="FlashcardEdit" component={FlashcardEditScreen} />
@@ -184,6 +192,7 @@ function FilesNavigator() {
       <FilesStack.Screen name="CardImport" component={CardImportScreen} />
       <FilesStack.Screen name="GamifiedQuiz" component={GamifiedQuizScreen} />
       <FilesStack.Screen name="StudentProfile" component={StudentProfileScreen} options={{ title: "Student profile" }} />
+      <FilesStack.Screen name="Shop" component={ShopScreen} options={{ title: "Shop" }} />
     </FilesStack.Navigator>
   );
 }
@@ -198,6 +207,7 @@ function ProfileNavigator() {
       <ProfileStack.Screen name="FindFriends" component={FindFriendsScreen} />
       <ProfileStack.Screen name="FollowList" component={FollowListScreen} />
       <ProfileStack.Screen name="SchoolHub" component={SchoolHubScreen} />
+      <ProfileStack.Screen name="Shop" component={ShopScreen} options={{ title: "Shop", headerShown: true }} />
     </ProfileStack.Navigator>
   );
 }
@@ -235,11 +245,12 @@ function StudentNavigator() {
         name="Files"
         component={FilesNavigator}
         options={{ tabBarIcon: ({ color, size }) => <Ionicons name="folder" color={color} size={size} /> }}
-      />
-      <StudentTabs.Screen
-        name="Stats"
-        component={StatsScreen}
-        options={{ tabBarIcon: ({ color, size }) => <Ionicons name="stats-chart" color={color} size={size} /> }}
+        listeners={({ navigation }) => ({
+          // Always open the Files home (materials), never a leftover study screen.
+          tabPress: () => {
+            navigation.navigate("Files", { screen: "FilesHome" });
+          },
+        })}
       />
       <StudentTabs.Screen
         name="Profile"
@@ -254,6 +265,12 @@ function StudentNavigator() {
             />
           ),
         }}
+        listeners={({ navigation }) => ({
+          // Always land on the real profile home — never a leftover nested screen.
+          tabPress: () => {
+            navigation.navigate("Profile", { screen: "ProfileHome" });
+          },
+        })}
       />
     </StudentTabs.Navigator>
   );
@@ -322,15 +339,21 @@ function RootNavigator() {
       {!user ? (
         <AuthNavigator />
       ) : user.role === "ADMIN" ? (
-        <AdminHomeScreen />
+        <NotificationProvider>
+          <AdminHomeScreen />
+          <NotificationPanel />
+        </NotificationProvider>
       ) : (
         <AIChatProvider>
           <AIHistoryProvider>
             <PremiumProvider>
               <UpgradeLimitProvider>
                 <NotificationProvider>
-                  <StudentNavigator />
-                  <NotificationPanel />
+                  <FocusTimerProvider>
+                    <StudentNavigator />
+                    <FloatingFocusBubble />
+                    <NotificationPanel />
+                  </FocusTimerProvider>
                 </NotificationProvider>
               </UpgradeLimitProvider>
             </PremiumProvider>
@@ -373,12 +396,11 @@ class ErrorBoundary extends React.Component {
 
 export default function App() {
   useEffect(() => {
+    // Token refresh after auth is handled inside AuthProvider (has the user).
     flushQueue().catch(() => {});
-    refreshPushRegistration().catch(() => {});
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
         flushQueue().catch(() => {});
-        refreshPushRegistration().catch(() => {});
       }
     });
     return () => subscription.remove();

@@ -24,6 +24,8 @@ import { deckAccent, DECK_COLOR_IDS } from "../lib/deckColors";
 import client from "../api/client";
 import { RADIUS, SPACING } from "../theme/theme";
 import { startDeckQuiz } from "../lib/publicStudy";
+import { sortDeckCards } from "../lib/collectionStudy";
+import HighlightedAnswer from "../components/HighlightedAnswer";
 
 function StatPill({ icon, label, value, color, soft, colors, styles }) {
   return (
@@ -53,7 +55,7 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
 
   const initialCollection = route.params?.collection;
   const readOnlyParam = route.params?.readOnly;
-  const collectionId = initialCollection?.id;
+  const collectionId = initialCollection?.id || route.params?.collectionId;
   const [collection, setCollection] = useState(initialCollection || null);
   const [isOwner, setIsOwner] = useState(!readOnlyParam);
   const [cards, setCards] = useState([]);
@@ -67,6 +69,8 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
   const [editColor, setEditColor] = useState("violet");
   const [savingEdit, setSavingEdit] = useState(false);
   const [quizBusy, setQuizBusy] = useState(false);
+  const [deletingCard, setDeletingCard] = useState(null);
+  const [deletingCardBusy, setDeletingCardBusy] = useState(false);
   const readOnly = readOnlyParam || !isOwner;
 
   const accent = deckAccent(collection?.color, colors);
@@ -76,10 +80,13 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
     if (!collectionId) return;
     if (!silent) setLoading(true);
     try {
-      const { data } = await client.get(`/flashcards/collections/${collectionId}`);
+      const { data } = await client.get(`/flashcards/collections/${collectionId}`, {
+        headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+        params: { _: Date.now() },
+      });
       setCollection(data.collection);
       setIsOwner(Boolean(data.isOwner));
-      setCards(data.collection.flashcards || []);
+      setCards(sortDeckCards(data.collection.flashcards || []));
     } catch (e) {
       Alert.alert("Error", e?.response?.data?.error || e.message || "Could not load collection.");
     } finally {
@@ -143,33 +150,49 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
     }, [fetchCollection])
   );
 
-  const deleteCard = (card) => {
-    Alert.alert("Delete card?", "This will permanently remove this flashcard.", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-          try {
-            await client.delete(`/flashcards/${card.id}`);
-            await fetchCollection(true);
-          } catch (e) {
-            Alert.alert("Error", e.message || "Could not delete card.");
-          }
-        },
-      },
-    ]);
+  const confirmDeleteCard = async () => {
+    const card = deletingCard;
+    if (!card) return;
+    setDeletingCardBusy(true);
+    const previous = cards;
+    setCards((list) => list.filter((item) => item.id !== card.id));
+    try {
+      await client.delete(`/flashcards/${card.id}`);
+      setDeletingCard(null);
+      await fetchCollection(true);
+    } catch (e) {
+      setCards(previous);
+      Alert.alert("Error", e.message || "Could not delete card.");
+    } finally {
+      setDeletingCardBusy(false);
+    }
   };
 
   const confirmDeleteDeck = async () => {
-    if (!collectionId) return;
+    if (!collectionId || deletingDeck) return;
     setDeletingDeck(true);
     try {
       await client.delete(`/flashcards/collections/${collectionId}`);
       setShowDeleteDeck(false);
-      navigation.navigate("Flashcards");
+      // Clear this stack so Back cannot reopen the deleted deck.
+      if (typeof navigation.popToTop === "function") {
+        navigation.popToTop();
+      }
+      // Land on the Files tab home (decks), not Collections / this detail screen.
+      const filesParams = {
+        kind: "flashcards",
+        section: "mine",
+        refreshAt: Date.now(),
+        removedCollectionId: collectionId,
+      };
+      const parent = navigation.getParent?.();
+      if (parent?.navigate) {
+        parent.navigate("Files", { screen: "FilesHome", params: filesParams });
+      } else {
+        navigation.navigate("FilesHome", filesParams);
+      }
     } catch (e) {
-      Alert.alert("Error", e.message || "Could not delete collection.");
+      Alert.alert("Error", e.message || "Could not delete deck.");
     } finally {
       setDeletingDeck(false);
     }
@@ -196,13 +219,10 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
 
   const renderCard = ({ item, index }) => (
     <View style={styles.cardWrap}>
-      <Pressable
-        onPress={() => !readOnly && navigation.navigate("FlashcardEdit", { card: item, collectionId })}
-        disabled={readOnly}
-        style={({ pressed }) => [
+      <View
+        style={[
           styles.flashcard,
           { backgroundColor: colors.surface, borderColor: hasCards ? accent.color + "33" : colors.border },
-          !readOnly && pressed && styles.pressed,
         ]}
       >
         <View style={[styles.cardAccent, { backgroundColor: accent.color }]} />
@@ -214,21 +234,19 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
             {!readOnly ? (
               <View style={styles.cardTopActions}>
                 <Pressable
-                  onPress={(e) => {
-                    e?.stopPropagation?.();
-                    navigation.navigate("FlashcardEdit", { card: item, collectionId });
-                  }}
+                  onPress={() => navigation.navigate("FlashcardEdit", { card: item, collectionId })}
                   hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Edit card"
                   style={({ pressed }) => [styles.cardIconBtn, pressed && styles.pressed]}
                 >
                   <Ionicons name="pencil-outline" size={15} color={colors.textMuted} />
                 </Pressable>
                 <Pressable
-                  onPress={(e) => {
-                    e?.stopPropagation?.();
-                    deleteCard(item);
-                  }}
+                  onPress={() => setDeletingCard(item)}
                   hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Delete card"
                   style={({ pressed }) => [styles.cardIconBtn, pressed && styles.pressed]}
                 >
                   <Ionicons name="trash-outline" size={15} color={colors.tomato} />
@@ -239,21 +257,29 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
             )}
           </View>
 
-          <View style={[styles.qBlock, { borderColor: colors.violet + "44", backgroundColor: colors.bg }]}>
-            <Text style={[styles.blockLabel, { color: colors.violet }]}>Front</Text>
-            <Text style={styles.frontText} numberOfLines={4}>
-              {item.front}
-            </Text>
-          </View>
+          <Pressable
+            onPress={() => !readOnly && navigation.navigate("FlashcardEdit", { card: item, collectionId })}
+            disabled={readOnly}
+            style={({ pressed }) => [!readOnly && pressed && styles.pressed]}
+          >
+            <View style={[styles.qBlock, { borderColor: colors.violet + "44", backgroundColor: colors.bg }]}>
+              <Text style={[styles.blockLabel, { color: colors.violet }]}>Front</Text>
+              <Text style={styles.frontText} numberOfLines={4}>
+                {item.front}
+              </Text>
+            </View>
 
-          <View style={[styles.aBlock, { borderColor: colors.mint + "44", backgroundColor: colors.bg }]}>
-            <Text style={[styles.blockLabel, { color: colors.mint }]}>Back</Text>
-            <Text style={styles.backText} numberOfLines={4}>
-              {item.back}
-            </Text>
-          </View>
+            <View style={[styles.aBlock, { borderColor: colors.mint + "44", backgroundColor: colors.bg }]}>
+              <Text style={[styles.blockLabel, { color: colors.mint }]}>Back</Text>
+              <HighlightedAnswer
+                card={item}
+                style={styles.backText}
+                numberOfLines={4}
+              />
+            </View>
+          </Pressable>
         </View>
-      </Pressable>
+      </View>
     </View>
   );
 
@@ -420,11 +446,17 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
           </View>
 
           <Pressable
-            style={({ pressed }) => [styles.deleteLink, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.deleteDeckBtn,
+              { borderColor: colors.tomato, backgroundColor: colors.surface },
+              pressed && styles.pressed,
+            ]}
             onPress={() => setShowDeleteDeck(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Delete deck"
           >
-            <Ionicons name="trash-outline" size={16} color={colors.tomato} />
-            <Text style={[styles.deleteLinkText, { color: colors.tomato }]}>Delete deck</Text>
+            <Ionicons name="trash-outline" size={17} color={colors.tomato} />
+            <Text style={[styles.deleteDeckBtnText, { color: colors.tomato }]}>Delete Deck</Text>
           </Pressable>
         </>
       ) : null}
@@ -437,34 +469,96 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
   );
 
   const emptyComponent = (
-    <View style={styles.emptyState}>
-      <View style={[styles.emptyIcon, { backgroundColor: accent.soft }]}>
-        <Ionicons name="document-text-outline" size={32} color={accent.color} />
+    <View
+      style={[
+        styles.emptyState,
+        {
+          backgroundColor: colors.surface,
+          borderColor: accent.color + "33",
+        },
+      ]}
+    >
+      <View style={styles.emptyArt}>
+        <View
+          style={[
+            styles.emptyCardBack,
+            { backgroundColor: accent.soft, borderColor: accent.color + "55" },
+          ]}
+        />
+        <View
+          style={[
+            styles.emptyCardFront,
+            { backgroundColor: colors.surface, borderColor: accent.color },
+          ]}
+        >
+          <View style={[styles.emptyCardBadge, { backgroundColor: accent.soft }]}>
+            <Ionicons name="layers-outline" size={22} color={accent.color} />
+          </View>
+          <View style={styles.emptyCardLines}>
+            <View style={[styles.emptyCardLine, { backgroundColor: colors.border, width: "72%" }]} />
+            <View style={[styles.emptyCardLine, { backgroundColor: colors.border, width: "48%" }]} />
+          </View>
+        </View>
       </View>
-      <Text style={styles.emptyTitle}>No cards yet</Text>
+
+      <Text style={styles.emptyTitle}>Start this deck</Text>
       <Text style={styles.emptyText}>
         {readOnly
           ? "This public deck does not have flashcards yet."
-          : "Add a card manually or use Magic Import to fill this deck."}
+          : "Generate a set from your notes, or write the first card yourself."}
       </Text>
+
       {!readOnly ? (
-        <View style={[styles.emptyActions, isWide && styles.emptyActionsWide]}>
+        <View style={styles.emptyActions}>
           <Pressable
-            onPress={() => navigation.navigate("MagicImport", { collectionId, collectionName: collection?.name })}
-            style={({ pressed }) => [styles.emptyPrimaryBtn, { backgroundColor: colors.violet, opacity: pressed ? 0.88 : 1 }]}
-          >
-            <Ionicons name="sparkles" size={18} color="#fff" />
-            <Text style={styles.emptyPrimaryText}>Magic Import</Text>
-          </Pressable>
-          <Pressable
-            onPress={() => navigation.navigate("FlashcardEdit", { collectionId })}
+            onPress={() =>
+              navigation.navigate("MagicImport", {
+                collectionId,
+                collectionName: collection?.name,
+              })
+            }
+            accessibilityRole="button"
+            accessibilityLabel="Magic Import"
             style={({ pressed }) => [
-              styles.emptySecondaryBtn,
-              { borderColor: colors.border, backgroundColor: colors.surface, opacity: pressed ? 0.88 : 1 },
+              styles.emptyActionTile,
+              {
+                backgroundColor: colors.violetSoft,
+                borderColor: colors.violet,
+                opacity: pressed ? 0.88 : 1,
+              },
             ]}
           >
-            <Ionicons name="add-circle-outline" size={18} color={colors.text} />
-            <Text style={[styles.emptySecondaryText, { color: colors.text }]}>Add card</Text>
+            <View style={[styles.emptyActionIcon, { backgroundColor: colors.violet }]}>
+              <Ionicons name="sparkles" size={18} color="#fff" />
+            </View>
+            <View style={styles.emptyActionCopy}>
+              <Text style={[styles.emptyActionTitle, { color: colors.violet }]}>Magic Import</Text>
+              <Text style={styles.emptyActionDesc}>Turn a topic, notes, or file into cards</Text>
+            </View>
+            <Ionicons name="arrow-forward" size={16} color={colors.violet} />
+          </Pressable>
+
+          <Pressable
+            onPress={() => navigation.navigate("FlashcardEdit", { collectionId })}
+            accessibilityRole="button"
+            accessibilityLabel="Add card"
+            style={({ pressed }) => [
+              styles.emptyActionTile,
+              {
+                backgroundColor: colors.bg,
+                borderColor: colors.border,
+                opacity: pressed ? 0.88 : 1,
+              },
+            ]}
+          >
+            <View style={[styles.emptyActionIcon, { backgroundColor: accent.soft }]}>
+              <Ionicons name="add" size={20} color={accent.color} />
+            </View>
+            <View style={styles.emptyActionCopy}>
+              <Text style={[styles.emptyActionTitle, { color: colors.text }]}>Add a card</Text>
+              <Text style={styles.emptyActionDesc}>Write a question and answer by hand</Text>
+            </View>
+            <Ionicons name="arrow-forward" size={16} color={colors.textMuted} />
           </Pressable>
         </View>
       ) : null}
@@ -552,10 +646,26 @@ export default function FlashcardCollectionScreen({ route, navigation }) {
       </Modal>
 
       <ConfirmDialog
-        visible={showDeleteDeck}
-        title="Delete deck?"
-        message={collection ? `Delete "${collection.name}" and all ${cards.length} card${cards.length === 1 ? "" : "s"}? This cannot be undone.` : ""}
+        visible={Boolean(deletingCard)}
+        title="Delete card?"
+        message="This will permanently remove this flashcard."
         confirmText="Delete"
+        cancelText="Cancel"
+        destructive
+        loading={deletingCardBusy}
+        onConfirm={confirmDeleteCard}
+        onCancel={() => !deletingCardBusy && setDeletingCard(null)}
+      />
+
+      <ConfirmDialog
+        visible={showDeleteDeck}
+        title="Delete Deck?"
+        message={
+          collection
+            ? `Delete "${collection.name}" and all ${cards.length} card${cards.length === 1 ? "" : "s"}? This cannot be undone.`
+            : "Delete this deck? This cannot be undone."
+        }
+        confirmText="Delete Deck"
         cancelText="Cancel"
         destructive
         loading={deletingDeck}
@@ -792,17 +902,21 @@ const createStyles = (colors, isWide, isLarge, compact, cardColumns) =>
       lineHeight: 16,
       marginTop: 2,
     },
-    deleteLink: {
+    deleteDeckBtn: {
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "center",
-      gap: 6,
-      paddingVertical: SPACING.sm,
+      gap: 8,
+      alignSelf: "stretch",
+      minHeight: 46,
+      borderWidth: 1.5,
+      borderRadius: RADIUS.md,
+      paddingHorizontal: 14,
       marginBottom: SPACING.lg,
     },
-    deleteLinkText: {
-      fontSize: 13,
-      fontWeight: "700",
+    deleteDeckBtnText: {
+      fontSize: 14,
+      fontWeight: "800",
     },
     cardsSectionHeader: {
       flexDirection: "row",
@@ -910,67 +1024,119 @@ const createStyles = (colors, isWide, isLarge, compact, cardColumns) =>
     },
     emptyState: {
       alignItems: "center",
+      marginTop: SPACING.sm,
+      marginHorizontal: compact ? 0 : SPACING.xs,
       paddingVertical: SPACING.xl,
       paddingHorizontal: SPACING.lg,
-      maxWidth: 400,
+      maxWidth: 440,
+      width: "100%",
       alignSelf: "center",
+      borderRadius: RADIUS.xl,
+      borderWidth: 1,
     },
-    emptyIcon: {
-      width: 72,
-      height: 72,
-      borderRadius: 20,
+    emptyArt: {
+      width: 112,
+      height: 88,
+      marginBottom: SPACING.lg,
       alignItems: "center",
       justifyContent: "center",
-      marginBottom: SPACING.md,
+    },
+    emptyCardBack: {
+      position: "absolute",
+      width: 78,
+      height: 56,
+      borderRadius: 14,
+      borderWidth: 1,
+      transform: [{ rotate: "-8deg" }, { translateX: -10 }, { translateY: 4 }],
+    },
+    emptyCardFront: {
+      width: 86,
+      height: 62,
+      borderRadius: 14,
+      borderWidth: 1.5,
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      transform: [{ rotate: "4deg" }],
+      ...Platform.select({
+        ios: {
+          shadowColor: "#111827",
+          shadowOpacity: 0.08,
+          shadowRadius: 10,
+          shadowOffset: { width: 0, height: 4 },
+        },
+        android: { elevation: 2 },
+        default: {},
+      }),
+    },
+    emptyCardBadge: {
+      width: 36,
+      height: 36,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    emptyCardLines: {
+      width: "70%",
+      gap: 5,
+      alignItems: "flex-start",
+    },
+    emptyCardLine: {
+      height: 4,
+      borderRadius: 999,
     },
     emptyTitle: {
       color: colors.text,
-      fontSize: 17,
+      fontSize: compact ? 18 : 20,
       fontWeight: "900",
+      letterSpacing: -0.3,
       marginBottom: 6,
+      textAlign: "center",
     },
     emptyText: {
       color: colors.textMuted,
-      fontSize: 13,
-      lineHeight: 19,
+      fontSize: 13.5,
+      lineHeight: 20,
       textAlign: "center",
       marginBottom: SPACING.lg,
+      maxWidth: 300,
     },
     emptyActions: {
       width: "100%",
       gap: SPACING.sm,
     },
-    emptyActionsWide: {
-      flexDirection: "row",
-      maxWidth: 420,
-    },
-    emptyPrimaryBtn: {
-      flex: 1,
-      height: 46,
-      borderRadius: RADIUS.lg,
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "center",
-      gap: 8,
-    },
-    emptyPrimaryText: {
-      color: "#fff",
-      fontWeight: "800",
-      fontSize: 14,
-    },
-    emptySecondaryBtn: {
-      flex: 1,
-      height: 46,
+    emptyActionTile: {
+      width: "100%",
+      minHeight: 64,
       borderRadius: RADIUS.lg,
       borderWidth: 1,
+      paddingVertical: 12,
+      paddingHorizontal: 12,
       flexDirection: "row",
       alignItems: "center",
-      justifyContent: "center",
-      gap: 8,
+      gap: 12,
     },
-    emptySecondaryText: {
+    emptyActionIcon: {
+      width: 40,
+      height: 40,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    emptyActionCopy: {
+      flex: 1,
+      minWidth: 0,
+      gap: 2,
+    },
+    emptyActionTitle: {
+      fontSize: 14.5,
       fontWeight: "800",
-      fontSize: 14,
+    },
+    emptyActionDesc: {
+      color: colors.textMuted,
+      fontSize: 12,
+      lineHeight: 16,
+      fontWeight: "600",
     },
     centerState: {
       flex: 1,

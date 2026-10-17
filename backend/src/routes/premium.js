@@ -15,13 +15,13 @@ const router = express.Router();
 // Benefits shown on the premium page. Kept on the server so the pricing screen
 // and any future client stay in sync with one source of truth.
 const PLAN_BENEFITS = [
-  { key: 'unlimitedCards', label: 'Unlimited Cards', basic: true, unlimited: true, basicDetail: 'Included' },
-  { key: 'unlimitedTasks', label: 'Unlimited Tasks', basic: false, unlimited: true, basicDetail: '5 active tasks' },
-  { key: 'unlimitedHearts', label: 'Unlimited Hearts', basic: false, unlimited: true, basicDetail: '5 hearts · 24h refill' },
-  { key: 'unlimitedAiTutor', label: 'Unlimited AI Tutor', basic: false, unlimited: true, basicDetail: '3 sessions/day' },
-  { key: 'unlimitedHints', label: 'Unlimited Hints', basic: false, unlimited: true, basicDetail: '3 hints/day' },
-  { key: 'unlimitedChat', label: 'Unlimited AI Chat', basic: false, unlimited: true, basicDetail: '15 messages/day' },
-  { key: 'unlimitedPrompts', label: 'Unlimited AI Generations', basic: false, unlimited: true, basicDetail: '10 generations/day' },
+  { key: 'unlimitedCards', label: 'Unlimited Cards', desc: 'Build every deck you need', icon: 'layers-outline', basic: true, unlimited: true, basicDetail: 'Included' },
+  { key: 'unlimitedTasks', label: 'Unlimited Tasks', desc: 'Keep every assignment in one list', icon: 'checkbox-outline', basic: false, unlimited: true, basicDetail: '5 active tasks' },
+  { key: 'unlimitedHearts', label: 'Unlimited Hearts', desc: 'Keep going without losing progress', icon: 'heart-outline', basic: false, unlimited: true, basicDetail: '5 hearts · 24h refill' },
+  { key: 'unlimitedAiTutor', label: 'Unlimited AI Tutor', desc: 'Deck tutor lessons without caps', icon: 'school-outline', basic: false, unlimited: true, basicDetail: '3 sessions/day' },
+  { key: 'unlimitedHints', label: 'Unlimited Hints', desc: 'Get unstuck faster in Memorize', icon: 'bulb-outline', basic: false, unlimited: true, basicDetail: '3 hints/day' },
+  { key: 'unlimitedChat', label: 'Unlimited AI Chat', desc: 'Talk to your study assistant freely', icon: 'chatbubbles-outline', basic: false, unlimited: true, basicDetail: '15 messages/day' },
+  { key: 'unlimitedPrompts', label: 'Unlimited AI Generations', desc: 'Study packs, imports, coach & more', icon: 'sparkles-outline', basic: false, unlimited: true, basicDetail: '10 generations/day' },
 ];
 
 function buildReturnUrl(kind) {
@@ -35,7 +35,9 @@ function publicPayment(payment) {
   if (!payment) return null;
   return {
     id: payment.id,
+    kind: payment.kind || 'premium',
     plan: payment.plan,
+    coinsGranted: payment.coinsGranted || 0,
     amount: payment.amount,
     currency: payment.currency,
     status: payment.status,
@@ -90,7 +92,7 @@ router.get('/status', requireAuth, async (req, res) => {
     take: 10,
   });
 
-  const activePending = payments.find((p) => p.status === 'PENDING' && p.checkoutUrl) || null;
+  const activePending = payments.find((p) => p.status === 'PENDING' && p.kind !== 'coins' && p.checkoutUrl) || null;
 
   res.json({
     premium: premiumState(user),
@@ -131,6 +133,7 @@ router.post('/checkout', requireAuth, async (req, res) => {
       where: {
         userId: user.id,
         status: 'PENDING',
+        kind: 'premium',
         checkoutUrl: { not: null },
         OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
       },
@@ -161,6 +164,7 @@ router.post('/checkout', requireAuth, async (req, res) => {
       data: {
         userId: user.id,
         provider: 'xendit',
+        kind: 'premium',
         plan,
         amount: price,
         currency,
@@ -272,6 +276,7 @@ router.post('/verify', requireAuth, async (req, res) => {
     const payment = await prisma.payment.findFirst({
       where: {
         userId: req.user.id, // scoped: a student can only verify their own payment
+        kind: 'premium',
         ...(paymentId ? { id: paymentId } : {}),
         ...(invoiceId ? { xenditInvoiceId: invoiceId } : {}),
         ...(externalId ? { externalId } : {}),
@@ -434,7 +439,7 @@ router.post('/sandbox/pay', requireAuth, async (req, res) => {
   try {
     const paymentId = req.body ? req.body.paymentId : undefined;
     const payment = await prisma.payment.findFirst({
-      where: { userId: req.user.id, ...(paymentId ? { id: paymentId } : {}) },
+      where: { userId: req.user.id, kind: 'premium', ...(paymentId ? { id: paymentId } : {}) },
       orderBy: { createdAt: 'desc' },
     });
 

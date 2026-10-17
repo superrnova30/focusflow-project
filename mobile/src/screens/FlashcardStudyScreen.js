@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { View, Text, StyleSheet, Pressable } from "react-native";
 import { Screen, Card } from "../components/Screen";
 import { useTheme } from "../context/ThemeContext";
+import HighlightedAnswer from "../components/HighlightedAnswer";
 
 export default function FlashcardStudyScreen({ route }) {
   const { colors } = useTheme();
@@ -55,7 +56,11 @@ export default function FlashcardStudyScreen({ route }) {
         <Pressable onPress={flip} style={{ flex: 1, justifyContent: "center" }}>
           <Card style={styles.flashcard}>
             <Text style={styles.cardLabel}>{flipped ? "BACK" : "FRONT"}</Text>
-            <Text style={styles.cardText}>{flipped ? current.back : current.front}</Text>
+            {flipped ? (
+              <HighlightedAnswer card={current} text={current.back} style={styles.cardText} />
+            ) : (
+              <Text style={styles.cardText}>{current.front}</Text>
+            )}
             <Text style={styles.tapHint}>Tap to flip</Text>
           </Card>
         </Pressable>

@@ -55,6 +55,23 @@ function publicUser(user) {
       planLabel: user && user.isPremium ? "Go Unlimited" : "Basic",
     };
   }
+  if (user && user.schoolRecord) {
+    const { serializeSchool } = require("./schools");
+    safe.schoolRecord = serializeSchool(user.schoolRecord);
+  } else if (safe && safe.schoolRecord === undefined) {
+    safe.schoolRecord = null;
+  }
+  try {
+    const { getSchoolChangeState } = require("./schools");
+    safe.schoolChange = getSchoolChangeState(user);
+  } catch (e) {
+    safe.schoolChange = {
+      locked: false,
+      lastChangedAt: null,
+      availableAt: null,
+      cooldownDays: 7,
+    };
+  }
   return safe;
 }
 

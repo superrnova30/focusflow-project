@@ -10,6 +10,8 @@ function studentCardSelect() {
     name: true,
     profilePicture: true,
     school: true,
+    schoolId: true,
+    schoolRecord: { select: { id: true, name: true, location: true, logoUrl: true, type: true, status: true } },
     course: true,
     yearLevel: true,
     section: true,

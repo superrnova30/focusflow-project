@@ -1,5 +1,13 @@
 import React, { useMemo } from "react";
-import { Modal, View, Text, Pressable, StyleSheet, ActivityIndicator } from "react-native";
+import {
+  Modal,
+  View,
+  Text,
+  Pressable,
+  StyleSheet,
+  ActivityIndicator,
+  useWindowDimensions,
+} from "react-native";
 import { useTheme } from "../context/ThemeContext";
 import { RADIUS, SPACING } from "../theme/theme";
 
@@ -15,7 +23,9 @@ export default function ConfirmDialog({
   onCancel,
 }) {
   const { colors } = useTheme();
-  const styles = useMemo(() => createStyles(colors), [colors]);
+  const { width } = useWindowDimensions();
+  const stackActions = width < 380;
+  const styles = useMemo(() => createStyles(colors, stackActions), [colors, stackActions]);
 
   return (
     <Modal visible={Boolean(visible)} transparent animationType="fade" onRequestClose={onCancel}>
@@ -52,7 +62,7 @@ export default function ConfirmDialog({
   );
 }
 
-const createStyles = (colors) =>
+const createStyles = (colors, stackActions) =>
   StyleSheet.create({
     backdrop: {
       flex: 1,
@@ -80,18 +90,19 @@ const createStyles = (colors) =>
       lineHeight: 20,
     },
     actions: {
-      flexDirection: "row",
-      justifyContent: "flex-end",
+      flexDirection: stackActions ? "column-reverse" : "row",
+      justifyContent: stackActions ? "stretch" : "flex-end",
       gap: SPACING.sm,
       marginTop: SPACING.lg,
     },
     button: {
-      minWidth: 96,
+      minWidth: stackActions ? undefined : 96,
       minHeight: 44,
       borderRadius: RADIUS.md,
       paddingHorizontal: 16,
       alignItems: "center",
       justifyContent: "center",
+      ...(stackActions ? { width: "100%" } : {}),
     },
     cancelButton: {
       borderWidth: 1,

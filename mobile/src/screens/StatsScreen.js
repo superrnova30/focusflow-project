@@ -19,6 +19,7 @@ import { RADIUS, SPACING } from "../theme/theme";
 import { getStreakLevel } from "../lib/streakLevels";
 import HeaderWallet from "../components/HeaderWallet";
 import NotificationBell from "../components/NotificationBell";
+import { useScrollToTopOnFocus } from "../hooks/useScrollToTopOnFocus";
 
 function formatDuration(total) {
   const minutes = Number(total) || 0;
@@ -36,6 +37,7 @@ export default function StatsScreen({ embedded = false, userId = null, subjectNa
   const viewOnly = Boolean(userId);
   const displayName = subjectName?.trim() || "Student";
   const styles = useMemo(() => createStyles(colors, isWide, compact, embedded), [colors, isWide, compact, embedded]);
+  const scrollRef = useScrollToTopOnFocus();
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -67,10 +69,11 @@ export default function StatsScreen({ embedded = false, userId = null, subjectNa
   );
 
   const Frame = embedded ? View : Screen;
+  const frameStyle = embedded ? styles.embeddedFrame : undefined;
 
   if (loading && !stats) {
     return (
-      <Frame>
+      <Frame style={frameStyle}>
         <View style={[styles.centerState, embedded && styles.centerStateEmbedded]}>
           <View style={styles.stateIcon}>
             <Ionicons name="analytics" size={29} color={colors.violet} />
@@ -87,7 +90,7 @@ export default function StatsScreen({ embedded = false, userId = null, subjectNa
 
   if (error && !stats) {
     return (
-      <Frame>
+      <Frame style={frameStyle}>
         <View style={[styles.centerState, embedded && styles.centerStateEmbedded]}>
           <View style={[styles.stateIcon, { backgroundColor: colors.tomatoSoft }]}>
             <Ionicons name="cloud-offline-outline" size={29} color={colors.tomato} />
@@ -124,24 +127,23 @@ export default function StatsScreen({ embedded = false, userId = null, subjectNa
   ];
 
   return (
-    <Frame>
+    <Frame style={frameStyle}>
       <ScrollView
-        style={embedded ? undefined : styles.scrollView}
-        showsVerticalScrollIndicator={!embedded}
-        bounces={!embedded}
+        ref={scrollRef}
+        style={styles.scrollView}
+        showsVerticalScrollIndicator
+        bounces
         nestedScrollEnabled
-        scrollEnabled={!embedded}
-        overScrollMode="never"
+        keyboardShouldPersistTaps="handled"
+        overScrollMode="auto"
         contentContainerStyle={[styles.page, embedded && styles.pageEmbedded]}
         refreshControl={
-          embedded ? undefined : (
           <RefreshControl
             refreshing={refreshing}
             onRefresh={() => loadStats({ refresh: true })}
             tintColor={colors.violet}
             colors={[colors.violet]}
           />
-          )
         }
       >
         {embedded ? null : (
@@ -207,7 +209,7 @@ export default function StatsScreen({ embedded = false, userId = null, subjectNa
               : viewOnly
                 ? `${formatDuration(Math.max(0, (stats?.dailyGoalMinutes || 0) - (stats?.todayMinutes || 0)))} left to reach today's goal`
                 : `${formatDuration(Math.max(0, (stats?.dailyGoalMinutes || 0) - (stats?.todayMinutes || 0)))} left to reach today’s goal`}
-          </Text>
+            </Text>
         </View>
 
         <View style={styles.summaryGrid}>
@@ -227,36 +229,38 @@ export default function StatsScreen({ embedded = false, userId = null, subjectNa
             <Text style={styles.cardTitle}>Last 7 days</Text>
             <Text style={styles.cardMeta}>{stats?.activeDaysLast7 || 0}/7 active days</Text>
           </View>
-          <VictoryChart
-            width={chartWidth}
-            height={220}
-            padding={{ left: 45, right: 22, top: 18, bottom: 34 }}
-            domainPadding={{ y: 12 }}
-          >
-            <VictoryAxis
-              style={{
-                tickLabels: { fill: colors.textMuted, fontSize: 10, fontWeight: "600" },
-                axis: { stroke: colors.border },
-                grid: { stroke: "none" },
-                ticks: { stroke: "transparent" },
-              }}
-            />
-            <VictoryAxis
-              dependentAxis
-              tickFormat={(value) => `${value}m`}
-              style={{
-                tickLabels: { fill: colors.textMuted, fontSize: 9 },
-                axis: { stroke: "transparent" },
-                grid: { stroke: colors.border, strokeDasharray: "4,5" },
-                ticks: { stroke: "transparent" },
-              }}
-            />
-            <VictoryLine
-              interpolation="monotoneX"
-              data={chartData}
-              style={{ data: { stroke: colors.violet, strokeWidth: 3 } }}
-            />
+          <View pointerEvents="none" style={styles.chartWrap}>
+            <VictoryChart
+              width={chartWidth}
+              height={220}
+              padding={{ left: 45, right: 22, top: 18, bottom: 34 }}
+              domainPadding={{ y: 12 }}
+            >
+              <VictoryAxis
+                style={{
+                  tickLabels: { fill: colors.textMuted, fontSize: 10, fontWeight: "600" },
+                  axis: { stroke: colors.border },
+                  grid: { stroke: "none" },
+                  ticks: { stroke: "transparent" },
+                }}
+              />
+              <VictoryAxis
+                dependentAxis
+                tickFormat={(value) => `${value}m`}
+                style={{
+                  tickLabels: { fill: colors.textMuted, fontSize: 9 },
+                  axis: { stroke: "transparent" },
+                  grid: { stroke: colors.border, strokeDasharray: "4,5" },
+                  ticks: { stroke: "transparent" },
+                }}
+              />
+              <VictoryLine
+                interpolation="monotoneX"
+                data={chartData}
+                style={{ data: { stroke: colors.violet, strokeWidth: 3 } }}
+              />
           </VictoryChart>
+          </View>
         </View>
 
         <View style={styles.performanceGrid}>
@@ -353,20 +357,30 @@ export default function StatsScreen({ embedded = false, userId = null, subjectNa
 
 const createStyles = (colors, isWide, compact, embedded) =>
   StyleSheet.create({
+    embeddedFrame: {
+      flex: 1,
+      minHeight: 0,
+    },
     scrollView: {
       flex: 1,
+      minHeight: 0,
     },
     page: {
       width: "100%",
       maxWidth: embedded ? "100%" : 1008,
       alignSelf: "center",
       paddingTop: SPACING.md,
-      paddingBottom: SPACING.md,
+      paddingBottom: 36,
+      flexGrow: 1,
     },
     pageEmbedded: {
-      paddingTop: 0,
-      paddingBottom: 4,
+      paddingTop: 2,
+      paddingBottom: 48,
       gap: 0,
+    },
+    chartWrap: {
+      width: "100%",
+      alignItems: "center",
     },
     viewOnlyBanner: {
       flexDirection: "row",

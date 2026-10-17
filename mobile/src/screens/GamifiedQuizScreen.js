@@ -17,11 +17,16 @@ import HeartsBlockedPanel from "../components/HeartsBlockedPanel";
 import { useTheme } from "../context/ThemeContext";
 import client from "../api/client";
 import { startGoUnlimitedCheckout } from "../lib/upgradePrompt";
-import { MAX_HEARTS } from "../lib/hearts";
+import { MAX_HEARTS, isHeartsBlocked } from "../lib/hearts";
 import { setCachedCoins } from "../lib/coins";
 
-const XP_PER_CORRECT = 200;
+const XP_PER_CORRECT = 20;
+const XP_WITH_HINT = 10;
 const OPTION_LABELS = ["A", "B", "C", "D"];
+
+function makeQuizSessionId() {
+  return `quiz_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
 
 export default function GamifiedQuizScreen({ route, navigation }) {
   const { colors } = useTheme();
@@ -49,6 +54,9 @@ export default function GamifiedQuizScreen({ route, navigation }) {
   const [idx, setIdx] = useState(0);
   const [xp, setXp] = useState(route.params?.xp ?? 0);
   const [hearts, setHearts] = useState(route.params?.hearts ?? MAX_HEARTS);
+  const [unlimitedHearts, setUnlimitedHearts] = useState(false);
+  const [hints, setHints] = useState(0);
+  const [unlimitedHints, setUnlimitedHints] = useState(false);
   const [score, setScore] = useState(0);
   const [xpEarned, setXpEarned] = useState(0);
   const [selected, setSelected] = useState(null); // "correct" | "wrong" | null
@@ -58,6 +66,13 @@ export default function GamifiedQuizScreen({ route, navigation }) {
   const [coins, setCoins] = useState(0);
   const [heartsRefillAt, setHeartsRefillAt] = useState(null);
   const [buying, setBuying] = useState(null);
+  const [hintBusy, setHintBusy] = useState(false);
+  const [eliminatedOptions, setEliminatedOptions] = useState([]);
+  const [usedHint, setUsedHint] = useState(false);
+  const [lastXpAwarded, setLastXpAwarded] = useState(0);
+  const [quizSessionId, setQuizSessionId] = useState(() => makeQuizSessionId());
+  const awardedKeysRef = useRef(new Set());
+  const answeringRef = useRef(false);
   const depletedAfterAnswer = useRef(false);
 
   // Animations
@@ -74,9 +89,12 @@ export default function GamifiedQuizScreen({ route, navigation }) {
       const state = data.state || {};
       setXp(state.xp ?? 0);
       setHearts(state.hearts ?? MAX_HEARTS);
+      setUnlimitedHearts(Boolean(state.unlimitedHearts));
+      setHints(state.hints ?? 0);
+      setUnlimitedHints(Boolean(state.unlimitedHints));
       setCoins(state.coins || 0);
       setHeartsRefillAt(state.heartsRefillAt || null);
-      if (state.heartsBlocked || (state.hearts ?? MAX_HEARTS) <= 0) {
+      if (isHeartsBlocked(state)) {
         depletedAfterAnswer.current = false;
         setPhase((current) => (current === "complete" ? current : "gameover"));
         return state;
@@ -139,52 +157,76 @@ export default function GamifiedQuizScreen({ route, navigation }) {
   };
 
   const answerQuestion = async (option) => {
-    if (phase !== "question" || loading) return;
-    if (hearts <= 0) {
+    if (phase !== "question" || loading || answeringRef.current) return;
+    if (eliminatedOptions.some((item) => sameAnswer(item, option))) return;
+    if (isHeartsBlocked({ hearts, unlimitedHearts })) {
       setPhase("gameover");
       return;
     }
     const q = questions[idx];
+    const questionKey = String(q.id || q.cardId || `q${idx}`);
+    const awardKey = `${quizSessionId}:${questionKey}`;
     const isCorrect = sameAnswer(option, q.answer);
+    answeringRef.current = true;
     setChosenOption(option);
     setSelected(isCorrect ? "correct" : "wrong");
     setPhase("answered");
 
     if (isCorrect) {
-      const newScore = score + 1;
-      const newXp = xp + XP_PER_CORRECT;
-      const newXpEarned = xpEarned + XP_PER_CORRECT;
-      setScore(newScore);
-      setXp(newXp);
-      setXpEarned(newXpEarned);
-      animateXp();
-      showFloat(`+${XP_PER_CORRECT} XP`);
+      setScore((s) => s + 1);
+      const expectedXp = usedHint ? XP_WITH_HINT : XP_PER_CORRECT;
       try {
-        const { data } = await client.post("/game/xp", { amount: XP_PER_CORRECT, correct: true });
-        if (data?.state?.xp != null) setXp(data.state.xp);
-        if (data?.state?.coins != null) {
-          setCoins(data.state.coins);
-          setCachedCoins(data.state.coins);
-        }
-        if (data?.comboHit) {
-          const extra = data.bonusXp ? ` +${data.bonusXp} bonus XP` : "";
-          showFloat(`Combo! +${data.coinsEarned || 1} coin${extra}`);
-          setXpEarned((current) => current + (data.bonusXp || 0));
+        if (awardedKeysRef.current.has(awardKey)) {
+          setLastXpAwarded(0);
+          showFloat("Already awarded");
+        } else {
+          const { data } = await client.post("/game/quiz/answer", {
+            quizSessionId,
+            questionIndex: idx,
+            questionKey,
+            correct: true,
+            usedHint,
+          });
+          awardedKeysRef.current.add(awardKey);
+          const gained = Number(data.xpAwarded || 0);
+          setLastXpAwarded(gained);
+          if (data?.state?.xp != null) setXp(data.state.xp);
+          if (data?.state?.hints != null) setHints(data.state.hints);
+          if (data?.unlimitedHints != null) setUnlimitedHints(Boolean(data.unlimitedHints));
+          if (data?.state?.coins != null) {
+            setCoins(data.state.coins);
+            setCachedCoins(data.state.coins);
+          }
+          if (gained > 0) {
+            setXpEarned((current) => current + gained);
+            animateXp();
+            showFloat(`+${gained} EXP`);
+          } else if (data.alreadyAwarded) {
+            showFloat("Already awarded");
+          } else {
+            showFloat(`+${expectedXp} EXP`);
+          }
+          if (data?.comboHit) {
+            const extra = data.bonusXp ? ` +${data.bonusXp} bonus XP` : "";
+            showFloat(`Combo! +${data.coinsEarned || 1} coin${extra}`);
+            setXpEarned((current) => current + (data.bonusXp || 0));
+          }
         }
       } catch (e) {
-        // Optimistic update already applied; ignore sync failure.
+        setLastXpAwarded(0);
+        Alert.alert("Could not award EXP", e?.response?.data?.error || e.message || "Please try again.");
       }
     } else {
-      const newHearts = Math.max(0, hearts - 1);
-      setHearts(newHearts);
+      setLastXpAwarded(0);
       animateHeartLoss();
-      showFloat("-1 ❤️");
+      showFloat(unlimitedHearts ? "Keep going" : "-1 ❤️");
       try {
         const { data } = await client.post("/game/hearts", { delta: -1 });
-        setHearts(data.state?.hearts ?? newHearts);
+        setHearts(data.state?.hearts ?? hearts);
+        setUnlimitedHearts(Boolean(data.unlimitedHearts ?? data.state?.unlimitedHearts ?? unlimitedHearts));
         setCoins(data.coins ?? data.state?.coins ?? coins);
         if (data.heartsRefillAt) setHeartsRefillAt(data.heartsRefillAt);
-        if (data.gameOver || (data.state?.hearts ?? newHearts) <= 0) {
+        if (isHeartsBlocked({ ...data.state, hearts: data.state?.hearts, heartsBlocked: data.gameOver || data.heartsBlocked, unlimitedHearts: data.unlimitedHearts ?? data.state?.unlimitedHearts })) {
           depletedAfterAnswer.current = true;
           setPhase("gameover");
         }
@@ -192,17 +234,46 @@ export default function GamifiedQuizScreen({ route, navigation }) {
         const refillAt = e.response?.data?.heartsRefillAt;
         if (refillAt) setHeartsRefillAt(refillAt);
         if (e.response?.data?.coins != null) setCoins(e.response.data.coins);
-        if (e.response?.data?.code === "HEARTS_DEPLETED" || newHearts <= 0) {
+        if (e.response?.data?.code === "HEARTS_DEPLETED" && !unlimitedHearts) {
           depletedAfterAnswer.current = true;
           setHearts(0);
           setPhase("gameover");
         }
       }
     }
+    answeringRef.current = false;
+  };
+
+  const useHint = async () => {
+    if (phase !== "question" || hintBusy || usedHint || answeringRef.current) return;
+    const q = questions[idx];
+    const options = Array.isArray(q?.options) ? q.options : [];
+    const remainingWrong = options.filter(
+      (opt) => !sameAnswer(opt, q.answer) && !eliminatedOptions.some((item) => sameAnswer(item, opt))
+    );
+    if (!remainingWrong.length) return;
+    if (!unlimitedHints && hints <= 0) {
+      Alert.alert("No hints left", "Earn more hints or upgrade for unlimited hints.");
+      return;
+    }
+    setHintBusy(true);
+    try {
+      const { data } = await client.post("/game/hints", { source: "take_quiz", questionIndex: idx });
+      setHints(data.hints ?? hints);
+      setUnlimitedHints(Boolean(data.unlimitedHints));
+      const pick = remainingWrong[Math.floor(Math.random() * remainingWrong.length)];
+      setEliminatedOptions((prev) => [...prev, pick]);
+      setUsedHint(true);
+      if (chosenOption && sameAnswer(chosenOption, pick)) setChosenOption(null);
+    } catch (e) {
+      Alert.alert("Hint unavailable", e?.response?.data?.error || e.message || "Please try again.");
+    } finally {
+      setHintBusy(false);
+    }
   };
 
   const nextQuestion = () => {
-    if (hearts <= 0) {
+    if (isHeartsBlocked({ hearts, unlimitedHearts })) {
       setPhase("gameover");
       return;
     }
@@ -210,6 +281,9 @@ export default function GamifiedQuizScreen({ route, navigation }) {
       setIdx(idx + 1);
       setSelected(null);
       setChosenOption(null);
+      setEliminatedOptions([]);
+      setUsedHint(false);
+      setLastXpAwarded(0);
       setPhase("question");
     } else {
       setPhase("complete");
@@ -219,7 +293,10 @@ export default function GamifiedQuizScreen({ route, navigation }) {
   const continueAfterRevive = (nextHearts) => {
     setSelected(null);
     setChosenOption(null);
-    if (nextHearts <= 0) {
+    setEliminatedOptions([]);
+    setUsedHint(false);
+    setLastXpAwarded(0);
+    if (isHeartsBlocked({ hearts: nextHearts, unlimitedHearts })) {
       setPhase("gameover");
       return;
     }
@@ -232,16 +309,21 @@ export default function GamifiedQuizScreen({ route, navigation }) {
 
   const retryQuiz = async () => {
     const state = await syncGameState();
-    if (!state || state.heartsBlocked || (state.hearts ?? 0) <= 0) {
+    if (!state || isHeartsBlocked(state)) {
       setPhase("gameover");
       Alert.alert("Hearts needed", "Revive a heart with coins or wait for the 24-hour refill before retrying.");
       return;
     }
+    setQuizSessionId(makeQuizSessionId());
+    awardedKeysRef.current = new Set();
     setIdx(0);
     setScore(0);
     setXpEarned(0);
     setSelected(null);
     setChosenOption(null);
+    setEliminatedOptions([]);
+    setUsedHint(false);
+    setLastXpAwarded(0);
     setPhase("question");
   };
 
@@ -267,12 +349,12 @@ export default function GamifiedQuizScreen({ route, navigation }) {
     navigation.navigate("StudyHome");
   };
 
-  // Quiz Over when hearts reach 0.
+  // Quiz Over when hearts reach 0 (Basic plan only).
   useEffect(() => {
-    if (hearts === 0 && phase === "answered") {
+    if (phase === "answered" && isHeartsBlocked({ hearts, unlimitedHearts })) {
       setPhase("gameover");
     }
-  }, [hearts, phase]);
+  }, [hearts, unlimitedHearts, phase]);
 
   const renderHeart = (filled, index) => {
     const heartStyle = {
@@ -432,12 +514,19 @@ export default function GamifiedQuizScreen({ route, navigation }) {
               </View>
             </Animated.View>
             <Pressable
-              onPress={() => hearts <= 0 && setPhase("gameover")}
+              onPress={() => isHeartsBlocked({ hearts, unlimitedHearts }) && setPhase("gameover")}
               accessibilityRole="button"
-              accessibilityLabel={hearts <= 0 ? "Out of hearts. Open revive options." : `${hearts} hearts remaining`}
+              accessibilityLabel={unlimitedHearts ? "Unlimited hearts" : hearts <= 0 ? "Out of hearts. Open revive options." : `${hearts} hearts remaining`}
               style={[styles.heartPill, { backgroundColor: colors.tomatoSoft }]}
             >
-              {[0, 1, 2, 3, 4].map((i) => renderHeart(i < hearts, i))}
+              {unlimitedHearts ? (
+                <>
+                  <Ionicons name="heart" size={16} color="#FF5A76" />
+                  <Text style={{ color: "#FF5A76", fontWeight: "800", marginLeft: 4 }}>∞</Text>
+                </>
+              ) : (
+                [0, 1, 2, 3, 4].map((i) => renderHeart(i < hearts, i))
+              )}
             </Pressable>
           </View>
           <View style={styles.progressWrap}>
@@ -474,9 +563,10 @@ export default function GamifiedQuizScreen({ route, navigation }) {
           <Text style={styles.questionText}>{q.question}</Text>
 
           <View style={styles.optionsWrap}>
-            {q.options.map((opt, oi) => {
+            {(q.options || []).map((opt, oi) => {
               const isChosen = chosenOption === opt;
               const isAnswer = sameAnswer(opt, q.answer);
+              const isEliminated = eliminatedOptions.some((item) => sameAnswer(item, opt));
               let borderColor = colors.border;
               let bg = colors.surface;
               let textColor = colors.text;
@@ -494,6 +584,10 @@ export default function GamifiedQuizScreen({ route, navigation }) {
                   bg = colors.surface;
                   textColor = colors.textMuted;
                 }
+              } else if (isEliminated) {
+                borderColor = colors.border;
+                bg = colors.surface;
+                textColor = colors.textMuted;
               } else if (isChosen) {
                 borderColor = colors.violet;
                 bg = colors.violetSoft;
@@ -504,10 +598,14 @@ export default function GamifiedQuizScreen({ route, navigation }) {
                 <Pressable
                   key={oi}
                   onPress={() => answerQuestion(opt)}
-                  disabled={phase === "answered"}
+                  disabled={phase === "answered" || isEliminated}
                   style={({ pressed }) => [
                     styles.option,
-                    { borderColor, backgroundColor: bg, opacity: pressed ? 0.85 : 1 },
+                    {
+                      borderColor,
+                      backgroundColor: bg,
+                      opacity: isEliminated && phase !== "answered" ? 0.45 : pressed ? 0.85 : 1,
+                    },
                   ]}
                 >
                   <View style={[styles.optionLabel, { backgroundColor: phase === "answered" && isAnswer ? colors.mint : colors.bg }]}>
@@ -520,7 +618,17 @@ export default function GamifiedQuizScreen({ route, navigation }) {
                       {OPTION_LABELS[oi]}
                     </Text>
                   </View>
-                  <Text style={[styles.optionText, { color: textColor }]}>{opt}</Text>
+                  <Text
+                    style={[
+                      styles.optionText,
+                      {
+                        color: textColor,
+                        textDecorationLine: isEliminated && phase !== "answered" ? "line-through" : "none",
+                      },
+                    ]}
+                  >
+                    {opt}
+                  </Text>
                   {phase === "answered" && isAnswer && (
                     <Ionicons name="checkmark-circle" size={20} color={colors.mint} style={{ marginLeft: 8 }} />
                   )}
@@ -532,17 +640,49 @@ export default function GamifiedQuizScreen({ route, navigation }) {
             })}
           </View>
 
+          {phase === "question" ? (
+            <Pressable
+              onPress={useHint}
+              disabled={hintBusy || usedHint || (!(unlimitedHints || hints > 0))}
+              style={({ pressed }) => [
+                styles.hintBtn,
+                {
+                  backgroundColor: colors.amberSoft,
+                  borderColor: colors.amber,
+                  opacity: hintBusy || usedHint || (!(unlimitedHints || hints > 0)) ? 0.55 : pressed ? 0.88 : 1,
+                },
+              ]}
+            >
+              {hintBusy ? (
+                <ActivityIndicator color={colors.amber} size="small" />
+              ) : (
+                <Ionicons name="bulb-outline" size={16} color={colors.amber} />
+              )}
+              <Text style={[styles.hintBtnText, { color: colors.amber }]}>
+                {usedHint
+                  ? "Hint used · +10 EXP if correct"
+                  : unlimitedHints
+                    ? "Use hint · half EXP"
+                    : `Use hint (${hints}) · half EXP`}
+              </Text>
+            </Pressable>
+          ) : null}
+
           {/* Feedback area */}
           <Animated.View style={{ opacity: floatOpacity, transform: [{ translateY: floatTranslate }] }}>
             {phase === "answered" && (
               <View style={styles.feedbackBox}>
                 {selected === "correct" ? (
-                  <>
-                    <Text style={[styles.feedbackText, { color: colors.mint }]}>✓ Correct! +200 XP</Text>
-                  </>
+                  <Text style={[styles.feedbackText, { color: colors.mint }]}>
+                    ✓ Correct! +{lastXpAwarded || (usedHint ? XP_WITH_HINT : XP_PER_CORRECT)} EXP
+                    {usedHint ? " (hint)" : ""}
+                  </Text>
                 ) : (
                   <Text style={[styles.feedbackText, { color: colors.tomato }]}>
-                    ✗ Not quite — correct answer: {q.answer}
+                    ✗ Not quite — correct answer:{" "}
+                    <Text style={{ backgroundColor: colors.mintSoft, color: colors.mint, fontWeight: "800" }}>
+                      {q.answer}
+                    </Text>
                   </Text>
                 )}
               </View>
@@ -639,6 +779,18 @@ const useStyles = (colors) =>
       justifyContent: "center",
     },
     nextBtnText: { color: "#fff", fontWeight: "800", fontSize: 15 },
+    hintBtn: {
+      marginTop: 14,
+      borderRadius: 12,
+      borderWidth: 1,
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+    },
+    hintBtnText: { fontWeight: "800", fontSize: 13 },
     blockedScroll: { flexGrow: 1, justifyContent: "center", paddingVertical: 24 },
     centerWrap: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
     gameOverEmoji: { fontSize: 52, marginBottom: 12 },

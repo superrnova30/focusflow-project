@@ -18,13 +18,14 @@ import { useTheme } from '../context/ThemeContext';
 import { usePremium } from '../context/PremiumContext';
 import { SPACING, RADIUS } from '../theme/theme';
 
-const BENEFITS = [
-  { label: 'Unlimited Cards', desc: 'Build every deck you need', icon: 'layers-outline', basic: true, basicDetail: 'Included' },
-  { label: 'Unlimited Hearts', desc: 'Keep going without losing progress', icon: 'heart-outline', basic: false, basicDetail: '5 hearts · 24h refill' },
-  { label: 'Unlimited AI Tutor', desc: 'Deck tutor lessons without caps', icon: 'school-outline', basic: false, basicDetail: '3 sessions/day' },
-  { label: 'Unlimited Hints', desc: 'Get unstuck faster in Memorize', icon: 'bulb-outline', basic: false, basicDetail: '3 hints/day' },
-  { label: 'Unlimited AI Chat', desc: 'Talk to your study assistant freely', icon: 'chatbubbles-outline', basic: false, basicDetail: '15 messages/day' },
-  { label: 'Unlimited AI Generations', desc: 'Study packs, imports, coach & more', icon: 'sparkles-outline', basic: false, basicDetail: '10 generations/day' },
+const FALLBACK_BENEFITS = [
+  { key: 'unlimitedCards', label: 'Unlimited Cards', desc: 'Build every deck you need', icon: 'layers-outline', basic: true, basicDetail: 'Included' },
+  { key: 'unlimitedTasks', label: 'Unlimited Tasks', desc: 'Keep every assignment in one list', icon: 'checkbox-outline', basic: false, basicDetail: '5 active tasks' },
+  { key: 'unlimitedHearts', label: 'Unlimited Hearts', desc: 'Keep going without losing progress', icon: 'heart-outline', basic: false, basicDetail: '5 hearts · 24h refill' },
+  { key: 'unlimitedAiTutor', label: 'Unlimited AI Tutor', desc: 'Deck tutor lessons without caps', icon: 'school-outline', basic: false, basicDetail: '3 sessions/day' },
+  { key: 'unlimitedHints', label: 'Unlimited Hints', desc: 'Get unstuck faster in Memorize', icon: 'bulb-outline', basic: false, basicDetail: '3 hints/day' },
+  { key: 'unlimitedChat', label: 'Unlimited AI Chat', desc: 'Talk to your study assistant freely', icon: 'chatbubbles-outline', basic: false, basicDetail: '15 messages/day' },
+  { key: 'unlimitedPrompts', label: 'Unlimited AI Generations', desc: 'Study packs, imports, coach & more', icon: 'sparkles-outline', basic: false, basicDetail: '10 generations/day' },
 ];
 
 const VALUE_PROPS = [
@@ -124,6 +125,21 @@ export default function PremiumScreen({ navigation }) {
     plan && plan.durationDays
       ? `${currencySymbol}${(plan.price / plan.durationDays).toFixed(2)}/day`
       : null;
+  const benefits = useMemo(() => {
+    if (Array.isArray(plan?.benefits) && plan.benefits.length) {
+      return plan.benefits.map((row) => {
+        const fallback = FALLBACK_BENEFITS.find((item) => item.key === row.key) || {};
+        return {
+          ...fallback,
+          ...row,
+          icon: row.icon || fallback.icon || 'star-outline',
+          desc: row.desc || fallback.desc || '',
+          basicDetail: row.basicDetail || fallback.basicDetail || '',
+        };
+      });
+    }
+    return FALLBACK_BENEFITS;
+  }, [plan]);
 
   const handleSeePlans = useCallback(async () => {
     if (starting) return;
@@ -154,13 +170,13 @@ export default function PremiumScreen({ navigation }) {
         </View>
       </View>
 
-      {BENEFITS.map((row, index) => (
+      {benefits.map((row, index) => (
         <View
           key={row.label}
           style={[
             s.tableRow,
             { borderBottomColor: colors.border },
-            index === BENEFITS.length - 1 && { borderBottomWidth: 0 },
+            index === benefits.length - 1 && { borderBottomWidth: 0 },
           ]}
         >
           <View style={s.benefitHeadCol}>
@@ -202,7 +218,7 @@ export default function PremiumScreen({ navigation }) {
         <Text style={[s.planCardPrice, { color: colors.text }]}>Free</Text>
         <Text style={[s.planCardMeta, { color: colors.textMuted }]}>Limited access</Text>
         <View style={s.planCardList}>
-          {BENEFITS.map((row) => (
+          {benefits.map((row) => (
             <View key={row.label} style={s.planCardListRow}>
               <Ionicons
                 name={row.basic ? 'checkmark-circle' : 'close-circle-outline'}
@@ -236,7 +252,7 @@ export default function PremiumScreen({ navigation }) {
           </>
         )}
         <View style={s.planCardList}>
-          {BENEFITS.map((row) => (
+          {benefits.map((row) => (
             <View key={row.label} style={s.planCardListRow}>
               <Ionicons name="star" size={14} color={GOLD_DEEP} />
               <Text style={[s.planCardListText, { color: colors.text }]}>{row.label}</Text>
@@ -253,17 +269,17 @@ export default function PremiumScreen({ navigation }) {
   return (
     <Screen>
       <View style={s.root}>
-        <ScrollView
-          showsVerticalScrollIndicator={false}
+      <ScrollView
+        showsVerticalScrollIndicator={false}
           contentContainerStyle={[
             s.scrollContent,
             { paddingBottom: showStickyCta ? 100 + insets.bottom : 40 + insets.bottom },
           ]}
         >
           {/* Hero */}
-          <Animated.View
-            style={[
-              s.hero,
+        <Animated.View
+          style={[
+            s.hero,
               {
                 backgroundColor: isPremium ? colors.mintSoft : colors.violetSoft,
                 borderColor: isPremium ? colors.mint + '55' : GOLD + '44',
@@ -279,13 +295,13 @@ export default function PremiumScreen({ navigation }) {
                 { backgroundColor: isPremium ? colors.mint : GOLD, opacity: glowOpacity },
               ]}
             />
-            <Animated.View
-              pointerEvents="none"
+          <Animated.View
+            pointerEvents="none"
               style={[
                 s.heroOrbSecondary,
                 { backgroundColor: colors.violet, opacity: glowOpacity },
               ]}
-            />
+          />
 
             <View style={[s.crownBubble, { backgroundColor: colors.surface, borderColor: GOLD + '55' }]}>
               <Text style={s.crownEmoji}>{isPremium ? '✨' : '👑'}</Text>
@@ -294,7 +310,7 @@ export default function PremiumScreen({ navigation }) {
             <View style={[s.heroPill, { backgroundColor: colors.surface, borderColor: GOLD + '66' }]}>
               <Ionicons name="star" size={12} color={GOLD_DEEP} />
               <Text style={[s.heroPillText, { color: GOLD_DEEP }]}>GO UNLIMITED</Text>
-            </View>
+          </View>
 
             <Text style={[s.heroTitle, { color: colors.text }]}>
               {isPremium ? 'You\'re on Go Unlimited' : 'Unlock your full study potential'}
@@ -302,30 +318,30 @@ export default function PremiumScreen({ navigation }) {
             <Text style={[s.heroSubtitle, { color: colors.textMuted }]}>
               {isPremium
                 ? 'Every premium feature is active on your account. Keep the momentum going.'
-                : 'Remove every limit — unlimited cards, hearts, AI tutoring, hints, and prompts in one plan.'}
-            </Text>
+                : 'Remove every limit — unlimited cards, tasks, hearts, AI tutoring, hints, chat, and prompts in one plan.'}
+          </Text>
 
-            {isPremium && (
+          {isPremium && (
               <View style={[s.activeCard, { backgroundColor: colors.surface, borderColor: colors.mint + '66' }]}>
                 <View style={[s.activeIconWrap, { backgroundColor: colors.mintSoft }]}>
                   <Ionicons name="checkmark-circle" size={22} color={colors.mint} />
                 </View>
-                <View style={{ flex: 1 }}>
+              <View style={{ flex: 1 }}>
                   <Text style={[s.activeTitle, { color: colors.mint }]}>Subscription active</Text>
-                  <Text style={[s.activeMeta, { color: colors.textMuted }]}>
-                    {premium.daysRemaining} day{premium.daysRemaining === 1 ? '' : 's'} remaining
-                    {premium.premiumUntil
+                <Text style={[s.activeMeta, { color: colors.textMuted }]}>
+                  {premium.daysRemaining} day{premium.daysRemaining === 1 ? '' : 's'} remaining
+                  {premium.premiumUntil
                       ? ` · renews ${new Date(premium.premiumUntil).toLocaleDateString(undefined, {
                           month: 'short',
                           day: 'numeric',
                           year: 'numeric',
                         })}`
-                      : ''}
-                  </Text>
-                </View>
+                    : ''}
+                </Text>
               </View>
-            )}
-          </Animated.View>
+            </View>
+          )}
+        </Animated.View>
 
           {/* Value props */}
           <Animated.View style={[s.valueRow, { opacity: contentOpacity }]}>
@@ -337,8 +353,8 @@ export default function PremiumScreen({ navigation }) {
                 <Ionicons name={item.icon} size={15} color={colors.violet} />
                 <Text style={[s.valueChipText, { color: colors.textMuted }]} numberOfLines={2}>
                   {item.label}
-                </Text>
-              </View>
+                  </Text>
+                </View>
             ))}
           </Animated.View>
 
@@ -373,57 +389,57 @@ export default function PremiumScreen({ navigation }) {
                   <Ionicons name="close-circle-outline" size={14} color={colors.violet} />
                   <Text style={[s.cancelBadgeText, { color: colors.violet }]}>Cancel anytime</Text>
                 </View>
-              </View>
-            )}
-          </Animated.View>
+                </View>
+              )}
+        </Animated.View>
 
           {/* Inline CTA for wide screens or premium extend */}
           {(wide || isPremium) && (
             <Animated.View style={{ opacity: contentOpacity, marginTop: SPACING.xl }}>
-              <Pressable
-                onPress={handleSeePlans}
-                disabled={starting || loadingPlan}
-                style={({ pressed }) => [
+          <Pressable
+            onPress={handleSeePlans}
+            disabled={starting || loadingPlan}
+            style={({ pressed }) => [
                   s.ctaButton,
                   { backgroundColor: GOLD, opacity: pressed || starting ? 0.9 : 1 },
-                ]}
-              >
-                {starting ? (
+            ]}
+          >
+            {starting ? (
                   <>
                     <ActivityIndicator color={GOLD_DARK} />
                     <Text style={s.ctaButtonText}>Preparing secure checkout…</Text>
                   </>
-                ) : (
-                  <>
+            ) : (
+              <>
                     <Ionicons name={isPremium ? 'refresh' : 'diamond-outline'} size={20} color={GOLD_DARK} />
                     <Text style={s.ctaButtonText}>{ctaLabel}</Text>
                     <Ionicons name="arrow-forward" size={18} color={GOLD_DARK} />
-                  </>
-                )}
-              </Pressable>
-            </Animated.View>
+              </>
+            )}
+          </Pressable>
+        </Animated.View>
           )}
 
-          <Text style={[s.fineprint, { color: colors.textMuted }]}>
+        <Text style={[s.fineprint, { color: colors.textMuted }]}>
             Secure payment powered by Xendit. Your account is upgraded only after payment is verified on our server.
-          </Text>
+        </Text>
 
           <View style={s.trustGrid}>
             {[
               { icon: 'lock-closed-outline', text: 'Encrypted checkout' },
               { icon: 'rocket-outline', text: 'Instant access' },
               { icon: 'heart-outline', text: 'No lock-in' },
-            ].map((item) => (
+          ].map((item) => (
               <View
                 key={item.text}
                 style={[s.trustItem, { borderColor: colors.border, backgroundColor: colors.surface }]}
               >
                 <Ionicons name={item.icon} size={16} color={colors.mint} />
-                <Text style={[s.trustText, { color: colors.textMuted }]}>{item.text}</Text>
-              </View>
-            ))}
-          </View>
-        </ScrollView>
+              <Text style={[s.trustText, { color: colors.textMuted }]}>{item.text}</Text>
+            </View>
+          ))}
+        </View>
+      </ScrollView>
 
         {/* Sticky bottom CTA — mobile-first, hidden on wide when inline CTA is shown */}
         {showStickyCta && !wide && (

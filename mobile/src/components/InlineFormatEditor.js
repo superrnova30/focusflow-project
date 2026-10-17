@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "../context/ThemeContext";
@@ -16,12 +16,20 @@ import {
 
 const EMPTY_BLOCKS = [{ type: "text", text: "", marks: [], spans: [{ text: "", marks: [] }] }];
 
-export default function InlineFormatEditor({
+function liveWebBlocks(node) {
+  if (!node) return [];
+  const fromHtml = htmlToBlocks(node.innerHTML || "");
+  if (fromHtml.length) return fromHtml;
+  const text = String(node.textContent || "").replace(/\u00a0/g, " ").trim();
+  return text ? [{ type: "text", text, marks: [], spans: [{ text, marks: [] }] }] : [];
+}
+
+const InlineFormatEditor = forwardRef(function InlineFormatEditor({
   value = [],
   onChange,
   placeholder = "Notes, steps, or reminders",
   compact = false,
-}) {
+}, ref) {
   const { colors } = useTheme();
   const blocks = Array.isArray(value) && value.length ? value : EMPTY_BLOCKS;
   const selectionRef = useRef({ start: 0, end: 0 });
@@ -33,8 +41,21 @@ export default function InlineFormatEditor({
   const focusedRef = useRef(false);
   const blurTimerRef = useRef(null);
   const savedRangeRef = useRef(null);
+  const latestBlocksRef = useRef(Array.isArray(value) ? value : []);
+  const onChangeRef = useRef(onChange);
   const plain = useMemo(() => blocksToPlain(blocks), [blocks]);
   const flatSpans = useMemo(() => blocksToPlainSpans(blocks), [blocks]);
+  onChangeRef.current = onChange;
+
+  const emitChange = (next) => {
+    const blocksToSave = Array.isArray(next) ? next : [];
+    latestBlocksRef.current = blocksToSave;
+    onChangeRef.current?.(blocksToSave);
+  };
+
+  useEffect(() => {
+    latestBlocksRef.current = Array.isArray(value) ? value : [];
+  }, [value]);
 
   const rememberSelection = () => {
     if (typeof document === "undefined") return;
@@ -78,14 +99,24 @@ export default function InlineFormatEditor({
   };
 
   const commitWeb = ({ rewrite = false } = {}) => {
-    const liveHtml = webRef.current?.innerHTML || "";
-    htmlRef.current = liveHtml;
+    const next = liveWebBlocks(webRef.current);
+    htmlRef.current = webRef.current?.innerHTML || "";
     setHasWebText(Boolean((webRef.current?.textContent || "").trim()));
-    const next = htmlToBlocks(liveHtml);
-    if (rewrite) htmlRef.current = liveHtml;
-    onChange(next.length ? next : EMPTY_BLOCKS);
+    if (rewrite) htmlRef.current = webRef.current?.innerHTML || "";
+    emitChange(next);
     refreshWebActive();
   };
+
+  useImperativeHandle(ref, () => ({
+    getValue: () => {
+      if (Platform.OS === "web") {
+        const next = liveWebBlocks(webRef.current);
+        latestBlocksRef.current = next;
+        return next;
+      }
+      return Array.isArray(latestBlocksRef.current) ? latestBlocksRef.current : [];
+    },
+  }));
 
   const runWeb = (command, arg) => {
     rememberSelection();
@@ -113,7 +144,7 @@ export default function InlineFormatEditor({
     const { start, end } = selectionRef.current;
     const result = toggleMarkOnRange(flatSpans, start, end, mark);
     if (result.empty) return;
-    onChange(plainToBlocks(plain, result.spans));
+    emitChange(plainToBlocks(plain, result.spans));
   };
 
   const applyList = (kind) => {
@@ -123,7 +154,7 @@ export default function InlineFormatEditor({
     }
     const { start, end } = selectionRef.current;
     const nextPlain = toggleListInPlain(plain, start, end, kind);
-    onChange(plainToBlocks(nextPlain, applyTextChange(plain, nextPlain, flatSpans)));
+    emitChange(plainToBlocks(nextPlain, applyTextChange(plain, nextPlain, flatSpans)));
   };
 
   const applyHeading = () => {
@@ -148,7 +179,7 @@ export default function InlineFormatEditor({
       }
       return block;
     });
-    onChange(nextBlocks);
+    emitChange(nextBlocks);
   };
 
   const boldOn = Platform.OS === "web" ? webActive.bold : rangeHasMark(flatSpans, selection.start, selection.end, "bold");
@@ -197,7 +228,9 @@ export default function InlineFormatEditor({
           multiline
           placeholder={placeholder}
           placeholderTextColor={colors.textMuted}
-          onChangeText={(next) => onChange(plainToBlocks(next, applyTextChange(plain, next, flatSpans)))}
+          onChangeText={(next) => {
+            emitChange(plainToBlocks(next, applyTextChange(plain, next, flatSpans)));
+          }}
           onSelectionChange={(event) => {
             selectionRef.current = event.nativeEvent.selection;
             setSelection(event.nativeEvent.selection);
@@ -207,7 +240,7 @@ export default function InlineFormatEditor({
       )}
     </View>
   );
-}
+});
 
 function WebEditor({
   blocks,
@@ -220,6 +253,8 @@ function WebEditor({
   onInput,
   onSelectionChange,
 }) {
+  // Web-only DOM editor. Use createElement so React Native's JSX transform
+  // never has to parse raw <div>/<style> tags (which previously broke Metro).
   useEffect(() => {
     const node = webRef.current;
     if (!node || focusedRef.current) return;
@@ -242,52 +277,71 @@ function WebEditor({
     return () => document.removeEventListener("selectionchange", handleSelect);
   }, [onSelectionChange, webRef]);
 
-  return (
-    <>
-      <style>
-        {`
-          [data-ff-desc] ul, [data-ff-desc] ol { margin: 4px 0; padding-left: 1.3em; }
-          [data-ff-desc] li { margin: 2px 0; }
-          [data-ff-desc] h1, [data-ff-desc] h2, [data-ff-desc] h3 { font-size: 17px; font-weight: 800; margin: 4px 0; }
-          [data-ff-desc] b, [data-ff-desc] strong { font-weight: 800; }
-          [data-ff-desc] i, [data-ff-desc] em { font-style: italic; }
-          [data-ff-desc] u { text-decoration: underline; }
-        `}
-      </style>
-      <div
-        ref={webRef}
-        data-ff-desc
-        contentEditable
-        role="textbox"
-        aria-label="Task description"
-        suppressContentEditableWarning
-        onFocus={() => {
-          if (blurTimerRef.current) {
-            clearTimeout(blurTimerRef.current);
-            blurTimerRef.current = null;
-          }
-          focusedRef.current = true;
-        }}
-        onBlur={() => {
-          blurTimerRef.current = setTimeout(() => {
-            focusedRef.current = false;
-          }, 200);
-        }}
-        onInput={onInput}
-        style={{
-          minHeight: compact ? 78 : 92,
-          maxHeight: compact ? 168 : 196,
-          overflowY: "auto",
-          outline: "none",
-          color: colors.text,
-          fontSize: 15,
-          lineHeight: "22px",
-          padding: "8px 6px",
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-        }}
-      />
-    </>
+  const onInputRef = useRef(onInput);
+  onInputRef.current = onInput;
+
+  useEffect(() => {
+    const node = webRef.current;
+    if (!node || typeof node.addEventListener !== "function") return undefined;
+    const handleInput = () => onInputRef.current?.();
+    node.addEventListener("input", handleInput);
+    node.addEventListener("blur", handleInput);
+    return () => {
+      node.removeEventListener("input", handleInput);
+      node.removeEventListener("blur", handleInput);
+    };
+  }, [webRef]);
+
+  if (Platform.OS !== "web") return null;
+
+  const cssText = `
+    [data-ff-desc] ul, [data-ff-desc] ol { margin: 4px 0; padding-left: 1.3em; }
+    [data-ff-desc] li { margin: 2px 0; }
+    [data-ff-desc] h1, [data-ff-desc] h2, [data-ff-desc] h3 { font-size: 17px; font-weight: 800; margin: 4px 0; }
+    [data-ff-desc] b, [data-ff-desc] strong { font-weight: 800; }
+    [data-ff-desc] i, [data-ff-desc] em { font-style: italic; }
+    [data-ff-desc] u { text-decoration: underline; }
+  `;
+
+  return React.createElement(
+    React.Fragment,
+    null,
+    React.createElement("style", { dangerouslySetInnerHTML: { __html: cssText } }),
+    React.createElement("div", {
+      ref: webRef,
+      "data-ff-desc": true,
+      contentEditable: true,
+      role: "textbox",
+      "aria-label": "Task description",
+      suppressContentEditableWarning: true,
+      onFocus: () => {
+        if (blurTimerRef.current) {
+          clearTimeout(blurTimerRef.current);
+          blurTimerRef.current = null;
+        }
+        focusedRef.current = true;
+      },
+      onBlur: () => {
+        onInput?.();
+        blurTimerRef.current = setTimeout(() => {
+          focusedRef.current = false;
+        }, 200);
+      },
+      onInput,
+      onChange: onInput,
+      style: {
+        minHeight: compact ? 78 : 92,
+        maxHeight: compact ? 168 : 196,
+        overflowY: "auto",
+        outline: "none",
+        color: colors.text,
+        fontSize: 15,
+        lineHeight: "22px",
+        padding: "8px 6px",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+      },
+    })
   );
 }
 
@@ -331,6 +385,8 @@ function ToolButton({ label, icon, active, onPress, onHold, bold, italic, underl
     </Pressable>
   );
 }
+
+export default InlineFormatEditor;
 
 const styles = StyleSheet.create({
   toolbar: {

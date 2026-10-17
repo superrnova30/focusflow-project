@@ -66,7 +66,7 @@ function QuickAction({ icon, title, desc, color, soft, onPress, styles, colors, 
   );
 }
 
-export default function FlashcardCollectionsScreen({ navigation }) {
+export default function FlashcardCollectionsScreen({ navigation, route }) {
   const { colors } = useTheme();
   const { width } = useWindowDimensions();
   const isWide = width >= 768;
@@ -96,15 +96,20 @@ export default function FlashcardCollectionsScreen({ navigation }) {
   const fetchCollections = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const { data } = await client.get("/flashcards/collections");
-      setCollections(data.collections || []);
+      const { data } = await client.get("/flashcards/collections", {
+        headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+        params: { _: Date.now() },
+      });
+      const removedId = route?.params?.removedCollectionId;
+      const list = (data.collections || []).filter((item) => item.id !== removedId);
+      setCollections(list);
     } catch (e) {
       Alert.alert("Error", e?.response?.data?.error || e.message || "Could not load collections.");
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [route?.params?.removedCollectionId]);
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -119,8 +124,13 @@ export default function FlashcardCollectionsScreen({ navigation }) {
 
   useFocusEffect(
     useCallback(() => {
+      const removedId = route?.params?.removedCollectionId;
+      if (removedId) {
+        setCollections((list) => list.filter((item) => item.id !== removedId));
+        navigation.setParams({ removedCollectionId: undefined });
+      }
       fetchCollections(true);
-    }, [fetchCollections])
+    }, [fetchCollections, navigation, route?.params?.removedCollectionId])
   );
 
   const filteredCollections = useMemo(() => {
@@ -203,12 +213,16 @@ export default function FlashcardCollectionsScreen({ navigation }) {
 
   const confirmDelete = async () => {
     if (!deleting) return;
+    const targetId = deleting.id;
     setDeletingBusy(true);
+    const previous = collections;
+    setCollections((list) => list.filter((item) => item.id !== targetId));
     try {
-      await client.delete(`/flashcards/collections/${deleting.id}`);
+      await client.delete(`/flashcards/collections/${targetId}`);
       setDeleting(null);
       await fetchCollections(true);
     } catch (e) {
+      setCollections(previous);
       Alert.alert("Error", e.message || "Could not delete collection.");
     } finally {
       setDeletingBusy(false);

@@ -2,8 +2,8 @@ const { levelForXp, xpWithinLevel, xpForNextLevel, LEVEL_XP_STEP, heartsRefillAt
 
 const MAX_HEARTS = 5;
 const STARTING_HINTS = 3;
-const XP_PER_CORRECT = 200;
-const HALF_XP_WITH_HINT3 = 100;
+const XP_PER_CORRECT = 5;
+const HALF_XP_WITH_HINT3 = 2.5;
 const HEART_REFILL_MS = 24 * 60 * 60 * 1000;
 const LIGHTNING_SECONDS = 15;
 
@@ -75,20 +75,12 @@ function pickQuestionType(settings, seed) {
 }
 
 function buildClue(answer) {
-  const text = String(answer || "").trim();
-  if (!text) return "Think about the core concept from this deck.";
-  const words = text.split(/\s+/);
-  if (words.length >= 2) {
-    return `Clue: ${words.length} words · starts with "${words[0].charAt(0).toUpperCase()}" · ends with "${words[words.length - 1].slice(-1)}"`;
-  }
-  if (text.length > 4) {
-    return `Clue: ${text.length} letters · starts with "${text.charAt(0).toUpperCase()}"`;
-  }
-  return "Clue: a short phrase related to this topic.";
+  const { buildFirstLetterClue } = require("./flashcardAnswer");
+  return buildFirstLetterClue(answer);
 }
 
 function buildGameState(user, premiumActive) {
-  const hearts = user.hearts ?? MAX_HEARTS;
+  const hearts = premiumActive ? MAX_HEARTS : (user.hearts ?? MAX_HEARTS);
   const hints = premiumActive ? 999 : (user.hints || 0) + (user.bonusHints || 0);
   const heartsBlocked = !premiumActive && hearts <= 0;
   let heartsRefillAt = null;
@@ -100,6 +92,7 @@ function buildGameState(user, premiumActive) {
     hearts,
     hints,
     coins: user.coins || 0,
+    streakFreezes: user.streakFreezes || 0,
     unlimitedHearts: premiumActive,
     unlimitedHints: premiumActive,
     heartsBlocked,

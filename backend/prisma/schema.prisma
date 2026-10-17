@@ -34,6 +34,12 @@ model User {
   studentId              String?
   course                 String?
   school                 String?
+  schoolId               String?
+  schoolRecord           School?       @relation("UserSchool", fields: [schoolId], references: [id], onDelete: SetNull)
+  schoolRequests         School[]      @relation("SchoolRequests")
+  // Server timestamp of the last successful school change or removal.
+  // Used to enforce a 7-day cooldown before the next school edit.
+  schoolChangedAt        DateTime?
   yearLevel              String?
   section                String?
   studyGoals             String?
@@ -45,14 +51,18 @@ model User {
   sessionsBeforeLongBreak Int          @default(4)
   remindersEnabled       Boolean       @default(true)
   reminderTime           String        @default("18:00")
+  // Master switch for device push / local reminder delivery. Independent of
+  // remindersEnabled (which controls whether daily study nudges are wanted).
+  pushNotificationsEnabled Boolean     @default(false)
   timezone               String        @default("UTC")
 
   // Gamification (XP + Hearts)
-  xp                    Int           @default(0)
+  xp                    Float         @default(0)
   hearts                Int           @default(5)
   hints                 Int           @default(3)
   bonusHints            Int           @default(0)
   coins                 Int           @default(0)
+  streakFreezes         Int           @default(0)
   streakRewardLevel     Int           @default(0)
   heartsDepletedAt      DateTime?
   memorizeSettings      Json?
@@ -63,7 +73,7 @@ model User {
   correctAnswers        Int           @default(0)
   wrongAnswers          Int           @default(0)
   answerCombo           Int           @default(0)
-  totalXpEarned         Int           @default(0)
+  totalXpEarned         Float         @default(0)
 
   // Go Unlimited subscription. `premiumUntil` is the authoritative expiry the
   // server checks; null means the student has never subscribed. `isPremium` is
@@ -107,6 +117,66 @@ model User {
   activityReactions ActivityReaction[]
   notifications     Notification[]
   actedNotifications Notification[]    @relation("NotificationActor")
+  supportTickets    SupportTicket[]
+  supportReplies    SupportReply[]
+
+  @@index([schoolId])
+}
+
+model SupportTicket {
+  id              String   @id @default(cuid())
+  ticketCode      String   @unique
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject         String
+  category        String
+  message         String
+  contactEmail    String
+  status          String   @default("OPEN") // OPEN | IN_PROGRESS | RESOLVED
+  emailNotifiedAt DateTime?
+  emailError      String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  replies         SupportReply[]
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([category])
+  @@index([createdAt])
+}
+
+model SupportReply {
+  id          String   @id @default(cuid())
+  ticketId    String
+  ticket      SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorId    String
+  author      User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  body        String
+  isStaff     Boolean  @default(true)
+  emailSentAt DateTime?
+  emailError  String?
+  createdAt   DateTime @default(now())
+
+  @@index([ticketId, createdAt])
+}
+
+model School {
+  id            String   @id @default(cuid())
+  name          String
+  location      String
+  type          String
+  logoUrl       String?
+  status        String   @default("PENDING") // PENDING | APPROVED | REJECTED
+  nameKey       String   @unique
+  requestedById String?
+  requestedBy   User?    @relation("SchoolRequests", fields: [requestedById], references: [id], onDelete: SetNull)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  students      User[]   @relation("UserSchool")
+
+  @@index([status])
+  @@index([name])
+  @@index([location])
 }
 
 model Notification {
@@ -194,14 +264,33 @@ model Task {
   title          String
   descriptionJson Json?
   estMinutes     Int      @default(25)
+  progress       Int      @default(0) // 0–100 study progress; completion is separate
   completed      Boolean  @default(false)
   archived       Boolean  @default(false)
   archivedAt     DateTime?
   pomodorosSpent Int      @default(0)
   createdAt      DateTime @default(now())
+  decks          TaskDeck[]
 
   @@index([userId])
   @@index([userId, archived])
+}
+
+// Flashcard decks linked to a study task (many-to-many).
+model TaskDeck {
+  id           String              @id @default(cuid())
+  taskId       String
+  task         Task                @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  collectionId String
+  collection   FlashcardCollection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  sortOrder    Int                 @default(0)
+  completed    Boolean             @default(false)
+  completedAt  DateTime?
+  createdAt    DateTime            @default(now())
+
+  @@unique([taskId, collectionId])
+  @@index([taskId])
+  @@index([collectionId])
 }
 
 model PomodoroSession {
@@ -254,6 +343,7 @@ model FlashcardCollection {
 
   flashcards    Flashcard[]
   studyProgress DeckStudyProgress[]
+  taskDecks     TaskDeck[]
 
   @@index([userId])
   @@index([userId, isPublic])
@@ -269,6 +359,7 @@ model DeckStudyProgress {
   practiceUnlocked Boolean             @default(false)
   memorizeSessions Int                 @default(0)
   tutorCompleted   Boolean             @default(false)
+  tutorLessonAwards Json               @default("{}")
   updatedAt        DateTime            @updatedAt
 
   @@unique([userId, collectionId])
@@ -276,13 +367,15 @@ model DeckStudyProgress {
 }
 
 model Flashcard {
-  id           String              @id @default(cuid())
-  materialId   String?
-  material     StudyMaterial?      @relation(fields: [materialId], references: [id], onDelete: Cascade)
-  collectionId String?
-  collection   FlashcardCollection? @relation(fields: [collectionId], references: [id], onDelete: Cascade)
-  front        String
-  back         String
+  id              String              @id @default(cuid())
+  materialId      String?
+  material        StudyMaterial?      @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  collectionId    String?
+  collection      FlashcardCollection? @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  front           String
+  back            String
+  answerHighlight String              @default("")
+  explanation     String              @default("")
 
   @@index([collectionId])
   @@index([materialId])
@@ -440,7 +533,9 @@ model Payment {
   userId         String
   user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   provider       String   @default("xendit")
+  kind           String   @default("premium") // premium | coins
   plan           String   @default("unlimited")
+  coinsGranted   Int      @default(0)
   amount         Int
   currency       String   @default("PHP")
   status         String   @default("PENDING") // PENDING | PAID | EXPIRED | FAILED
@@ -456,6 +551,7 @@ model Payment {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   @@index([userId, createdAt])
+  @@index([userId, kind, status])
   @@index([status])
 }
 

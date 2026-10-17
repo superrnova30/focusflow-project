@@ -3,10 +3,8 @@ import { View, Text, Image, StyleSheet } from "react-native";
 import { useTheme } from "../context/ThemeContext";
 
 /**
- * Profile avatar that renders the user's stored picture when there is one and
- * falls back to initials otherwise. The picture may be a remote URL or a
- * base64 data URI (both are accepted by React Native's Image), so no
- * transformation is needed here — we just resize it consistently.
+ * Circular profile photo. The image fills the circle (`cover`) so the frame
+ * is always a perfect circle, including in the nav bar and lists.
  */
 export default function UserAvatar({ user, size = 44, style, ringColor }) {
   const { colors } = useTheme();
@@ -22,29 +20,35 @@ export default function UserAvatar({ user, size = 44, style, ringColor }) {
     return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
   })();
 
-  // Derive a stable accent per user so the initials fallback is not all one colour.
   const palette = [colors.violet, colors.mint, colors.amber, colors.tomato];
   const seed = ((user && user.id) || (user && user.name) || "x")
     .split("")
     .reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
   const accent = palette[seed % palette.length];
+  const radius = size / 2;
 
   const box = {
     width: size,
     height: size,
-    borderRadius: size / 2.6,
+    borderRadius: radius,
+    overflow: "hidden",
     borderWidth: 1,
     borderColor: ringColor || colors.border,
   };
 
   if (hasImage) {
     return (
-      <Image
-        source={{ uri }}
-        style={[box, { backgroundColor: colors.surfaceRaised }, style]}
-        resizeMode="cover"
+      <View
+        style={[box, styles.frame, { backgroundColor: colors.surfaceRaised }, style]}
         accessibilityLabel={`${(user && user.name) || "User"} profile picture`}
-      />
+      >
+        <Image
+          source={{ uri }}
+          style={{ width: size, height: size, borderRadius: radius }}
+          resizeMode="cover"
+          accessibilityIgnoresInvertColors
+        />
+      </View>
     );
   }
 
@@ -58,6 +62,7 @@ export default function UserAvatar({ user, size = 44, style, ringColor }) {
 }
 
 const styles = StyleSheet.create({
+  frame: { alignItems: "center", justifyContent: "center" },
   fallback: { alignItems: "center", justifyContent: "center" },
   initials: { fontWeight: "800" },
 });

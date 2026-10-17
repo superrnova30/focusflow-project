@@ -1,0 +1,3 @@
+-- Allow fractional EXP awards (e.g. Memorize hint = 2.5 XP).
+ALTER TABLE "User" ALTER COLUMN "xp" SET DATA TYPE DOUBLE PRECISION;
+ALTER TABLE "User" ALTER COLUMN "totalXpEarned" SET DATA TYPE DOUBLE PRECISION;

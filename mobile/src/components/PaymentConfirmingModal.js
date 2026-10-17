@@ -9,6 +9,9 @@ export default function PaymentConfirmingModal({
   phase = "confirming",
   onDismiss,
   onRetryCheck,
+  successTitle,
+  successBody,
+  failedBody,
 }) {
   const { colors } = useTheme();
 
@@ -35,8 +38,10 @@ export default function PaymentConfirmingModal({
               <View style={[styles.iconOk, { backgroundColor: colors.mintSoft }]}>
                 <Ionicons name="checkmark-circle" size={48} color={colors.mint} />
               </View>
-              <Text style={[styles.title, { color: colors.text }]}>🎉 Payment Successful!</Text>
-              <Text style={[styles.body, { color: colors.textMuted }]}>Welcome to Go Unlimited! Your Unlimited features are now unlocked.</Text>
+              <Text style={[styles.title, { color: colors.text }]}>{successTitle || "🎉 Payment Successful!"}</Text>
+              <Text style={[styles.body, { color: colors.textMuted }]}>
+                {successBody || "Welcome to Go Unlimited! Your Unlimited features are now unlocked."}
+              </Text>
             </>
           )}
           {isPending && (
@@ -58,7 +63,7 @@ export default function PaymentConfirmingModal({
               <Ionicons name="close-circle-outline" size={40} color={colors.amber} style={{ alignSelf: "center" }} />
               <Text style={[styles.title, { color: colors.text }]}>Payment not completed</Text>
               <Text style={[styles.body, { color: colors.textMuted }]}>
-                Your account is still on the Basic plan. You can try Go Unlimited again when ready.
+                {failedBody || "Your account is still on the Basic plan. You can try Go Unlimited again when ready."}
               </Text>
             </>
           )}

@@ -11,6 +11,24 @@ function isEmailConfigured() {
   );
 }
 
+function normalizeSmtpPassword(value) {
+  // Gmail app passwords are often copied with spaces; strip them for auth.
+  return String(value || "").replace(/\s/g, "");
+}
+
+function createGmailTransporter(user, pass) {
+  return nodemailer.createTransport({
+    host: "smtp.gmail.com",
+    port: 587,
+    secure: false,
+    requireTLS: true,
+    auth: {
+      user: String(user || "").trim(),
+      pass: normalizeSmtpPassword(pass),
+    },
+  });
+}
+
 function createSmtpTransporter() {
   if (process.env.SMTP_HOST) {
     return nodemailer.createTransport({
@@ -18,23 +36,39 @@ function createSmtpTransporter() {
       port: Number(process.env.SMTP_PORT || 587),
       secure: process.env.SMTP_SECURE === "true",
       auth: {
-        user: process.env.SMTP_USER || process.env.EMAIL_USER,
-        pass: process.env.SMTP_PASS || process.env.EMAIL_APP_PASSWORD,
+        user: (process.env.SMTP_USER || process.env.EMAIL_USER || "").trim(),
+        pass: normalizeSmtpPassword(process.env.SMTP_PASS || process.env.EMAIL_APP_PASSWORD),
       },
     });
   }
 
   if (process.env.EMAIL_USER && process.env.EMAIL_APP_PASSWORD) {
-    return nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_APP_PASSWORD,
-      },
-    });
+    return createGmailTransporter(process.env.EMAIL_USER, process.env.EMAIL_APP_PASSWORD);
   }
 
   return null;
+}
+
+function resolveFromAddress() {
+  const authUser = String(process.env.EMAIL_USER || process.env.SMTP_USER || "").trim();
+  const authEmail = authUser.toLowerCase();
+  const configured = String(process.env.EMAIL_FROM || "").trim();
+  if (!configured) {
+    return authUser || null;
+  }
+  const match = configured.match(/<([^>]+)>/);
+  const configuredEmail = (match ? match[1] : configured).trim();
+  if (!configuredEmail.includes("@")) {
+    return authUser || null;
+  }
+  // Gmail SMTP only allows sending as the authenticated mailbox.
+  if (authEmail && configuredEmail.toLowerCase() !== authEmail) {
+    console.warn(
+      `[mailer] EMAIL_FROM (${configuredEmail}) does not match SMTP user (${authUser}); using SMTP user as From.`
+    );
+    return authUser;
+  }
+  return configuredEmail;
 }
 
 async function ensureSmtpReady(transporter) {
@@ -92,22 +126,35 @@ async function sendEmail({ to, subject, html, text }) {
 
   await ensureSmtpReady(transporter);
 
-  const fromAddress = process.env.EMAIL_FROM || process.env.EMAIL_USER;
+  const fromAddress = resolveFromAddress();
+  if (!fromAddress) {
+    throw new Error("Email delivery is not configured on this server");
+  }
   const info = await transporter.sendMail({
     from: `"FocusFlow" <${fromAddress}>`,
     replyTo: fromAddress,
-    to,
+    to: String(to || "").trim(),
     subject,
     html,
     text,
   });
+
+  const rejected = info.rejected || [];
+  if (rejected.length) {
+    throw new Error(`SMTP rejected recipient(s): ${rejected.join(", ")}`);
+  }
+  const accepted = info.accepted || [];
+  if (!accepted.length && !info.messageId) {
+    throw new Error("SMTP did not accept the message for delivery");
+  }
+
   console.log(`[mailer] Sent via SMTP to ${to}${info.messageId ? ` (${info.messageId})` : ""}`);
   return { delivered: true, provider: "smtp", messageId: info.messageId || null };
 }
 
 function verificationEmailContent(code) {
   const frontend = (process.env.FRONTEND_URL || "http://localhost:8081").replace(/\/$/, "");
-  const subject = `${code} is your FocusFlow verification code`;
+  const subject = "Your FocusFlow email verification code";
   const text = [
     "Welcome to FocusFlow!",
     "",
@@ -137,7 +184,7 @@ async function sendVerificationEmailMessage(email, code) {
 
 function passwordResetEmailContent(code, { initiatedBy = "self" } = {}) {
   const adminRequested = initiatedBy === "admin";
-  const subject = `${code} is your FocusFlow password reset code`;
+  const subject = "Your FocusFlow password reset code";
   const intro = adminRequested
     ? "An administrator requested a password reset for your FocusFlow account."
     : "Use this verification code to choose a new FocusFlow password.";
@@ -202,10 +249,63 @@ async function verifyEmailDelivery() {
   return { ok: true, provider: "smtp" };
 }
 
+async function sendSupportInboxEmail({ to, ticket, user }) {
+  const subject = `[PomodAI Support] ${ticket.ticketCode} · ${ticket.subject}`;
+  const category = ticket.category || "OTHER";
+  const text = [
+    "New Contact PomodAI support request",
+    "",
+    `Ticket: ${ticket.ticketCode}`,
+    `From: ${user?.name || "Student"} <${ticket.contactEmail}>`,
+    `Category: ${category}`,
+    `Subject: ${ticket.subject}`,
+    "",
+    ticket.message,
+    "",
+    `Submitted: ${new Date(ticket.createdAt || Date.now()).toISOString()}`,
+  ].join("\n");
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827;max-width:560px">
+      <h2 style="margin:0 0 12px">New Contact PomodAI request</h2>
+      <p style="margin:0 0 8px"><strong>Ticket:</strong> ${ticket.ticketCode}</p>
+      <p style="margin:0 0 8px"><strong>From:</strong> ${user?.name || "Student"} &lt;${ticket.contactEmail}&gt;</p>
+      <p style="margin:0 0 8px"><strong>Category:</strong> ${category}</p>
+      <p style="margin:0 0 16px"><strong>Subject:</strong> ${ticket.subject}</p>
+      <div style="padding:14px 16px;background:#F8FAFC;border:1px solid #E5E7EB;border-radius:12px;white-space:pre-wrap">${String(ticket.message || "").replace(/</g, "&lt;")}</div>
+    </div>
+  `;
+  return sendEmail({ to, subject, html, text });
+}
+
+async function sendSupportReplyEmail({ to, ticket, replyBody, adminName }) {
+  const subject = `Re: [${ticket.ticketCode}] ${ticket.subject}`;
+  const text = [
+    `PomodAI Support replied to your request ${ticket.ticketCode}.`,
+    "",
+    replyBody,
+    "",
+    `— ${adminName || "PomodAI Support"}`,
+    "",
+    "Please reply in the app or to this email thread if you need more help.",
+  ].join("\n");
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827;max-width:560px">
+      <h2 style="margin:0 0 12px">PomodAI Support reply</h2>
+      <p style="margin:0 0 8px"><strong>Ticket:</strong> ${ticket.ticketCode}</p>
+      <p style="margin:0 0 16px"><strong>Subject:</strong> ${ticket.subject}</p>
+      <div style="padding:14px 16px;background:#F0ECFF;border-radius:12px;white-space:pre-wrap">${String(replyBody || "").replace(/</g, "&lt;")}</div>
+      <p style="margin:16px 0 0;color:#6B7280;font-size:13px">— ${adminName || "PomodAI Support"}</p>
+    </div>
+  `;
+  return sendEmail({ to, subject, html, text });
+}
+
 module.exports = {
   isEmailConfigured,
   sendEmail,
   sendVerificationEmailMessage,
   sendPasswordResetEmailMessage,
+  sendSupportInboxEmail,
+  sendSupportReplyEmail,
   verifyEmailDelivery,
 };

@@ -4,7 +4,8 @@
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
     "start": "node scripts/start-dev.js",
-    "start:tunnel": "expo start --tunnel",
+    "start:tunnel": "expo start --tunnel --go",
+    "start:go": "expo start --go --offline",
     "android": "node scripts/start-dev.js --android",
     "ios": "node scripts/start-dev.js --ios",
     "web": "expo start --web"
@@ -19,7 +20,6 @@
     "expo-asset": "~12.0.13",
     "expo-audio": "~1.1.1",
     "expo-constants": "~18.0.14",
-    "expo-dev-client": "~6.0.21",
     "expo-document-picker": "~14.0.8",
     "expo-image-picker": "~17.0.11",
     "expo-notifications": "~0.32.17",

@@ -7,12 +7,19 @@ import {
   Pressable,
   ActivityIndicator,
   useWindowDimensions,
+  Alert,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { Screen } from "../components/Screen";
 import UserAvatar from "../components/UserAvatar";
+import ConfirmDialog from "../components/ConfirmDialog";
 import { useTheme } from "../context/ThemeContext";
 import client from "../api/client";
+import {
+  formatSchoolAvailableDate,
+  formatSchoolCooldownRemaining,
+  schoolTypeLabel,
+} from "../lib/schools";
 
 const GOLD = "#FFC15E";
 const GOLD_DEEP = "#E8A020";
@@ -127,6 +134,8 @@ export default function AdminUserDetailScreen({ navigation, route }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [clearingCooldown, setClearingCooldown] = useState(false);
 
   const isWide = width >= 720;
   const isTablet = width >= 560 && width < 720;
@@ -151,6 +160,27 @@ export default function AdminUserDetailScreen({ navigation, route }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  const clearSchoolCooldown = useCallback(async () => {
+    if (!userId || clearingCooldown) return;
+    setClearingCooldown(true);
+    try {
+      const { data: res } = await client.post(`/admin/users/${userId}/clear-school-cooldown`);
+      setClearConfirmOpen(false);
+      await load();
+      Alert.alert(
+        "Restriction removed",
+        res?.message || "The student can change or remove their school now."
+      );
+    } catch (e) {
+      Alert.alert(
+        "Could not remove restriction",
+        e?.response?.data?.error || e.message || "Please try again."
+      );
+    } finally {
+      setClearingCooldown(false);
+    }
+  }, [userId, clearingCooldown, load]);
 
   // Prefer the freshly fetched profile, falling back to the list row so the
   // header can render instantly while the detail request is in flight.
@@ -192,9 +222,28 @@ export default function AdminUserDetailScreen({ navigation, route }) {
   const avatarSize = isWide ? 132 : isTablet ? 116 : 96;
   const weeklyTrend = Array.isArray(statistics?.last7Days) ? statistics.last7Days : [];
   const weeklyMax = Math.max(1, ...weeklyTrend.map((day) => Number(day.minutes) || 0));
+  const schoolName = profile.schoolRecord?.name || profile.school || null;
+  const schoolChange = profile.schoolChange || null;
+  const schoolLocked = Boolean(schoolChange?.locked);
+  const cooldownRemaining = schoolLocked
+    ? formatSchoolCooldownRemaining(schoolChange.availableAt)
+    : "";
+  const cooldownAvailable = schoolLocked
+    ? formatSchoolAvailableDate(schoolChange.availableAt)
+    : "";
 
   return (
     <Screen>
+      <ConfirmDialog
+        visible={clearConfirmOpen}
+        title="Remove school restriction?"
+        message="This lifts the 7-day cooldown so the student can change or remove their school immediately. Their current school is not changed."
+        confirmText="Remove Restriction"
+        cancelText="Keep restriction"
+        loading={clearingCooldown}
+        onConfirm={clearSchoolCooldown}
+        onCancel={() => (clearingCooldown ? null : setClearConfirmOpen(false))}
+      />
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{
@@ -450,10 +499,114 @@ export default function AdminUserDetailScreen({ navigation, route }) {
             <Text style={[s.sectionLabel, { color: colors.textMuted }]}>STUDENT INFORMATION</Text>
             <View style={[s.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
               <InfoRow icon="id-card-outline" label="Student ID" value={profile.studentId} colors={colors} />
-              <InfoRow icon="school-outline" label="Course" value={profile.course} colors={colors} />
+              <InfoRow icon="book-outline" label="Course" value={profile.course} colors={colors} />
               <InfoRow icon="layers-outline" label="Year level" value={profile.yearLevel} colors={colors} />
               <InfoRow icon="people-outline" label="Section" value={profile.section} colors={colors} />
-              <InfoRow icon="mail-outline" label="Email" value={profile.email} colors={colors} />
+              <InfoRow icon="mail-outline" label="Email" value={profile.email} colors={colors} last />
+            </View>
+
+            {/* School + change restriction */}
+            <Text style={[s.sectionLabel, { color: colors.textMuted }]}>SCHOOL</Text>
+            <View style={[s.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+              <InfoRow
+                icon="school-outline"
+                label="Current school"
+                value={schoolName}
+                colors={colors}
+              />
+              <InfoRow
+                icon="location-outline"
+                label="Location"
+                value={profile.schoolRecord?.location}
+                colors={colors}
+              />
+              <InfoRow
+                icon="business-outline"
+                label="Type"
+                value={
+                  profile.schoolRecord?.typeLabel ||
+                  (profile.schoolRecord?.type ? schoolTypeLabel(profile.schoolRecord.type) : null)
+                }
+                colors={colors}
+                last
+              />
+
+              {schoolChange ? (
+                <View
+                  style={[
+                    s.restrictionBox,
+                    {
+                      backgroundColor: schoolLocked ? colors.amberSoft : colors.mintSoft,
+                      borderColor: schoolLocked ? colors.amber + "55" : colors.mint + "55",
+                    },
+                  ]}
+                >
+                  <View style={s.restrictionTop}>
+                    <View
+                      style={[
+                        s.restrictionIcon,
+                        { backgroundColor: schoolLocked ? colors.amber + "33" : colors.mint + "33" },
+                      ]}
+                    >
+                      <Ionicons
+                        name={schoolLocked ? "lock-closed" : "checkmark-circle"}
+                        size={16}
+                        color={schoolLocked ? colors.amber : colors.mint}
+                      />
+                    </View>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text
+                        style={[
+                          s.restrictionTitle,
+                          { color: schoolLocked ? colors.amber : colors.mint },
+                        ]}
+                      >
+                        {schoolLocked ? "School change restricted" : "No active restriction"}
+                      </Text>
+                      <Text style={[s.restrictionBody, { color: colors.text }]}>
+                        {schoolLocked
+                          ? `${cooldownRemaining}${
+                              cooldownAvailable ? ` · Available ${cooldownAvailable}` : ""
+                            }`
+                          : schoolChange.lastChangedAt
+                          ? `Last changed ${formatDate(schoolChange.lastChangedAt)}. Student can change or remove school now.`
+                          : "Student can change or remove their school anytime."}
+                      </Text>
+                      {schoolLocked ? (
+                        <Text style={[s.restrictionHint, { color: colors.textMuted }]}>
+                          Normal {schoolChange.cooldownDays || 7}-day cooldown still applies for the
+                          student until an admin removes it.
+                        </Text>
+                      ) : null}
+                    </View>
+                  </View>
+
+                  {schoolLocked ? (
+                    <Pressable
+                      onPress={() => setClearConfirmOpen(true)}
+                      disabled={clearingCooldown}
+                      style={({ pressed }) => [
+                        s.removeRestrictionBtn,
+                        {
+                          backgroundColor: colors.violet,
+                          opacity: clearingCooldown ? 0.7 : pressed ? 0.88 : 1,
+                        },
+                      ]}
+                      accessibilityRole="button"
+                      accessibilityLabel="Remove school change restriction"
+                    >
+                      {clearingCooldown ? (
+                        <ActivityIndicator color="#fff" size="small" />
+                      ) : (
+                        <>
+                          <Ionicons name="shield-checkmark-outline" size={15} color="#fff" />
+                          <Text style={s.removeRestrictionText}>Remove Restriction</Text>
+                        </>
+                      )}
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : null}
             </View>
 
             {/* Study preferences */}
@@ -682,6 +835,36 @@ const useStyles = (colors, width) => {
     },
     statusPillText: { fontSize: 11, fontWeight: "800" },
     daysLeft: { fontSize: 11.5, fontWeight: "700" },
+    restrictionBox: {
+      marginTop: 4,
+      marginBottom: 12,
+      borderWidth: 1,
+      borderRadius: 14,
+      padding: 12,
+      gap: 12,
+    },
+    restrictionTop: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
+    restrictionIcon: {
+      width: 30,
+      height: 30,
+      borderRadius: 10,
+      alignItems: "center",
+      justifyContent: "center",
+      marginTop: 1,
+    },
+    restrictionTitle: { fontSize: 13, fontWeight: "800" },
+    restrictionBody: { fontSize: 12.5, lineHeight: 18, fontWeight: "600", marginTop: 3 },
+    restrictionHint: { fontSize: 11, lineHeight: 16, fontWeight: "500", marginTop: 5 },
+    removeRestrictionBtn: {
+      minHeight: 42,
+      borderRadius: 12,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 7,
+      paddingHorizontal: 14,
+    },
+    removeRestrictionText: { color: "#fff", fontSize: 13, fontWeight: "800" },
     goals: { fontSize: 13.5, lineHeight: 21, paddingVertical: 14 },
     subjectStatRow: { paddingVertical: 12, borderBottomWidth: 1 },
     subjectStatTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },

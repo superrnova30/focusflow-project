@@ -18,6 +18,12 @@ export function notificationIcon(type) {
       return { name: "trophy", color: "#CA8A04" };
     case "welcome":
       return { name: "sparkles", color: "#6C5CE7" };
+    case "system":
+      return { name: "school", color: "#0EA05C" };
+    case "support":
+      return { name: "mail", color: "#6C5CE7" };
+    case "support_reply":
+      return { name: "chatbubbles", color: "#0EA05C" };
     default:
       return { name: "notifications", color: "#6C5CE7" };
   }
@@ -43,6 +49,10 @@ export function notificationTypeLabel(type) {
       return "Welcome";
     case "system":
       return "Update";
+    case "support":
+      return "Support";
+    case "support_reply":
+      return "Support reply";
     default:
       return "Update";
   }
@@ -76,10 +86,25 @@ export function notificationIsNavigable(item) {
   if (!item) return false;
   if (notificationOpensProfile(item)) return true;
   const screen = item.data?.screen;
-  if (screen === "FindFriends" || screen === "Premium" || screen === "Progress") return true;
+  if (screen === "FindFriends" || screen === "Premium" || screen === "Progress" || screen === "Settings") return true;
+  if (screen === "ContactSupport") return true;
+  // Student conversation (support reply deep link)
+  if (
+    (item.type === "support_reply" || screen === "SupportTicket") &&
+    item.data?.ticketId
+  ) {
+    return true;
+  }
   if (screen === "Quiz" && item.data?.quizId) return true;
   if (item.type === "reaction" && item.actor?.id) return true;
   if (item.type === "friend_share" && (item.data?.userId || item.actor?.id)) return true;
+  // Admin inbox: new student support request
+  if (
+    (item.type === "support" || screen === "SupportDetail" || screen === "SupportInbox") &&
+    item.data?.ticketId
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -122,6 +147,58 @@ export function navigateFromNotification(item) {
     navigationRef.navigate("Study", { screen: "Progress" });
     return true;
   }
+  if (screen === "Settings") {
+    navigationRef.navigate("Profile", { screen: "Settings" });
+    return true;
+  }
+  // Student: open their own support conversation from a reply notification.
+  // Prefer type support_reply so we never send admins to the student screen.
+  // Also handles older reply notifications that still pointed at ContactSupport + ticketId.
+  // Student support lives under Study (not Profile) so Profile never shows Support UI.
+  if (
+    (item.type === "support_reply" ||
+      (screen === "SupportTicket" && item.type !== "support") ||
+      (screen === "ContactSupport" && data.ticketId && item.type === "support_reply")) &&
+    data.ticketId
+  ) {
+    navigationRef.navigate("Study", {
+      screen: "SupportTicket",
+      params: { ticketId: data.ticketId, ticketCode: data.ticketCode },
+    });
+    return true;
+  }
+  if (screen === "ContactSupport") {
+    if (data.ticketId) {
+      navigationRef.navigate("Study", {
+        screen: "SupportTicket",
+        params: { ticketId: data.ticketId, ticketCode: data.ticketCode },
+      });
+      return true;
+    }
+    navigationRef.navigate("Study", { screen: "ContactSupport" });
+    return true;
+  }
+  // Admin: new Contact PomodAI request → inbox detail.
+  if (
+    (item.type === "support" || screen === "SupportDetail" || screen === "SupportInbox") &&
+    data.ticketId
+  ) {
+    try {
+      navigationRef.navigate("Overview", {
+        screen: "SupportDetail",
+        params: { ticketId: data.ticketId },
+      });
+      return true;
+    } catch {
+      try {
+        navigationRef.navigate("Overview", { screen: "SupportInbox" });
+        return true;
+      } catch {
+        navigationRef.navigate("Overview");
+        return true;
+      }
+    }
+  }
   if (item.type === "reaction" && item.actor?.id) {
     navigationRef.navigate("Study", {
       screen: "StudentProfile",
@@ -139,6 +216,63 @@ export function navigateFromNotification(item) {
   }
 
   return false;
+}
+
+/**
+ * Deep-link an admin activity log row to the most relevant admin screen.
+ * Returns true when navigation was attempted.
+ */
+export function navigateFromActivityLog(log) {
+  if (!log || !navigationRef.isReady()) return false;
+  const action = String(log.action || "").toLowerCase();
+  const userId = log.userId || log.user?.id;
+
+  const go = (name, params) => {
+    try {
+      navigationRef.navigate(name, params);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  if (action.includes("premium") || action.includes("checkout") || action.includes("payment") || action.includes("coin")) {
+    return go("Subscriptions") || go("Overview");
+  }
+  if (action.includes("school")) {
+    return go("Schools") || go("Overview");
+  }
+  if (
+    action.includes("quiz") ||
+    action.includes("flash") ||
+    action.includes("note") ||
+    action.includes("upload") ||
+    action.includes("material") ||
+    action.includes("import") ||
+    action.includes("content")
+  ) {
+    return go("Content") || go("Overview");
+  }
+  if (
+    action.includes("login") ||
+    action.includes("account") ||
+    action.includes("password") ||
+    action.includes("verified") ||
+    action.includes("role") ||
+    action.startsWith("admin_") ||
+    userId
+  ) {
+    if (userId) {
+      return (
+        go("Users", { screen: "UserDetail", params: { userId, user: log.user || undefined } }) ||
+        go("Users") ||
+        go("Overview")
+      );
+    }
+    return go("Users") || go("Overview");
+  }
+
+  return go("Overview", { screen: "OverviewHome" }) || go("Overview");
 }
 
 /** Compact relative time (lists, badges). */

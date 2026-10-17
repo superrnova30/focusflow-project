@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from "react";
+import React, { useState, useCallback, useMemo, useRef } from "react";
 import {
   View,
   Text,
@@ -41,6 +41,7 @@ export default function QuizTakeScreen({ route, navigation }) {
   const [revealed, setRevealed] = useState(false);
   const [result, setResult] = useState(null);
   const [hearts, setHearts] = useState(MAX_HEARTS);
+  const [unlimitedHearts, setUnlimitedHearts] = useState(false);
   const [coins, setCoins] = useState(0);
   const [xp, setXp] = useState(0);
   const [heartsRefillAt, setHeartsRefillAt] = useState(null);
@@ -50,9 +51,21 @@ export default function QuizTakeScreen({ route, navigation }) {
   const [blockedAtStart, setBlockedAtStart] = useState(false);
   const [lastCorrect, setLastCorrect] = useState(null);
   const [comboNote, setComboNote] = useState("");
+  const [usedHint, setUsedHint] = useState(false);
+  const [eliminatedOptions, setEliminatedOptions] = useState([]);
+  const [hintBusy, setHintBusy] = useState(false);
+  const [hints, setHints] = useState(0);
+  const [unlimitedHints, setUnlimitedHints] = useState(false);
+  const [lastXpAwarded, setLastXpAwarded] = useState(0);
+  const answeredIdsRef = useRef(new Set());
 
   const applyState = (state = {}, extra = {}) => {
     setHearts(state.hearts ?? extra.hearts ?? 0);
+    setUnlimitedHearts(Boolean(state.unlimitedHearts ?? extra.unlimitedHearts));
+    if (state.hints != null || extra.hints != null) setHints(state.hints ?? extra.hints ?? 0);
+    if (state.unlimitedHints != null || extra.unlimitedHints != null) {
+      setUnlimitedHints(Boolean(state.unlimitedHints ?? extra.unlimitedHints));
+    }
     if (state.coins != null || extra.coins != null) {
       const nextCoins = state.coins ?? extra.coins ?? 0;
       setCoins(nextCoins);
@@ -67,6 +80,12 @@ export default function QuizTakeScreen({ route, navigation }) {
     try {
       const state = await fetchHeartsState(client);
       applyState(state);
+      try {
+        const { data: gameData } = await client.get("/game/state");
+        applyState(gameData.state || {});
+      } catch {
+        // optional
+      }
       if (isHeartsBlocked(state)) {
         setBlockedAtStart(true);
         setPhase("blocked");
@@ -85,6 +104,10 @@ export default function QuizTakeScreen({ route, navigation }) {
       setSelected(null);
       setRevealed(false);
       setResult(null);
+      setUsedHint(false);
+      setEliminatedOptions([]);
+      setLastXpAwarded(0);
+      answeredIdsRef.current = new Set();
       setBlockedAtStart(false);
       setPhase("question");
     } catch (e) {
@@ -117,7 +140,7 @@ export default function QuizTakeScreen({ route, navigation }) {
         heartsAlreadyApplied: true,
       });
       setResult(data);
-      if (data.heartsBlocked || (nextHearts ?? hearts) <= 0) {
+      if (isHeartsBlocked({ ...data, hearts: nextHearts ?? data.hearts ?? hearts, unlimitedHearts: data.unlimitedHearts ?? unlimitedHearts })) {
         applyState(data, { hearts: nextHearts ?? 0 });
         setPhase("blocked");
       } else {
@@ -139,6 +162,9 @@ export default function QuizTakeScreen({ route, navigation }) {
 
   const chooseAnswer = async (value) => {
     if (!current || revealed || submitting || phase !== "question") return;
+    if (eliminatedOptions.some((item) => String(item).trim().toLowerCase() === String(value).trim().toLowerCase())) {
+      return;
+    }
     setSelected(value);
     setAnswers((prev) => ({ ...prev, [current.id]: value }));
     setSubmitting(true);
@@ -146,13 +172,29 @@ export default function QuizTakeScreen({ route, navigation }) {
       const { data } = await client.post(`/quizzes/${quizId}/check`, {
         questionId: current.id,
         answer: value,
+        usedHint,
       });
       setRevealed(true);
       setLastCorrect(Boolean(data.correct));
-      setComboNote(data.comboHit ? `Combo! +${data.coinsEarned || 1} coin and +${data.xpAwarded || 0} XP` : "");
+      const awarded = Number(data.xpAwarded || 0);
+      setLastXpAwarded(awarded);
+      if (data.correct) {
+        answeredIdsRef.current.add(current.id);
+        setComboNote(
+          data.comboHit
+            ? `Combo! +${data.coinsEarned || 1} coin and +${awarded} EXP`
+            : awarded > 0
+              ? `Correct! +${awarded} EXP${usedHint ? " (hint)" : ""}`
+              : data.alreadyAwarded
+                ? "Correct — EXP already awarded for this question"
+                : "Correct!"
+        );
+        setScore((s) => s + 1);
+      } else {
+        setComboNote("");
+      }
       applyState(data);
-      if (data.correct) setScore((s) => s + 1);
-      if (data.gameOver || data.heartsBlocked || (data.hearts ?? hearts) <= 0) {
+      if (isHeartsBlocked({ ...data, unlimitedHearts: data.unlimitedHearts ?? unlimitedHearts })) {
         setHearts(0);
       }
     } catch (e) {
@@ -169,6 +211,52 @@ export default function QuizTakeScreen({ route, navigation }) {
     }
   };
 
+  const useHint = async () => {
+    if (!current || revealed || hintBusy || usedHint || submitting) return;
+    const optionList =
+      current.type === "true_false"
+        ? ["True", "False"]
+        : current.type === "mcq" && Array.isArray(current.options)
+          ? current.options
+          : null;
+    if (!optionList || optionList.length < 2) {
+      Alert.alert("Hint unavailable", "Hints are available for multiple-choice questions.");
+      return;
+    }
+    if (!unlimitedHints && hints <= 0) {
+      Alert.alert("No hints left", "Earn more hints or upgrade for unlimited hints.");
+      return;
+    }
+    setHintBusy(true);
+    try {
+      const { data } = await client.post(`/quizzes/${quizId}/hint`, {
+        questionId: current.id,
+        eliminatedOptions,
+      });
+      setHints(data.hints ?? hints);
+      setUnlimitedHints(Boolean(data.unlimitedHints));
+      const nextEliminated = Array.isArray(data.eliminatedOptions)
+        ? data.eliminatedOptions
+        : data.eliminated
+          ? [...eliminatedOptions, data.eliminated]
+          : eliminatedOptions;
+      setEliminatedOptions(nextEliminated);
+      setUsedHint(true);
+      if (
+        selected
+        && nextEliminated.some(
+          (item) => String(item).trim().toLowerCase() === String(selected).trim().toLowerCase()
+        )
+      ) {
+        setSelected(null);
+      }
+    } catch (e) {
+      Alert.alert("Hint unavailable", e?.response?.data?.error || e.message || "Please try again.");
+    } finally {
+      setHintBusy(false);
+    }
+  };
+
   const submitTyped = () => {
     if (!current) return;
     const value = String(answers[current.id] || "").trim();
@@ -181,7 +269,7 @@ export default function QuizTakeScreen({ route, navigation }) {
 
   const goNext = () => {
     if (idx + 1 < questions.length) {
-      if (hearts <= 0) {
+      if (isHeartsBlocked({ hearts, unlimitedHearts })) {
         setPhase("blocked");
         return;
       }
@@ -189,6 +277,10 @@ export default function QuizTakeScreen({ route, navigation }) {
       setSelected(null);
       setRevealed(false);
       setLastCorrect(null);
+      setUsedHint(false);
+      setEliminatedOptions([]);
+      setLastXpAwarded(0);
+      setComboNote("");
       setPhase("question");
       return;
     }
@@ -214,6 +306,10 @@ export default function QuizTakeScreen({ route, navigation }) {
         setSelected(null);
         setRevealed(false);
         setLastCorrect(null);
+        setUsedHint(false);
+        setEliminatedOptions([]);
+        setLastXpAwarded(0);
+        setComboNote("");
         setPhase("question");
       } else if (revealed) {
         finishQuiz(answers, data.hearts);
@@ -353,19 +449,26 @@ export default function QuizTakeScreen({ route, navigation }) {
             <Text style={[styles.xpText, { color: colors.amber }]}>{xp}</Text>
           </View>
           <Pressable
-            onPress={() => hearts <= 0 && setPhase("blocked")}
+            onPress={() => isHeartsBlocked({ hearts, unlimitedHearts }) && setPhase("blocked")}
             accessibilityRole="button"
-            accessibilityLabel={hearts <= 0 ? "Out of hearts. Open revive options." : `${hearts} hearts remaining`}
+            accessibilityLabel={unlimitedHearts ? "Unlimited hearts" : hearts <= 0 ? "Out of hearts. Open revive options." : `${hearts} hearts remaining`}
             style={[styles.heartPill, { backgroundColor: colors.tomatoSoft }]}
           >
-            {[0, 1, 2, 3, 4].map((i) => (
-              <Ionicons
-                key={i}
-                name={i < hearts ? "heart" : "heart-outline"}
-                size={18}
-                color={i < hearts ? "#FF5A76" : colors.border}
-              />
-            ))}
+            {unlimitedHearts ? (
+              <>
+                <Ionicons name="heart" size={18} color="#FF5A76" />
+                <Text style={{ color: "#FF5A76", fontWeight: "800", marginLeft: 4 }}>∞</Text>
+              </>
+            ) : (
+              [0, 1, 2, 3, 4].map((i) => (
+                <Ionicons
+                  key={i}
+                  name={i < hearts ? "heart" : "heart-outline"}
+                  size={18}
+                  color={i < hearts ? "#FF5A76" : colors.border}
+                />
+              ))
+            )}
           </Pressable>
           <Text style={styles.progressText}>
             Question {idx + 1} of {questions.length}
@@ -379,29 +482,45 @@ export default function QuizTakeScreen({ route, navigation }) {
           <View style={styles.optionsWrap}>
             {optionList.map((opt, oi) => {
               const isChosen = selected === opt;
+              const isEliminated = eliminatedOptions.some(
+                (item) => String(item).trim().toLowerCase() === String(opt).trim().toLowerCase()
+              );
               let bg = colors.surface;
               let border = colors.border;
               let textColor = colors.text;
               if (revealed && isChosen) {
+                bg = lastCorrect ? colors.mintSoft : colors.tomatoSoft;
+                border = lastCorrect ? colors.mint : colors.tomato;
+                textColor = lastCorrect ? colors.mint : colors.tomato;
+              } else if (isEliminated) {
+                textColor = colors.textMuted;
+              } else if (isChosen) {
                 bg = colors.violetSoft;
                 border = colors.violet;
                 textColor = colors.violet;
-              } else if (isChosen) {
-                bg = colors.tomatoSoft;
-                border = colors.tomato;
               }
               return (
                 <Pressable
                   key={`${current.id}-${oi}`}
                   onPress={() => chooseAnswer(opt)}
-                  disabled={revealed || submitting}
+                  disabled={revealed || submitting || isEliminated}
                   style={({ pressed }) => [
                     styles.option,
-                    { backgroundColor: bg, borderColor: border },
-                    pressed && !revealed && styles.pressed,
+                    { backgroundColor: bg, borderColor: border, opacity: isEliminated && !revealed ? 0.45 : 1 },
+                    pressed && !revealed && !isEliminated && styles.pressed,
                   ]}
                 >
-                  <Text style={[styles.optionText, { color: textColor }]}>{opt}</Text>
+                  <Text
+                    style={[
+                      styles.optionText,
+                      {
+                        color: textColor,
+                        textDecorationLine: isEliminated && !revealed ? "line-through" : "none",
+                      },
+                    ]}
+                  >
+                    {opt}
+                  </Text>
                 </Pressable>
               );
             })}
@@ -415,12 +534,42 @@ export default function QuizTakeScreen({ route, navigation }) {
           />
         )}
 
+        {optionList && !revealed ? (
+          <Pressable
+            onPress={useHint}
+            disabled={hintBusy || usedHint || submitting || (!(unlimitedHints || hints > 0))}
+            style={({ pressed }) => [
+              styles.hintBtn,
+              {
+                backgroundColor: colors.amberSoft,
+                borderColor: colors.amber,
+                opacity: hintBusy || usedHint || (!(unlimitedHints || hints > 0)) ? 0.55 : pressed ? 0.88 : 1,
+              },
+            ]}
+          >
+            {hintBusy ? (
+              <ActivityIndicator color={colors.amber} size="small" />
+            ) : (
+              <Ionicons name="bulb-outline" size={16} color={colors.amber} />
+            )}
+            <Text style={[styles.hintBtnText, { color: colors.amber }]}>
+              {usedHint
+                ? "Hint used · +10 EXP if correct"
+                : unlimitedHints
+                  ? "Use hint · half EXP (+10)"
+                  : `Use hint (${hints}) · half EXP (+10)`}
+            </Text>
+          </Pressable>
+        ) : null}
+
         {revealed ? (
           <View style={[styles.feedback, { backgroundColor: colors.surface, borderColor: lastCorrect ? colors.mint : colors.tomato }]}>
             <Text style={[styles.feedbackText, { color: lastCorrect ? colors.mint : colors.tomato }]}>
               {lastCorrect
-                ? (comboNote || "Correct!")
-                : hearts <= 0
+                ? (comboNote || (lastXpAwarded > 0 ? `Correct! +${lastXpAwarded} EXP` : "Correct!"))
+                : unlimitedHearts
+                  ? "Incorrect. Keep going — Unlimited hearts never run out."
+                  : hearts <= 0
                   ? "Incorrect. That used your last heart. Revive hearts to keep going, or wait 24 hours for a refill."
                   : "Incorrect. You lost 1 heart."}
             </Text>
@@ -447,7 +596,7 @@ export default function QuizTakeScreen({ route, navigation }) {
               <ActivityIndicator color="#fff" />
             ) : (
               <Text style={styles.primaryBtnText}>
-                {hearts <= 0 ? "See hearts status" : idx + 1 < questions.length ? "Next question" : "See results"}
+                {isHeartsBlocked({ hearts, unlimitedHearts }) ? "See hearts status" : idx + 1 < questions.length ? "Next question" : "See results"}
               </Text>
             )}
           </Pressable>
@@ -504,6 +653,18 @@ const createStyles = (colors, compact) =>
       paddingHorizontal: 14,
     },
     optionText: { fontSize: 14, fontWeight: "600" },
+    hintBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      borderWidth: 1,
+      borderRadius: RADIUS.md,
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      marginBottom: 12,
+    },
+    hintBtnText: { fontSize: 13, fontWeight: "800" },
     feedback: {
       borderWidth: 1,
       borderRadius: RADIUS.md,

@@ -21,14 +21,15 @@ import { useAuth } from "../context/AuthContext";
 import client from "../api/client";
 import { deckAccent } from "../lib/deckColors";
 import { RADIUS, SPACING } from "../theme/theme";
+import { useScrollToTopOnFocus } from "../hooks/useScrollToTopOnFocus";
 
 const SECTIONS = [
-  { key: "mine", label: "My Decks", icon: "folder-outline" },
-  { key: "public", label: "Public Decks", icon: "globe-outline" },
+  { key: "mine", label: "Mine", icon: "folder-outline" },
+  { key: "public", label: "Public", icon: "globe-outline" },
 ];
 
 const KINDS = [
-  { key: "flashcards", label: "Flashcards", icon: "layers-outline" },
+  { key: "flashcards", label: "Decks", icon: "layers-outline" },
   { key: "notes", label: "Notes", icon: "document-text-outline" },
 ];
 
@@ -42,13 +43,15 @@ function notePreview(note) {
 }
 
 export default function FilesScreen({ navigation, route }) {
+  const listRef = useScrollToTopOnFocus();
   const { colors } = useTheme();
   const { user } = useAuth();
   const { width } = useWindowDimensions();
   const compact = width < 380;
   const styles = useMemo(() => createStyles(colors, compact), [colors, compact]);
+  const initialKind = route.params?.kind === "notes" ? "notes" : "flashcards";
   const [section, setSection] = useState(route.params?.section === "public" ? "public" : "mine");
-  const [kind, setKind] = useState(route.params?.kind === "notes" ? "notes" : "flashcards");
+  const [kind, setKind] = useState(initialKind);
   const [decks, setDecks] = useState([]);
   const [notes, setNotes] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -83,6 +86,16 @@ export default function FilesScreen({ navigation, route }) {
     }
   }, [route.params?.section, route.params?.kind]);
 
+  useEffect(() => {
+    const removedId = route.params?.removedCollectionId;
+    if (removedId) {
+      setDecks((current) => current.filter((d) => d.id !== removedId));
+    }
+    if (route.params?.refreshAt || removedId) {
+      load({ silent: true });
+    }
+  }, [route.params?.refreshAt, route.params?.removedCollectionId, load]);
+
   useFocusEffect(
     useCallback(() => {
       load({ silent: true });
@@ -114,7 +127,7 @@ export default function FilesScreen({ navigation, route }) {
   };
 
   const createItem = () => {
-    if (kind === "flashcards") navigation.navigate("FlashcardEdit", {});
+    if (kind === "flashcards") navigation.navigate("FlashcardEdit", { createDeck: true });
     else navigation.navigate("NoteEdit", {});
   };
 
@@ -172,6 +185,8 @@ export default function FilesScreen({ navigation, route }) {
     );
   };
 
+  const renderItem = kind === "flashcards" ? renderDeck : renderNote;
+
   return (
     <Screen>
       <View style={styles.header}>
@@ -180,6 +195,32 @@ export default function FilesScreen({ navigation, route }) {
           <HeaderWallet compact={compact} showFriends={false} />
           <NotificationBell />
         </View>
+      </View>
+
+      <View style={styles.kindRow}>
+        {KINDS.map((item) => {
+          const on = kind === item.key;
+          return (
+            <Pressable
+              key={item.key}
+              onPress={() => setKind(item.key)}
+              style={[styles.kindTab, on && styles.kindTabOn]}
+            >
+              <Ionicons name={item.icon} size={14} color={on ? colors.violet : colors.textMuted} />
+              <Text style={[styles.kindText, on && styles.kindTextOn]}>{item.label}</Text>
+            </Pressable>
+          );
+        })}
+        {isMine ? (
+          <Pressable
+            onPress={createItem}
+            style={styles.addBtn}
+            accessibilityLabel={kind === "flashcards" ? "New deck" : "New note"}
+          >
+            <Ionicons name="add" size={16} color="#fff" />
+            <Text style={styles.addText}>New</Text>
+          </Pressable>
+        ) : null}
       </View>
 
       <View style={styles.sectionTabs}>
@@ -198,28 +239,6 @@ export default function FilesScreen({ navigation, route }) {
         })}
       </View>
 
-      <View style={styles.kindRow}>
-        {KINDS.map((item) => {
-          const on = kind === item.key;
-          return (
-            <Pressable
-              key={item.key}
-              onPress={() => setKind(item.key)}
-              style={[styles.kindTab, on && styles.kindTabOn]}
-            >
-              <Ionicons name={item.icon} size={14} color={on ? colors.violet : colors.textMuted} />
-              <Text style={[styles.kindText, on && styles.kindTextOn]}>{item.label}</Text>
-            </Pressable>
-          );
-        })}
-        {isMine ? (
-          <Pressable onPress={createItem} style={styles.addBtn} accessibilityLabel={kind === "flashcards" ? "New deck" : "New note"}>
-            <Ionicons name="add" size={16} color="#fff" />
-            <Text style={styles.addText}>{kind === "flashcards" ? "New" : "New"}</Text>
-          </Pressable>
-        ) : null}
-      </View>
-
       <Text style={styles.hint}>
         {isMine
           ? kind === "flashcards"
@@ -234,9 +253,10 @@ export default function FilesScreen({ navigation, route }) {
         <ActivityIndicator color={colors.violet} style={{ marginTop: 28 }} />
       ) : (
         <FlatList
+          ref={listRef}
           data={items}
           keyExtractor={(item) => item.id}
-          renderItem={kind === "flashcards" ? renderDeck : renderNote}
+          renderItem={renderItem}
           contentContainerStyle={styles.list}
           showsVerticalScrollIndicator={false}
           refreshControl={
@@ -266,7 +286,7 @@ export default function FilesScreen({ navigation, route }) {
               <Text style={styles.emptyText}>
                 {isMine
                   ? "Create one to start studying."
-                  : "Mark a deck or note as Public to share it here, or browse when classmates share theirs."}
+                  : "Mark a deck or note as Public to share it here."}
               </Text>
             </View>
           }
@@ -312,6 +332,7 @@ const createStyles = (colors, compact) =>
     kindRow: {
       flexDirection: "row",
       alignItems: "center",
+      flexWrap: "wrap",
       gap: 8,
       marginBottom: 8,
     },
@@ -350,7 +371,13 @@ const createStyles = (colors, compact) =>
       marginBottom: 8,
     },
     list: { paddingBottom: 28, gap: 8 },
+    cardWrap: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+    },
     card: {
+      flex: 1,
       flexDirection: "row",
       alignItems: "center",
       gap: 10,
@@ -362,6 +389,16 @@ const createStyles = (colors, compact) =>
       paddingVertical: 11,
       paddingRight: 12,
       paddingLeft: 10,
+    },
+    deleteBtn: {
+      width: 36,
+      height: 36,
+      borderRadius: 11,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.border,
     },
     accent: {
       position: "absolute",

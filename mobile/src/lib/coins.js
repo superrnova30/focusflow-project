@@ -33,9 +33,9 @@ export async function refreshCoins({ force = false } = {}) {
 export function openCoinShop(navigation) {
   if (!navigation?.navigate) return;
   const routeNames = navigation.getState?.()?.routeNames || [];
-  if (routeNames.includes("Progress")) {
-    navigation.navigate("Progress");
+  if (routeNames.includes("Shop")) {
+    navigation.navigate("Shop");
     return;
   }
-  navigation.navigate("Study", { screen: "Progress" });
+  navigation.navigate("Study", { screen: "Shop" });
 }

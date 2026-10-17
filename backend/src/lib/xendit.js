@@ -136,8 +136,21 @@ async function xenditRequest(path, { method = 'GET', body } = {}) {
  * opens. Amount and duration come from server config only — the client never
  * sends a price, so it cannot influence what is charged.
  */
-async function createInvoice({ user, externalId, successUrl, failureUrl, description }) {
-  const { price, currency, plan } = planConfig();
+async function createInvoice({
+  user,
+  externalId,
+  successUrl,
+  failureUrl,
+  description,
+  amount,
+  currency,
+  items,
+  metadata,
+  paymentMethods,
+}) {
+  const plan = planConfig();
+  const price = amount != null ? Number(amount) : plan.price;
+  const curr = currency || plan.currency;
 
   // Local sandbox: produce a structurally identical invoice object without
   // calling Xendit, so the rest of the pipeline (persist -> verify -> settle)
@@ -152,7 +165,7 @@ async function createInvoice({ user, externalId, successUrl, failureUrl, descrip
       external_id: externalId,
       status: 'PENDING',
       amount: price,
-      currency,
+      currency: curr,
       description,
       invoice_url: null,
       expiry_date: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
@@ -164,8 +177,8 @@ async function createInvoice({ user, externalId, successUrl, failureUrl, descrip
   const payload = {
     external_id: externalId,
     amount: price,
-    currency,
-    description: description || `FocusFlow Go Unlimited — ${plan} (${user.email})`,
+    currency: curr,
+    description: description || `FocusFlow Go Unlimited — ${plan.plan} (${user.email})`,
     payer_email: user.email,
     customer: {
       given_names: user.name || 'FocusFlow Student',
@@ -174,15 +187,15 @@ async function createInvoice({ user, externalId, successUrl, failureUrl, descrip
     success_redirect_url: successUrl,
     failure_redirect_url: failureUrl,
     invoice_duration: Number(process.env.XENDIT_INVOICE_DURATION_SECONDS || 86400),
-    items: [
+    items: items || [
       {
-        name: `Go Unlimited (${plan})`,
+        name: `Go Unlimited (${plan.plan})`,
         quantity: 1,
         price,
         category: 'Subscription',
       },
     ],
-    metadata: { userId: user.id, plan },
+    metadata: { userId: user.id, plan: plan.plan, ...(metadata || {}) },
   };
 
   // Optional: restrict methods (comma-separated in env). If unset, Xendit shows all
@@ -190,6 +203,8 @@ async function createInvoice({ user, externalId, successUrl, failureUrl, descrip
   const methodsEnv = (process.env.XENDIT_INVOICE_PAYMENT_METHODS || '').trim();
   if (methodsEnv) {
     payload.payment_methods = methodsEnv.split(',').map((m) => m.trim()).filter(Boolean);
+  } else if (Array.isArray(paymentMethods) && paymentMethods.length) {
+    payload.payment_methods = paymentMethods;
   }
 
   const invoice = await xenditRequest('/v2/invoices', { method: 'POST', body: payload });

@@ -50,7 +50,10 @@ router.get("/users", async (req, res) => {
 // inline literals, which keeps each line easy to read and review.
 router.get("/users/:id", async (req, res) => {
   try {
-    const user = await prisma.user.findUnique({ where: { id: req.params.id } });
+    const user = await prisma.user.findUnique({
+      where: { id: req.params.id },
+      include: { schoolRecord: true },
+    });
     if (!user) return res.status(404).json({ error: "User not found" });
 
     const userId = user.id;
@@ -117,6 +120,12 @@ router.get("/users/:id", async (req, res) => {
     const quizTotal = (quizAgg && quizAgg._sum && quizAgg._sum.total) || 0;
     const quizScored = (quizAgg && quizAgg._sum && quizAgg._sum.score) || 0;
 
+    const { readSchoolChangedAt, getSchoolChangeState, serializeSchool } = require("../lib/schools");
+    // Always read schoolChangedAt via SQL so admin cooldown status stays accurate
+    // even when a stale Prisma client omits or mishandles the column.
+    user.schoolChangedAt = await readSchoolChangedAt(user.id);
+    const schoolChange = getSchoolChangeState(user);
+
     res.json({
       user: publicUser(user),
       profile: {
@@ -127,6 +136,10 @@ router.get("/users/:id", async (req, res) => {
         status: user.status,
         profilePicture: user.profilePicture || null,
         studentId: user.studentId || null,
+        school: user.school || null,
+        schoolId: user.schoolId || null,
+        schoolRecord: serializeSchool(user.schoolRecord),
+        schoolChange,
         course: user.course || null,
         yearLevel: user.yearLevel || null,
         section: user.section || null,
@@ -262,6 +275,43 @@ router.post("/users/:id/reset-password", async (req, res) => {
 router.delete("/users/:id", async (req, res) => {
   await prisma.user.delete({ where: { id: req.params.id } });
   res.json({ ok: true });
+});
+
+/**
+ * Admin override: clear the 7-day school-change cooldown so the student can
+ * change or remove their school immediately. Does not alter school assignment.
+ */
+router.post("/users/:id/clear-school-cooldown", async (req, res) => {
+  try {
+    const { clearSchoolChangeCooldown, serializeSchool } = require("../lib/schools");
+    const result = await clearSchoolChangeCooldown(req.params.id);
+    await prisma.activityLog.create({
+      data: {
+        userId: result.user.id,
+        action: "admin_clear_school_cooldown",
+        meta: {
+          adminId: req.user.id,
+          previouslyLocked: result.previouslyLocked,
+        },
+      },
+    });
+    return res.json({
+      ok: true,
+      previouslyLocked: result.previouslyLocked,
+      schoolChange: result.schoolChange,
+      school: result.user.school || null,
+      schoolId: result.user.schoolId || null,
+      schoolRecord: serializeSchool(result.user.schoolRecord),
+      message: result.previouslyLocked
+        ? "School change restriction removed. The student can update their school now."
+        : "No active school change restriction was found for this student.",
+    });
+  } catch (err) {
+    console.error("Admin clear school cooldown failed:", err.message || err);
+    return res.status(err.status || 500).json({
+      error: err.message || "Could not remove the school change restriction.",
+    });
+  }
 });
 
 // ---- Premium / Go Unlimited subscribers ----
@@ -610,7 +660,7 @@ router.get("/flashcards/collections/:id", async (req, res) => {
   const collection = await prisma.flashcardCollection.findUnique({
     where: { id: req.params.id },
     include: {
-      flashcards: true,
+      flashcards: { orderBy: { id: "asc" } },
       user: { select: { id: true, name: true, email: true } },
     },
   });

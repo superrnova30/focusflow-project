@@ -19,26 +19,44 @@ import ConfirmDialog from "../components/ConfirmDialog";
 import { deckAccent, DECK_COLOR_IDS } from "../lib/deckColors";
 import client from "../api/client";
 import { RADIUS, SPACING } from "../theme/theme";
+import HighlightedAnswer from "../components/HighlightedAnswer";
+import AnswerHighlightEditor from "../components/AnswerHighlightEditor";
+import {
+  parseHighlights,
+  pickAnswerHighlight,
+  resolveSavedHighlight,
+  serializeHighlights,
+} from "../lib/flashcardAnswer";
 
 export default function FlashcardEditScreen({ route, navigation }) {
-  const { colors } = useTheme();
+  const { colors, isDark } = useTheme();
   const { width } = useWindowDimensions();
   const isWide = width >= 768;
   const compact = width < 390;
   const styles = useMemo(() => createStyles(colors, isWide, compact), [colors, isWide, compact]);
 
-  const { card, collectionId: presetCollectionId } = route.params || {};
+  const { card, collectionId: presetCollectionId, createDeck: createDeckParam } = route.params || {};
   const isEditing = Boolean(card);
+  const createDeckMode = Boolean(createDeckParam) && !isEditing && !presetCollectionId;
 
   const [front, setFront] = useState(card?.front || "");
   const [back, setBack] = useState(card?.back || "");
+  const [answerHighlight, setAnswerHighlight] = useState(() => {
+    const stored = serializeHighlights(parseHighlights(card?.answerHighlight, card?.back), card?.back);
+    if (stored) return stored;
+    return serializeHighlights(
+      parseHighlights(pickAnswerHighlight(card?.front, card?.back, card?.answerHighlight), card?.back),
+      card?.back
+    );
+  });
   const [saving, setSaving] = useState(false);
+  const [creatingDeck, setCreatingDeck] = useState(false);
   const [loadingDecks, setLoadingDecks] = useState(false);
   const [collections, setCollections] = useState([]);
   const [selectedCollectionId, setSelectedCollectionId] = useState(presetCollectionId || null);
-  const [newDeckName, setNewDeckName] = useState("");
+  const [newDeckName, setNewDeckName] = useState(createDeckMode ? "New deck" : "");
   const [newDeckColor, setNewDeckColor] = useState("mint");
-  const [creatingNew, setCreatingNew] = useState(false);
+  const [creatingNew, setCreatingNew] = useState(createDeckMode);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [successInfo, setSuccessInfo] = useState(null);
@@ -46,16 +64,22 @@ export default function FlashcardEditScreen({ route, navigation }) {
   useLayoutEffect(() => {
     navigation.setOptions({
       headerShown: true,
-      title: isEditing ? "Edit card" : "Write your own",
+      title: isEditing ? "Edit card" : createDeckMode ? "Add deck" : "Write your own",
       headerTitleStyle: { fontWeight: "800", fontSize: 17 },
-      headerBackTitle: presetCollectionId ? "Deck" : "Collections",
+      headerBackTitle: presetCollectionId ? "Deck" : createDeckMode ? "Files" : "Collections",
       headerTintColor: colors.text,
       headerStyle: { backgroundColor: colors.bg },
     });
-  }, [navigation, isEditing, presetCollectionId, colors.text, colors.bg]);
+  }, [navigation, isEditing, createDeckMode, presetCollectionId, colors.text, colors.bg]);
 
   useEffect(() => {
     if (isEditing) return;
+    if (createDeckMode) {
+      setCreatingNew(true);
+      setSelectedCollectionId(null);
+      setNewDeckName((current) => (current.trim() ? current : "New deck"));
+      return;
+    }
     setLoadingDecks(true);
     client
       .get("/flashcards/collections")
@@ -67,6 +91,7 @@ export default function FlashcardEditScreen({ route, navigation }) {
           setCreatingNew(false);
         } else if (list.length === 0) {
           setCreatingNew(true);
+          setNewDeckName((current) => (current.trim() ? current : "New deck"));
         } else if (!selectedCollectionId) {
           setSelectedCollectionId(list[0].id);
           setCreatingNew(false);
@@ -74,7 +99,7 @@ export default function FlashcardEditScreen({ route, navigation }) {
       })
       .catch((e) => Alert.alert("Error", e.message))
       .finally(() => setLoadingDecks(false));
-  }, [isEditing, presetCollectionId]);
+  }, [isEditing, presetCollectionId, createDeckMode]);
 
   const selectedCollection = useMemo(
     () => collections.find((c) => c.id === selectedCollectionId) || null,
@@ -89,55 +114,103 @@ export default function FlashcardEditScreen({ route, navigation }) {
   }, [presetCollectionId, selectedCollection, creatingNew, newDeckColor, colors]);
 
   const canSave = front.trim().length > 0 && back.trim().length > 0;
+  const canCreateDeck = creatingNew && newDeckName.trim().length > 0 && !creatingDeck && !saving;
 
   const resolveTargetCollectionId = async () => {
     if (presetCollectionId) return presetCollectionId;
     if (creatingNew) {
-      const name = newDeckName.trim();
-      if (!name) {
-        Alert.alert("Deck name required", "Enter a name for your new deck.");
-        return null;
-      }
+      const name = newDeckName.trim() || "New deck";
       const { data } = await client.post("/flashcards/collections", { name, color: newDeckColor });
-      return data.collection.id;
+      return data.collection;
     }
-    if (selectedCollectionId) return selectedCollectionId;
+    if (selectedCollectionId) {
+      return { id: selectedCollectionId, name: selectedCollection?.name, color: selectedCollection?.color };
+    }
     Alert.alert("Choose a deck", "Select a deck or create a new one for this card.");
     return null;
   };
 
-  const save = async () => {
-    if (!canSave) {
-      Alert.alert("Incomplete", "Please fill in both the front and back of the card.");
+  const openCreatedDeck = (collection) => {
+    if (!collection?.id) return;
+    navigation.replace("FlashcardCollection", {
+      collectionId: collection.id,
+      collection: {
+        id: collection.id,
+        name: collection.name || newDeckName.trim() || "New deck",
+        color: collection.color || newDeckColor,
+      },
+    });
+  };
+
+  const createDeckOnly = async () => {
+    if (!creatingNew) {
+      Alert.alert("New deck", "Choose “New deck” to create one.");
       return;
     }
+    const name = newDeckName.trim() || "New deck";
+    if (!name) {
+      Alert.alert("Deck name required", "Enter a name for your new deck.");
+      return;
+    }
+    if (creatingDeck || saving) return;
+    setCreatingDeck(true);
+    try {
+      const { data } = await client.post("/flashcards/collections", {
+        name,
+        color: newDeckColor,
+      });
+      const created = data.collection;
+      openCreatedDeck(created);
+    } catch (e) {
+      Alert.alert("Error", e.message || "Could not create deck.");
+    } finally {
+      setCreatingDeck(false);
+    }
+  };
+
+  const save = async () => {
+    if (!canSave) {
+      Alert.alert("Incomplete", "Please fill in both the front and back of the card, or create the deck without cards.");
+      return;
+    }
+    if (saving || creatingDeck) return;
 
     setSaving(true);
     try {
       if (isEditing) {
-        await client.patch(`/flashcards/${card.id}`, { front: front.trim(), back: back.trim() });
+        await client.patch(`/flashcards/${card.id}`, {
+          front: front.trim(),
+          back: back.trim(),
+          answerHighlight: resolveSavedHighlight(front.trim(), back.trim(), answerHighlight),
+        });
         navigation.goBack();
         return;
       }
 
-      const targetCollectionId = await resolveTargetCollectionId();
-      if (!targetCollectionId) return;
+      const target = await resolveTargetCollectionId();
+      if (!target?.id) return;
 
       await client.post("/flashcards", {
         front: front.trim(),
         back: back.trim(),
-        collectionId: targetCollectionId,
+        answerHighlight: resolveSavedHighlight(front.trim(), back.trim(), answerHighlight),
+        collectionId: target.id,
       });
 
       const deckName =
         creatingNew && newDeckName.trim()
           ? newDeckName.trim()
-          : selectedCollection?.name || "Your deck";
+          : target.name || selectedCollection?.name || "Your deck";
       const deckColor =
-        creatingNew ? newDeckColor : selectedCollection?.color || "violet";
+        creatingNew ? newDeckColor : target.color || selectedCollection?.color || "violet";
 
-      const info = { collectionId: targetCollectionId, name: deckName, color: deckColor };
+      const info = { collectionId: target.id, name: deckName, color: deckColor };
       setSuccessInfo(info);
+
+      if (createDeckMode || creatingNew) {
+        openCreatedDeck({ id: target.id, name: deckName, color: deckColor });
+        return;
+      }
 
       Alert.alert("Card saved", `Your flashcard was added to "${deckName}".`, [
         {
@@ -161,6 +234,7 @@ export default function FlashcardEditScreen({ route, navigation }) {
   const handleAddAnother = (info = successInfo) => {
     setFront("");
     setBack("");
+    setAnswerHighlight("");
     setSuccessInfo(null);
     if (creatingNew && info) {
       setCreatingNew(false);
@@ -175,12 +249,12 @@ export default function FlashcardEditScreen({ route, navigation }) {
 
   const confirmRemove = async () => {
     setDeleting(true);
-    try {
-      await client.delete(`/flashcards/${card.id}`);
+          try {
+            await client.delete(`/flashcards/${card.id}`);
       setShowDeleteConfirm(false);
-      navigation.goBack();
-    } catch (e) {
-      Alert.alert("Error", e.message);
+            navigation.goBack();
+          } catch (e) {
+            Alert.alert("Error", e.message);
     } finally {
       setDeleting(false);
     }
@@ -227,7 +301,13 @@ export default function FlashcardEditScreen({ route, navigation }) {
                   <View style={[styles.previewCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
                     <Text style={styles.previewFront} numberOfLines={3}>{front.trim()}</Text>
                     <View style={[styles.previewDivider, { backgroundColor: colors.border }]} />
-                    <Text style={styles.previewBack} numberOfLines={4}>{back.trim()}</Text>
+                    <HighlightedAnswer
+                      card={{ front, back, answerHighlight }}
+                      text={back.trim()}
+                      highlight={answerHighlight}
+                      style={styles.previewBack}
+                      numberOfLines={4}
+                    />
                   </View>
                 </View>
 
@@ -274,8 +354,10 @@ export default function FlashcardEditScreen({ route, navigation }) {
                 </View>
                 <Text style={styles.subtitle} numberOfLines={isWide ? 2 : 3}>
                   {isEditing
-                    ? "Update the question or answer on this card."
-                    : "Pick a deck, write a clear question and answer, then save."}
+                    ? "Update the question or answer, then tap key words to highlight them."
+                    : createDeckMode
+                      ? "Name your deck, optionally add a flashcard, then create it. You can add more cards later."
+                      : "Pick a deck, write a clear question and answer, then tap key words to highlight them."}
                 </Text>
               </View>
               {!isEditing ? (
@@ -298,7 +380,7 @@ export default function FlashcardEditScreen({ route, navigation }) {
               ) : null}
             </View>
 
-            {!isEditing && !presetCollectionId ? (
+            {!isEditing && !presetCollectionId && !createDeckMode ? (
               <View style={[styles.panel, { backgroundColor: colors.surface, borderColor: colors.border }]}>
                 <Text style={styles.panelLabel}>Save to deck</Text>
                 <View style={styles.chipRow}>
@@ -306,6 +388,7 @@ export default function FlashcardEditScreen({ route, navigation }) {
                     onPress={() => {
                       setCreatingNew(true);
                       setSelectedCollectionId(null);
+                      setNewDeckName((current) => (current.trim() ? current : "New deck"));
                     }}
                     style={({ pressed }) => [
                       styles.chip,
@@ -351,10 +434,11 @@ export default function FlashcardEditScreen({ route, navigation }) {
 
                 {creatingNew ? (
                   <View style={styles.newDeckBlock}>
+                    <Text style={styles.colorLabel}>Deck name</Text>
                     <TextInput
                       value={newDeckName}
                       onChangeText={setNewDeckName}
-                      placeholder="Deck name, e.g. Biology Ch. 3"
+                      placeholder="New deck"
                       placeholderTextColor={colors.textMuted}
                       style={[styles.deckNameInput, { color: colors.text, borderColor: colors.border, backgroundColor: colors.bg }]}
                     />
@@ -378,8 +462,48 @@ export default function FlashcardEditScreen({ route, navigation }) {
                         );
                       })}
                     </View>
+                    <Text style={[styles.fieldHint, { marginTop: 10 }]}>
+                      Flashcards are optional — you can create an empty deck and add cards later.
+                    </Text>
                   </View>
                 ) : null}
+              </View>
+            ) : null}
+
+            {createDeckMode && creatingNew ? (
+              <View style={[styles.panel, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                <Text style={styles.panelLabel}>Deck</Text>
+                <Text style={styles.colorLabel}>Deck name</Text>
+                <TextInput
+                  value={newDeckName}
+                  onChangeText={setNewDeckName}
+                  placeholder="New deck"
+                  placeholderTextColor={colors.textMuted}
+                  style={[styles.deckNameInput, { color: colors.text, borderColor: colors.border, backgroundColor: colors.bg }]}
+                />
+                <Text style={styles.colorLabel}>Color</Text>
+                <View style={styles.colorRow}>
+                  {DECK_COLOR_IDS.map((id) => {
+                    const swatch = deckAccent(id, colors);
+                    const selected = newDeckColor === id;
+                    return (
+                      <Pressable
+                        key={id}
+                        onPress={() => setNewDeckColor(id)}
+                        style={[
+                          styles.colorSwatch,
+                          { backgroundColor: swatch.soft, borderColor: selected ? swatch.color : colors.border },
+                          selected && styles.colorSwatchSelected,
+                        ]}
+                      >
+                        <View style={[styles.colorDot, { backgroundColor: swatch.color }]} />
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                <Text style={[styles.fieldHint, { marginTop: 10 }]}>
+                  Flashcards below are optional. Create the deck now, then add cards anytime.
+                </Text>
               </View>
             ) : null}
 
@@ -388,7 +512,7 @@ export default function FlashcardEditScreen({ route, navigation }) {
                 <Ionicons name={previewAccent.icon} size={16} color={previewAccent.color} />
                 <Text style={[styles.targetDeckText, { color: colors.text }]} numberOfLines={1}>
                   Saving to <Text style={styles.targetDeckName}>{selectedCollection.name}</Text>
-                </Text>
+          </Text>
               </View>
             ) : null}
 
@@ -404,11 +528,11 @@ export default function FlashcardEditScreen({ route, navigation }) {
                     <Text style={styles.fieldHint}>Question</Text>
                   </View>
                   <TextInput
-                    value={front}
-                    onChangeText={setFront}
-                    placeholder="e.g. What is photosynthesis?"
+            value={front}
+            onChangeText={setFront}
+            placeholder="e.g. What is photosynthesis?"
                     placeholderTextColor={colors.textMuted}
-                    multiline
+            multiline
                     textAlignVertical="top"
                     style={[styles.fieldInput, { color: colors.text }]}
                   />
@@ -431,14 +555,16 @@ export default function FlashcardEditScreen({ route, navigation }) {
                     </View>
                     <Text style={styles.fieldHint}>Answer</Text>
                   </View>
-                  <TextInput
-                    value={back}
-                    onChangeText={setBack}
+                  <AnswerHighlightEditor
+                    front={front}
+                    back={back}
+                    highlight={answerHighlight}
+                    onChangeBack={setBack}
+                    onChangeHighlight={setAnswerHighlight}
+                    colors={colors}
+                    isDark={isDark}
+                    compact={compact}
                     placeholder="e.g. Plants convert sunlight into energy."
-                    placeholderTextColor={colors.textMuted}
-                    multiline
-                    textAlignVertical="top"
-                    style={[styles.fieldInput, styles.fieldInputBack, { color: colors.text }]}
                   />
                 </View>
               </View>
@@ -455,23 +581,32 @@ export default function FlashcardEditScreen({ route, navigation }) {
                     {front.trim() || "Front"}
                   </Text>
                   <View style={[styles.previewDivider, { backgroundColor: colors.border }]} />
-                  <Text style={styles.previewBack} numberOfLines={4}>
-                    {back.trim() || "Back"}
-                  </Text>
+                  <HighlightedAnswer
+                    card={{ front, back, answerHighlight }}
+                    text={back.trim() || "Back"}
+                    highlight={answerHighlight}
+                    style={styles.previewBack}
+                    numberOfLines={4}
+                  />
                 </View>
               </View>
             ) : null}
 
-            <View style={[styles.actions, isWide && styles.actionsWide]}>
+            <View
+              style={[
+                styles.actions,
+                isWide && !(createDeckMode || creatingNew) && styles.actionsWide,
+              ]}
+            >
               <Pressable
                 onPress={save}
-                disabled={saving || !canSave}
+                disabled={saving || creatingDeck || !canSave}
                 style={({ pressed }) => [
                   styles.primaryBtn,
                   {
                     backgroundColor: colors.mint,
-                    flex: isWide ? 1 : undefined,
-                    opacity: saving || !canSave ? 0.55 : pressed ? 0.88 : 1,
+                    flex: isWide && !(createDeckMode || creatingNew) ? 1 : undefined,
+                    opacity: saving || creatingDeck || !canSave ? 0.55 : pressed ? 0.88 : 1,
                   },
                 ]}
               >
@@ -480,10 +615,37 @@ export default function FlashcardEditScreen({ route, navigation }) {
                 ) : (
                   <>
                     <Ionicons name={isEditing ? "checkmark-circle" : "add-circle"} size={18} color="#fff" />
-                    <Text style={styles.primaryBtnText}>{isEditing ? "Save changes" : "Add flashcard"}</Text>
+                    <Text style={styles.primaryBtnText}>
+                      {isEditing ? "Save changes" : canSave ? "Create with flashcard" : "Add flashcard"}
+                    </Text>
                   </>
                 )}
               </Pressable>
+
+              {(createDeckMode || creatingNew) && !isEditing && !presetCollectionId ? (
+                <Pressable
+                  onPress={createDeckOnly}
+                  disabled={!canCreateDeck}
+                  accessibilityRole="button"
+                  accessibilityLabel="Create deck"
+                  style={({ pressed }) => [
+                    styles.primaryBtn,
+                    {
+                      backgroundColor: colors.violet,
+                      opacity: !canCreateDeck ? 0.55 : pressed ? 0.88 : 1,
+                    },
+                  ]}
+                >
+                  {creatingDeck ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <>
+                      <Ionicons name="folder-open-outline" size={18} color="#fff" />
+                      <Text style={styles.primaryBtnText}>Create Deck</Text>
+                    </>
+                  )}
+                </Pressable>
+              ) : null}
 
               {isEditing ? (
                 <Pressable
@@ -496,11 +658,11 @@ export default function FlashcardEditScreen({ route, navigation }) {
                 >
                   <Ionicons name="trash-outline" size={16} color={colors.tomato} />
                   <Text style={[styles.dangerBtnText, { color: colors.tomato }]}>Delete</Text>
-                </Pressable>
+            </Pressable>
               ) : null}
             </View>
               </>
-            )}
+          )}
           </View>
         </ScrollView>
       </KeyboardAvoidingView>

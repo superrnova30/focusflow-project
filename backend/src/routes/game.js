@@ -19,6 +19,7 @@ const {
   LEVEL_XP_STEP,
   MAX_HEARTS,
 } = require("../lib/gamification");
+const { COIN_REWARDS, MAX_STREAK_FREEZES } = require("../lib/shop");
 const { isPremiumActive, premiumState } = require("../lib/premium");
 const { normalizeMemorizeSettings, buildGameState } = require("../lib/memorize");
 const {
@@ -38,11 +39,27 @@ const {
 const router = express.Router();
 router.use(requireAuth);
 
-const XP_PER_CORRECT = 200;
+const QUIZ_XP_PER_CORRECT = 20;
+const QUIZ_XP_WITH_HINT = 10;
 
 function getUserFriendlyAiError(err) {
   if (err?.message) return err.message;
   return "AI generation is temporarily unavailable. Please try again in a moment.";
+}
+
+async function quizXpAlreadyAwarded(userId, awardKey) {
+  if (!userId || !awardKey) return false;
+  const rows = await prisma.activityLog.findMany({
+    where: {
+      userId,
+      action: "quiz_question_xp",
+      createdAt: { gte: new Date(Date.now() - 12 * 60 * 60 * 1000) },
+    },
+    select: { meta: true },
+    orderBy: { createdAt: "desc" },
+    take: 300,
+  });
+  return rows.some((row) => row?.meta && String(row.meta.awardKey || "") === String(awardKey));
 }
 
 // ---- Gamification state ----
@@ -60,11 +77,14 @@ router.get("/state", async (req, res) => {
       hearts: game.hearts,
       hints: game.hints,
       coins: game.coins,
+      streakFreezes: user.streakFreezes || 0,
       correctAnswers: user.correctAnswers,
       wrongAnswers: user.wrongAnswers,
       totalXpEarned: user.totalXpEarned,
       heartsBlocked: game.heartsBlocked,
       heartsRefillAt: game.heartsRefillAt,
+      unlimitedHearts: game.unlimitedHearts,
+      unlimitedHints: game.unlimitedHints,
       level: game.level,
     },
     premium,
@@ -94,7 +114,8 @@ router.put("/memorize-settings", async (req, res) => {
   res.json({ settings: next });
 });
 
-// Award XP to the current student (e.g. +200 for a correct quiz answer).
+// Award XP to the current student. Take Quiz answers should use /game/quiz/answer
+// so amounts and hint/duplicate rules are enforced server-side.
 router.post("/xp", async (req, res) => {
   const { amount, correct } = req.body;
   const n = Math.floor(Number(amount));
@@ -163,12 +184,145 @@ router.post("/xp", async (req, res) => {
   });
 });
 
+// Take Quiz: award +20 EXP for a clean correct answer, or +10 when a hint was used.
+// Duplicate awards for the same quiz session + question are rejected.
+router.post("/quiz/answer", async (req, res) => {
+  const {
+    quizSessionId,
+    questionIndex,
+    questionKey,
+    correct = false,
+    usedHint = false,
+  } = req.body || {};
+
+  const sessionId = String(quizSessionId || "").trim();
+  const qIndex = Number(questionIndex);
+  const key = String(questionKey || `q${qIndex}`).trim();
+  if (!sessionId || !Number.isFinite(qIndex) || qIndex < 0) {
+    return res.status(400).json({ error: "quizSessionId and questionIndex are required." });
+  }
+
+  const user = await loadUserGamification(req.user.id);
+  if (!user) return res.status(404).json({ error: "User not found" });
+  const premium = isPremiumActive(user);
+  const game = buildGameState(user, premium);
+
+  if (!correct) {
+    return res.json({
+      correct: false,
+      xpAwarded: 0,
+      alreadyAwarded: false,
+      usedHint: Boolean(usedHint),
+      state: {
+        xp: user.xp,
+        hearts: premium ? MAX_HEARTS : user.hearts,
+        hints: game.hints,
+        coins: user.coins || 0,
+        totalXpEarned: user.totalXpEarned,
+        correctAnswers: user.correctAnswers,
+        currentLevel: user.currentLevel,
+        answerCombo: user.answerCombo,
+      },
+      unlimitedHints: game.unlimitedHints,
+    });
+  }
+
+  const awardKey = `${sessionId}:${key}`;
+  if (await quizXpAlreadyAwarded(req.user.id, awardKey)) {
+    return res.json({
+      correct: true,
+      xpAwarded: 0,
+      alreadyAwarded: true,
+      usedHint: Boolean(usedHint),
+      state: {
+        xp: user.xp,
+        hearts: premium ? MAX_HEARTS : user.hearts,
+        hints: game.hints,
+        coins: user.coins || 0,
+        totalXpEarned: user.totalXpEarned,
+        correctAnswers: user.correctAnswers,
+        currentLevel: user.currentLevel,
+        answerCombo: user.answerCombo,
+      },
+      unlimitedHints: game.unlimitedHints,
+    });
+  }
+
+  const baseXp = usedHint ? QUIZ_XP_WITH_HINT : QUIZ_XP_PER_CORRECT;
+  const reward = await awardCorrectAnswer(req.user.id, { baseXp });
+  await prisma.activityLog.create({
+    data: {
+      userId: req.user.id,
+      action: "quiz_question_xp",
+      meta: {
+        awardKey,
+        quizSessionId: sessionId,
+        questionIndex: qIndex,
+        questionKey: key,
+        usedHint: Boolean(usedHint),
+        baseXp,
+        xpAwarded: reward?.xpAwarded || 0,
+      },
+    },
+  });
+  scheduleDailyChallengeCheck(req.user.id);
+
+  const refreshed = reward?.user || (await loadUserGamification(req.user.id));
+  const nextGame = buildGameState(refreshed, isPremiumActive(refreshed));
+  res.json({
+    correct: true,
+    xpAwarded: reward?.xpAwarded || 0,
+    alreadyAwarded: false,
+    usedHint: Boolean(usedHint),
+    comboHit: Boolean(reward?.comboHit),
+    coinsEarned: reward?.coinsEarned || 0,
+    bonusXp: reward?.bonusXp || 0,
+    state: {
+      xp: refreshed.xp,
+      hearts: premium ? MAX_HEARTS : refreshed.hearts,
+      hints: nextGame.hints,
+      coins: refreshed.coins || 0,
+      totalXpEarned: refreshed.totalXpEarned,
+      correctAnswers: refreshed.correctAnswers,
+      currentLevel: refreshed.currentLevel,
+      answerCombo: refreshed.answerCombo,
+    },
+    level: {
+      current: refreshed.currentLevel,
+      xpWithinLevel: xpWithinLevel(refreshed.xp),
+      xpForNext: xpForNextLevel(refreshed.xp),
+      step: LEVEL_XP_STEP,
+    },
+    unlimitedHints: nextGame.unlimitedHints,
+  });
+});
+
 // Change hearts. Used by the quiz for wrong answers (-1) and by the
 // "Quiz Over" screen for a full refill back to 5.
 router.post("/hearts", async (req, res) => {
   const { delta, set } = req.body;
   let user = await loadUserGamification(req.user.id);
   if (!user) return res.status(404).json({ error: "User not found" });
+
+  if (isPremiumActive(user)) {
+    const game = buildGameState(user, true);
+    return res.json({
+      state: {
+        xp: user.xp,
+        hearts: MAX_HEARTS,
+        hints: game.hints,
+        coins: user.coins,
+        totalXpEarned: user.totalXpEarned,
+        heartsDepletedAt: null,
+        unlimitedHearts: true,
+      },
+      gameOver: false,
+      heartsBlocked: false,
+      heartsRefillAt: null,
+      coins: user.coins || 0,
+      unlimitedHearts: true,
+    });
+  }
 
   const requestedDelta = Math.floor(Number(delta));
   if (typeof set !== "number" && Number.isFinite(requestedDelta) && requestedDelta < 0) {
@@ -283,12 +437,14 @@ router.post("/hints", async (req, res) => {
 // Spend streak coins in the student reward shop.
 router.post("/coins/spend", async (req, res) => {
   const item = String(req.body?.item || "").toLowerCase();
-  const prices = { heart: 5, hint: 10 };
-  if (!prices[item]) return res.status(400).json({ error: "item must be 'heart' or 'hint'" });
+  const reward = COIN_REWARDS[item];
+  if (!reward) {
+    return res.status(400).json({ error: "Choose a hint, Super Hearts, a streak freeze, or a heart." });
+  }
   const quantity = item === "heart"
     ? Math.max(1, Math.min(MAX_HEARTS, Math.floor(Number(req.body?.quantity) || 1)))
     : 1;
-  const price = prices[item] * quantity;
+  const price = reward.price * quantity;
 
   try {
     // Apply any due automatic refill before deciding whether another heart can
@@ -301,12 +457,17 @@ router.post("/coins/spend", async (req, res) => {
         err.status = 404;
         throw err;
       }
-      if (isPremiumActive(user)) {
-        const err = new Error(`Your Unlimited plan already includes unlimited ${item === "heart" ? "hearts" : "hints"}.`);
+      const premium = isPremiumActive(user);
+      if (premium && (item === "heart" || item === "super_heart" || item === "hint")) {
+        const err = new Error(
+          item === "hint"
+            ? "Your Unlimited plan already includes unlimited hints."
+            : "Your Unlimited plan already includes unlimited hearts."
+        );
         err.status = 400;
         throw err;
       }
-      if (item === "heart" && user.hearts >= MAX_HEARTS) {
+      if ((item === "heart" || item === "super_heart") && user.hearts >= MAX_HEARTS) {
         const err = new Error("Your hearts are already full.");
         err.status = 400;
         throw err;
@@ -316,25 +477,39 @@ router.post("/coins/spend", async (req, res) => {
         err.status = 400;
         throw err;
       }
+      if (item === "streak_freeze" && (user.streakFreezes || 0) >= MAX_STREAK_FREEZES) {
+        const err = new Error(`You can hold up to ${MAX_STREAK_FREEZES} streak freezes.`);
+        err.status = 400;
+        throw err;
+      }
 
-      const data = item === "heart"
-        ? { coins: { decrement: price }, hearts: { increment: quantity }, heartsDepletedAt: null }
-        : { coins: { decrement: price }, bonusHints: { increment: 1 } };
-      const spent = await tx.user.updateMany({
-        where: {
-          id: req.user.id,
-          coins: { gte: price },
-          ...(item === "heart" ? { hearts: { lte: MAX_HEARTS - quantity } } : {}),
-        },
-        data,
-      });
+      const data = { coins: { decrement: price } };
+      const where = { id: req.user.id, coins: { gte: price } };
+      if (item === "heart") {
+        data.hearts = { increment: quantity };
+        data.heartsDepletedAt = null;
+        where.hearts = { lte: MAX_HEARTS - quantity };
+      } else if (item === "super_heart") {
+        data.hearts = MAX_HEARTS;
+        data.heartsDepletedAt = null;
+        where.hearts = { lt: MAX_HEARTS };
+      } else if (item === "hint") {
+        data.bonusHints = { increment: 1 };
+      } else if (item === "streak_freeze") {
+        data.streakFreezes = { increment: 1 };
+        where.streakFreezes = { lt: MAX_STREAK_FREEZES };
+      }
+
+      const spent = await tx.user.updateMany({ where, data });
       if (spent.count === 0) {
         const current = await tx.user.findUnique({ where: { id: req.user.id } });
-        const err = new Error(
-          item === "heart" && current.hearts >= MAX_HEARTS
-            ? "Your hearts are already full."
-            : `You need ${price} coins to buy this reward.`
-        );
+        let message = `You need ${price} coins to buy this reward.`;
+        if ((item === "heart" || item === "super_heart") && current.hearts >= MAX_HEARTS) {
+          message = "Your hearts are already full.";
+        } else if (item === "streak_freeze" && (current.streakFreezes || 0) >= MAX_STREAK_FREEZES) {
+          message = `You can hold up to ${MAX_STREAK_FREEZES} streak freezes.`;
+        }
+        const err = new Error(message);
         err.status = 400;
         throw err;
       }
@@ -354,8 +529,9 @@ router.post("/coins/spend", async (req, res) => {
       hearts: updated.hearts,
       hints: updated.hints + updated.bonusHints,
       bonusHints: updated.bonusHints,
+      streakFreezes: updated.streakFreezes || 0,
       heartsBlocked: updated.hearts <= 0,
-      heartsRefillAt: item === "heart" || updated.hearts > 0 ? null : heartsRefillAtFrom(updated),
+      heartsRefillAt: item === "heart" || item === "super_heart" || updated.hearts > 0 ? null : heartsRefillAtFrom(updated),
       item,
       quantity,
       cost: price,
@@ -471,6 +647,7 @@ router.get("/progress", async (req, res) => {
       xp: user.xp,
       hearts: user.hearts,
       coins: user.coins,
+      streakFreezes: user.streakFreezes || 0,
       hints: user.hints + user.bonusHints,
       totalXpEarned: user.totalXpEarned,
       correctAnswers: user.correctAnswers,
@@ -478,6 +655,8 @@ router.get("/progress", async (req, res) => {
       challengesCompleted: user.challengesCompleted,
       heartsBlocked: !isPremiumActive(user) && user.hearts <= 0,
       heartsRefillAt: !isPremiumActive(user) && user.hearts <= 0 ? heartsRefillAtFrom(user) : null,
+      unlimitedHearts: isPremiumActive(user),
+      unlimitedHints: isPremiumActive(user),
     },
     level: {
       current: user.currentLevel,

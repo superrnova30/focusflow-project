@@ -54,51 +54,164 @@ function publicNoteSelect() {
   };
 }
 
+async function loadViewerSchool(userId) {
+  const me = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      school: true,
+      schoolId: true,
+      schoolRecord: { select: { id: true, name: true, location: true, logoUrl: true, type: true, status: true } },
+    },
+  });
+  return me;
+}
+
+function schoolPeopleFilter(viewer) {
+  if (viewer?.schoolId) return { schoolId: viewer.schoolId };
+  const school = normalizeSchool(viewer?.schoolRecord?.name || viewer?.school);
+  if (school) return { school: { equals: school, mode: "insensitive" } };
+  return null;
+}
+
+function withFollowFlags(rows, followingIds) {
+  return (rows || []).map((row) => ({
+    ...row,
+    isFollowing: followingIds.has(row.id),
+  }));
+}
+
 router.get("/discover", async (req, res) => {
   try {
     const query = String(req.query.q || "").trim();
-    const school = normalizeSchool(req.query.school);
-    const take = Math.min(40, Math.max(8, Number(req.query.take) || 20));
+    const take = Math.min(80, Math.max(20, Number(req.query.take) || 50));
+    const viewer = await loadViewerSchool(req.user.id);
     const following = await prisma.follow.findMany({
       where: { followerId: req.user.id },
       select: { followingId: true },
     });
-    const excludeIds = [req.user.id, ...following.map((row) => row.followingId)];
-    const where = {
-      role: "STUDENT",
-      status: "ACTIVE",
-      id: { notIn: excludeIds },
-    };
+    const followingIds = following.map((row) => row.followingId);
+    const followingSet = new Set(followingIds);
+    const excludeIds = [...new Set([req.user.id, ...followingIds].filter(Boolean))];
+    const schoolName = normalizeSchool(viewer?.schoolRecord?.name || viewer?.school);
+    const schoolFilter = schoolPeopleFilter(viewer);
+
     if (query) {
-      where.OR = [
-        { name: { contains: query, mode: "insensitive" } },
-        { school: { contains: query, mode: "insensitive" } },
-        { course: { contains: query, mode: "insensitive" } },
-      ];
-    } else if (school) {
-      where.school = { equals: school, mode: "insensitive" };
+      const students = await prisma.user.findMany({
+        where: {
+          role: "STUDENT",
+          status: "ACTIVE",
+          id: { not: req.user.id },
+          name: { contains: query, mode: "insensitive" },
+        },
+        select: studentCardSelect(),
+        orderBy: [{ xp: "desc" }, { name: "asc" }],
+        take,
+      });
+      return res.json({
+        school: schoolName,
+        schoolRecord: viewer?.schoolRecord || null,
+        results: withFollowFlags(students, followingSet),
+        friendsOfFriends: [],
+        schoolPeople: [],
+        students: withFollowFlags(students, followingSet),
+      });
     }
 
-    const students = await prisma.user.findMany({
-      where,
-      select: studentCardSelect(),
-      orderBy: [{ xp: "desc" }, { name: "asc" }],
-      take,
+    const friendIds = followingIds;
+    let friendsOfFriends = [];
+    if (friendIds.length) {
+      const foafRows = await prisma.follow.findMany({
+        where: {
+          followerId: { in: friendIds },
+          followingId: { notIn: excludeIds },
+        },
+        select: { followingId: true, followerId: true },
+        take: 400,
+      });
+      const scores = new Map();
+      foafRows.forEach((row) => {
+        if (!row.followingId || row.followingId === req.user.id || followingSet.has(row.followingId)) return;
+        scores.set(row.followingId, (scores.get(row.followingId) || 0) + 1);
+      });
+      const rankedIds = [...scores.entries()]
+        .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+        .slice(0, take)
+        .map(([id]) => id);
+      if (rankedIds.length) {
+        const people = await prisma.user.findMany({
+          where: {
+            role: "STUDENT",
+            status: "ACTIVE",
+            id: { in: rankedIds },
+          },
+          select: studentCardSelect(),
+        });
+        const byId = new Map(people.map((row) => [row.id, row]));
+        friendsOfFriends = rankedIds.map((id) => byId.get(id)).filter(Boolean);
+      }
+    }
+
+    let schoolPeople = [];
+    if (schoolFilter) {
+      schoolPeople = await prisma.user.findMany({
+        where: {
+          role: "STUDENT",
+          status: "ACTIVE",
+          ...schoolFilter,
+          id: { notIn: excludeIds },
+        },
+        select: studentCardSelect(),
+        orderBy: [{ xp: "desc" }, { name: "asc" }],
+        take,
+      });
+    }
+
+    // Prefer school classmates in their own section; keep FoF free of those duplicates.
+    const schoolIdSet = new Set(schoolPeople.map((row) => row.id));
+    friendsOfFriends = friendsOfFriends.filter((row) => row?.id && !schoolIdSet.has(row.id));
+
+    res.json({
+      school: schoolName,
+      schoolRecord: viewer?.schoolRecord || null,
+      results: [],
+      friendsOfFriends: withFollowFlags(friendsOfFriends, followingSet),
+      schoolPeople: withFollowFlags(schoolPeople, followingSet),
+      students: withFollowFlags([...friendsOfFriends, ...schoolPeople], followingSet),
     });
-    res.json({ students });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Could not find students" });
   }
 });
 
+function schoolmatesWhere(user, query = {}) {
+  const requestedId = String(query.schoolId || "").trim();
+  if (requestedId) return { schoolId: requestedId };
+  const requestedName = normalizeSchool(query.name);
+  if (requestedName) return { school: { equals: requestedName, mode: "insensitive" } };
+  if (user?.schoolId) return { schoolId: user.schoolId };
+  const school = normalizeSchool(user?.school);
+  if (school) return { school: { equals: school, mode: "insensitive" } };
+  return null;
+}
+
 router.get("/school", async (req, res) => {
   try {
-    const school = normalizeSchool(req.query.name || req.user.school);
-    if (!school) return res.json({ school: "", decks: [], notes: [], leaderboard: [] });
+    const filter = schoolmatesWhere(req.user, req.query);
+    if (!filter) return res.json({ school: "", schoolRecord: null, decks: [], notes: [], leaderboard: [] });
+
+    const schoolInclude = { include: { _count: { select: { students: true } } } };
+    const record = filter.schoolId
+      ? await prisma.school.findUnique({ where: { id: filter.schoolId }, ...schoolInclude })
+      : await prisma.school.findFirst({
+          where: { name: { equals: filter.school?.equals || "", mode: "insensitive" } },
+          ...schoolInclude,
+        });
+    const school = record?.name || normalizeSchool(req.query.name || req.user.school);
 
     const students = await prisma.user.findMany({
-      where: { role: "STUDENT", status: "ACTIVE", school: { equals: school, mode: "insensitive" } },
+      where: { role: "STUDENT", status: "ACTIVE", ...filter },
       select: { ...studentCardSelect(), createdAt: true },
       orderBy: [{ xp: "desc" }, { streakCount: "desc" }],
     });
@@ -120,8 +233,10 @@ router.get("/school", async (req, res) => {
         ])
       : [[], []];
 
+    const { serializeSchool } = require("../lib/schools");
     res.json({
       school,
+      schoolRecord: serializeSchool(record),
       decks: sortPopularDecks(decks),
       notes,
       leaderboard: students.map((student, index) => ({ rank: index + 1, ...student })),
@@ -192,11 +307,12 @@ router.get("/:userId/feed", async (req, res) => {
   try {
     const student = await prisma.user.findFirst({
       where: { id: req.params.userId, role: "STUDENT", status: "ACTIVE" },
-      select: { id: true, school: true, name: true },
+      select: { id: true, school: true, schoolId: true, name: true, schoolRecord: true },
     });
     if (!student) return res.status(404).json({ error: "Student not found" });
 
     const viewerId = req.user.id;
+    const schoolFilter = schoolmatesWhere(student);
     const school = normalizeSchool(student.school);
     const followingRows = await prisma.follow.findMany({
       where: { followerId: viewerId },
@@ -214,24 +330,25 @@ router.get("/:userId/feed", async (req, res) => {
             take: 10,
           })
         : [],
-      school
+      schoolFilter
         ? prisma.user.findMany({
             where: {
               role: "STUDENT",
               status: "ACTIVE",
-              school: { equals: school, mode: "insensitive" },
-              id: { not: student.id },
+              ...schoolFilter,
+              // Never include the profile owner or the signed-in viewer (so you can't follow yourself).
+              id: { notIn: [...new Set([student.id, viewerId].filter(Boolean))] },
             },
             select: studentCardSelect(),
             orderBy: [{ xp: "desc" }],
             take: 12,
           })
         : [],
-      school
+      schoolFilter
         ? prisma.flashcardCollection.findMany({
             where: {
               isPublic: true,
-              user: { school: { equals: school, mode: "insensitive" }, role: "STUDENT", status: "ACTIVE" },
+              user: { ...schoolFilter, role: "STUDENT", status: "ACTIVE" },
             },
             select: publicDeckSelect(),
             orderBy: { createdAt: "desc" },
@@ -266,8 +383,10 @@ router.get("/:userId/feed", async (req, res) => {
       suggestions = [...suggestions, ...extra];
     }
 
+    const { serializeSchool } = require("../lib/schools");
     res.json({
       school,
+      schoolRecord: serializeSchool(student.schoolRecord),
       friendsLeaderboard: friends.map((row, index) => ({ rank: index + 1, ...row })),
       schoolmates: schoolmates.map((row) => ({ ...row, isFollowing: followingIds.has(row.id) })),
       suggestions: suggestions.map((row) => ({ ...row, isFollowing: followingIds.has(row.id) })),

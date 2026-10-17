@@ -47,7 +47,7 @@ export default function CoinBalance({ compact: compactProp, onPress }) {
     <Pressable
       onPress={handlePress}
       accessibilityRole="button"
-      accessibilityLabel={`${coins} coins. Open Progress to spend or review your balance.`}
+      accessibilityLabel={`${coins} coins. Open the shop.`}
       style={({ pressed }) => [styles.chip, pressed && styles.pressed]}
     >
       <View style={styles.iconWrap}>

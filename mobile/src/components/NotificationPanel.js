@@ -14,8 +14,10 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "../context/ThemeContext";
+import { useAuth } from "../context/AuthContext";
 import { useNotifications } from "../context/NotificationContext";
 import UserAvatar from "./UserAvatar";
+import { navigationRef } from "../lib/navigationRef";
 import {
   formatWhen,
   getNotificationDisplay,
@@ -105,10 +107,12 @@ function NotificationRow({ item, expanded, onPress, colors, compact, actionable,
 
 export default function NotificationPanel() {
   const { colors } = useTheme();
+  const { user } = useAuth();
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const isWide = width >= 720;
   const compact = width < 380;
+  const isAdmin = user?.role === "ADMIN";
   const {
     items,
     unreadCount,
@@ -121,6 +125,8 @@ export default function NotificationPanel() {
     markRead,
   } = useNotifications();
 
+  const previewItems = isAdmin ? items.slice(0, 8) : items;
+
   const handleRowPress = (item) => {
     if (!item?.id) return;
     if (item.unread) markRead(item.id);
@@ -129,6 +135,16 @@ export default function NotificationPanel() {
       return;
     }
     selectNotification(item);
+  };
+
+  const handleViewAll = () => {
+    closePanel();
+    if (!navigationRef.isReady()) return;
+    try {
+      navigationRef.navigate("Overview", { screen: "AdminNotifications" });
+    } catch {
+      // Overview stack unavailable — ignore.
+    }
   };
 
   const opacity = useRef(new Animated.Value(0)).current;
@@ -220,8 +236,21 @@ export default function NotificationPanel() {
               </View>
               <Text style={[styles.emptyTitle, { color: colors.text }]}>No notifications yet</Text>
               <Text style={[styles.emptyCopy, { color: colors.textMuted }]}>
-                Follows, likes, quizzes, and important updates will show up here.
+                {isAdmin
+                  ? "Support alerts and platform updates will show up here."
+                  : "Follows, likes, quizzes, and important updates will show up here."}
               </Text>
+              {isAdmin ? (
+                <Pressable
+                  onPress={handleViewAll}
+                  style={[styles.viewAllBtn, { backgroundColor: colors.violetSoft }]}
+                  accessibilityRole="button"
+                  accessibilityLabel="View all notifications and activity"
+                >
+                  <Text style={[styles.viewAllText, { color: colors.violet }]}>View all activity</Text>
+                  <Ionicons name="arrow-forward" size={14} color={colors.violet} />
+                </Pressable>
+              ) : null}
             </View>
           ) : (
             <ScrollView
@@ -230,7 +259,7 @@ export default function NotificationPanel() {
               showsVerticalScrollIndicator={false}
             >
               <View style={[styles.groupCard, { backgroundColor: colors.bg, borderColor: colors.border }]}>
-                {items.map((item, index) => (
+                {previewItems.map((item, index) => (
                   <View key={item.id}>
                     {index > 0 ? <View style={[styles.divider, { backgroundColor: colors.border }]} /> : null}
                     <NotificationRow
@@ -245,6 +274,22 @@ export default function NotificationPanel() {
                   </View>
                 ))}
               </View>
+              {isAdmin ? (
+                <Pressable
+                  onPress={handleViewAll}
+                  style={[styles.viewAllRow, { borderColor: colors.border, backgroundColor: colors.surface }]}
+                  accessibilityRole="button"
+                  accessibilityLabel="View all notifications and activity logs"
+                >
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={[styles.viewAllTitle, { color: colors.text }]}>View all</Text>
+                    <Text style={[styles.viewAllSub, { color: colors.textMuted }]}>
+                      Full alerts feed and activity logs
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+                </Pressable>
+              ) : null}
             </ScrollView>
           )}
         </Animated.View>
@@ -356,4 +401,26 @@ const styles = StyleSheet.create({
   },
   emptyTitle: { fontSize: 15, fontWeight: "800" },
   emptyCopy: { fontSize: 12.5, lineHeight: 18, textAlign: "center", marginTop: 6, maxWidth: 240 },
+  viewAllBtn: {
+    marginTop: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: RADIUS.pill,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
+  viewAllText: { fontSize: 13, fontWeight: "800" },
+  viewAllRow: {
+    marginTop: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
+  viewAllTitle: { fontSize: 13.5, fontWeight: "800" },
+  viewAllSub: { fontSize: 11.5, fontWeight: "500", marginTop: 1 },
 });

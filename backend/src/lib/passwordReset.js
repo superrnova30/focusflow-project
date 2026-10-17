@@ -36,6 +36,13 @@ function wasResetCodeSentRecently(user) {
   return elapsed >= 0 && elapsed < RESET_RESEND_COOLDOWN_MS;
 }
 
+function resetResendWaitSeconds(user) {
+  if (!wasResetCodeSentRecently(user)) return 0;
+  const remaining = new Date(user.passwordResetExpires).getTime() - Date.now();
+  const elapsed = RESET_CODE_TTL_MS - remaining;
+  return Math.max(1, Math.ceil((RESET_RESEND_COOLDOWN_MS - elapsed) / 1000));
+}
+
 async function clearPasswordReset(userId) {
   await prisma.user.update({
     where: { id: userId },
@@ -60,11 +67,25 @@ async function issuePasswordResetEmail(user, { initiatedBy = "self", ignoreCoold
 
   const email = String(user.email).trim().toLowerCase();
   const code = generateResetCode();
+  const expiresAt = new Date(Date.now() + RESET_CODE_TTL_MS);
+  const codeHash = hashResetCode(email, code);
+
+  // Persist the code before sending email so a delivered code always matches the DB
+  // (avoids race/failure where email sends but the update never commits).
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      passwordResetCodeHash: codeHash,
+      passwordResetExpires: expiresAt,
+      passwordResetAttempts: 0,
+    },
+  });
 
   try {
     await sendPasswordResetEmailMessage(email, code, { initiatedBy });
   } catch (err) {
     console.error("Failed to send password reset email:", err.message || err);
+    await clearPasswordReset(user.id).catch(() => {});
     const error = new Error(
       isEmailConfigured()
         ? "We couldn't send the verification code right now. Please try again in a moment."
@@ -73,15 +94,6 @@ async function issuePasswordResetEmail(user, { initiatedBy = "self", ignoreCoold
     error.status = 503;
     throw error;
   }
-
-  await prisma.user.update({
-    where: { id: user.id },
-    data: {
-      passwordResetCodeHash: hashResetCode(email, code),
-      passwordResetExpires: new Date(Date.now() + RESET_CODE_TTL_MS),
-      passwordResetAttempts: 0,
-    },
-  });
 
   await prisma.activityLog.create({
     data: {
@@ -102,6 +114,7 @@ module.exports = {
   resetCodesMatch,
   isResetCodeValid,
   wasResetCodeSentRecently,
+  resetResendWaitSeconds,
   clearPasswordReset,
   issuePasswordResetEmail,
 };

@@ -11,6 +11,7 @@ router.get("/", async (req, res) => {
     where: { ownerId: req.user.id, archived },
     orderBy: { createdAt: "desc" },
   });
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate");
   res.json({ subjects });
 });
 

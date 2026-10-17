@@ -20,7 +20,7 @@ export function NotificationProvider({ children }) {
   useEffect(() => () => { mountedRef.current = false; }, []);
 
   const refresh = useCallback(async () => {
-    if (!user?.id || user.role === "ADMIN") {
+    if (!user?.id) {
       setItems([]);
       setUnreadCount(0);
       return null;
@@ -37,10 +37,10 @@ export function NotificationProvider({ children }) {
     } catch {
       return null;
     }
-  }, [user?.id, user?.role]);
+  }, [user?.id]);
 
   const refreshUnread = useCallback(async () => {
-    if (!user?.id || user.role === "ADMIN") {
+    if (!user?.id) {
       setUnreadCount(0);
       return 0;
     }
@@ -59,15 +59,15 @@ export function NotificationProvider({ children }) {
     } catch {
       return 0;
     }
-  }, [user?.id, user?.role, refresh]);
+  }, [user?.id, refresh]);
 
   useEffect(() => {
-    if (!panelOpen || !user?.id || user.role === "ADMIN") return undefined;
+    if (!panelOpen || !user?.id) return undefined;
     const interval = setInterval(() => {
       refresh().catch(() => {});
     }, POLL_PANEL_MS);
     return () => clearInterval(interval);
-  }, [panelOpen, user?.id, user?.role, refresh]);
+  }, [panelOpen, user?.id, refresh]);
 
   const markRead = useCallback(async (id) => {
     if (!id) return null;
@@ -119,7 +119,7 @@ export function NotificationProvider({ children }) {
   }, [refresh]);
 
   useEffect(() => {
-    if (!user?.id || user.role === "ADMIN") {
+    if (!user?.id) {
       setItems([]);
       setUnreadCount(0);
       return undefined;
@@ -141,7 +141,7 @@ export function NotificationProvider({ children }) {
       clearInterval(interval);
       sub.remove();
     };
-  }, [user?.id, user?.role, refresh, refreshUnread]);
+  }, [user?.id, refresh, refreshUnread]);
 
   return (
     <NotificationContext.Provider

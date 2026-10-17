@@ -54,6 +54,7 @@ export default function ForgotPasswordScreen({ navigation }) {
   const [resendAt, setResendAt] = useState(0);
   const [now, setNow] = useState(Date.now());
   const [keyboardInset, setKeyboardInset] = useState(0);
+  const [showSignupOffer, setShowSignupOffer] = useState(false);
 
   const passwordRef = useRef(null);
   const confirmRef = useRef(null);
@@ -84,6 +85,7 @@ export default function ForgotPasswordScreen({ navigation }) {
   const sendCode = async () => {
     setError(null);
     setInfo("");
+    setShowSignupOffer(false);
     if (!normalizedEmail) {
       setError("Enter the email address linked to your account.");
       return;
@@ -94,13 +96,31 @@ export default function ForgotPasswordScreen({ navigation }) {
     }
     setLoading(true);
     try {
-      await requestPasswordReset(normalizedEmail);
-      setInfo("If this email is registered, a 6-digit code is on its way.");
-      setResendAt(Date.now());
+      const result = await requestPasswordReset(normalizedEmail);
+      if (result?.recentlySent) {
+        setInfo(
+          result.message ||
+            "A reset code was sent recently. Check your inbox and spam folder before requesting another."
+        );
+      } else {
+        setInfo(
+          result?.message ||
+            "A 6-digit code is on its way. Check spam if you do not see it within a few minutes."
+        );
+      }
+      if (result?.retryAfterSec) {
+        setResendAt(Date.now() - (RESEND_COOLDOWN_MS - result.retryAfterSec * 1000));
+      } else {
+        setResendAt(Date.now());
+      }
       setCode("");
       setStep("code");
     } catch (e) {
       setError(e.message || "Unable to send a verification code right now.");
+      if (e.code === "ACCOUNT_NOT_FOUND") {
+        setShowSignupOffer(true);
+        setStep("email");
+      }
     } finally {
       setLoading(false);
     }
@@ -161,7 +181,7 @@ export default function ForgotPasswordScreen({ navigation }) {
     },
     code: {
       title: "Enter the code",
-      subtitle: `We sent a 6-digit code to ${normalizedEmail}. It expires in 15 minutes.`,
+      subtitle: `We sent a 6-digit code to ${normalizedEmail}. It expires in 15 minutes. Check spam or Promotions if it is not in your inbox.`,
     },
     password: {
       title: "Create a new password",
@@ -356,6 +376,15 @@ export default function ForgotPasswordScreen({ navigation }) {
                   <Ionicons name="alert-circle" size={16} color={ERROR_COLOR} />
                   <Text style={styles.errorText}>{error}</Text>
                 </View>
+              ) : null}
+
+              {showSignupOffer && step === "email" ? (
+                <Pressable
+                  onPress={() => navigation.navigate("Signup", { email: normalizedEmail })}
+                  style={({ pressed }) => [styles.secondaryLink, pressed && styles.pressed]}
+                >
+                  <Text style={styles.textLinkAccent}>Create an account with this email</Text>
+                </Pressable>
               ) : null}
 
             {step === "email" ? (
