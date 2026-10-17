@@ -170,7 +170,7 @@ router.post("/send-test", async (req, res) => {
     const result = await sendExpoPush(
       tokens.map((t) => t.token),
       {
-        title: title || "FocusFlow test",
+        title: title || "PomodAI test",
         body: body || "Your device is successfully registered! 🎉",
         data: { type: "test" },
       }

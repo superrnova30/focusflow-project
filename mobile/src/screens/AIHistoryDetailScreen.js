@@ -62,7 +62,7 @@ function MessageBubble({ message, colors, isWide, index, user }) {
           ]}
         >
           <Text style={[styles.bubbleRole, { color: isUser ? 'rgba(255,255,255,0.82)' : colors.textMuted }]}>
-            {isUser ? 'You' : 'FocusFlow AI'}
+            {isUser ? 'You' : 'PomodAI AI'}
           </Text>
           <Text style={[styles.bubbleText, { color: isUser ? '#fff' : colors.text }]}>{message.content}</Text>
         </View>
@@ -133,7 +133,7 @@ export default function AIHistoryDetailScreen({ navigation, route }) {
 
   const copyTranscript = useCallback(() => {
     const text = messages
-      .map((m) => `${m.role === 'user' ? 'You' : 'FocusFlow AI'}: ${m.content}`)
+      .map((m) => `${m.role === 'user' ? 'You' : 'PomodAI AI'}: ${m.content}`)
       .join('\n\n');
     try {
       if (Clipboard && typeof Clipboard.setString === 'function') {

@@ -178,10 +178,10 @@ async function createInvoice({
     external_id: externalId,
     amount: price,
     currency: curr,
-    description: description || `FocusFlow Go Unlimited — ${plan.plan} (${user.email})`,
+    description: description || `PomodAI Go Unlimited — ${plan.plan} (${user.email})`,
     payer_email: user.email,
     customer: {
-      given_names: user.name || 'FocusFlow Student',
+      given_names: user.name || 'PomodAI Student',
       email: user.email,
     },
     success_redirect_url: successUrl,

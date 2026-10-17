@@ -134,12 +134,12 @@ router.post("/coins/checkout", async (req, res) => {
         externalId,
         amount: pack.amount,
         currency: pack.currency,
-        description: `FocusFlow ${pack.name} — ${pack.coins} coins (GCash)`,
+        description: `PomodAI ${pack.name} — ${pack.coins} coins (GCash)`,
         successUrl: buildReturnUrl("success"),
         failureUrl: buildReturnUrl("failure"),
         items: [
           {
-            name: `${pack.coins} FocusFlow coins`,
+            name: `${pack.coins} PomodAI coins`,
             quantity: 1,
             price: pack.amount,
             category: "Digital goods",

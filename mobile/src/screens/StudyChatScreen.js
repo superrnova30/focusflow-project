@@ -33,7 +33,7 @@ function MessageBubble({ item, isMine, colors, isWide, user }) {
 
       <View style={[styles.bubbleWrap, { maxWidth: isWide ? '72%' : '82%' }, isMine ? styles.userWrap : styles.assistantWrap]}>
         <View style={[styles.bubble, bubbleStyle, isMine ? styles.mine : styles.theirs]}>
-          {!isMine && <Text style={[styles.metaText, { color: colors.textMuted }]}>FocusFlow AI</Text>}
+          {!isMine && <Text style={[styles.metaText, { color: colors.textMuted }]}>PomodAI AI</Text>}
           <Text style={[styles.messageText, { color: isMine ? '#FFFFFF' : colors.text }]}>{item.content}</Text>
         </View>
       </View>
@@ -129,7 +129,7 @@ export default function StudyChatScreen({ navigation, route }) {
             {isResumedConversation
               ? 'Continuing saved conversation'
               : user?.name
-                ? `${user.name.split(' ')[0]} · FocusFlow AI`
+                ? `${user.name.split(' ')[0]} · PomodAI AI`
                 : 'Study assistant'}
           </Text>
         </View>

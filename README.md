@@ -1,6 +1,6 @@
-# FocusFlow — React Native + Node.js + PostgreSQL
+# PomodAI — React Native + Node.js + PostgreSQL
 
-This is the converted, real-stack version of the FocusFlow prototype:
+This is the converted, real-stack version of the PomodAI prototype:
 **React Native (Expo)** frontend, **Node.js/Express** backend, **PostgreSQL** database via **Prisma**.
 
 ```
@@ -94,7 +94,7 @@ Start the API:
 npm run dev
 ```
 
-You should see `FocusFlow API listening on http://localhost:4000`.
+You should see `PomodAI API listening on http://localhost:4000`.
 Verify with `curl http://localhost:4000/health`.
 
 **Demo credentials after seeding:**

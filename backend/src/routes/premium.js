@@ -180,7 +180,7 @@ router.post('/checkout', requireAuth, async (req, res) => {
       invoice = await xendit.createInvoice({
         user,
         externalId,
-        description: `FocusFlow Go Unlimited — ${durationDays} days`,
+        description: `PomodAI Go Unlimited — ${durationDays} days`,
         successUrl: buildReturnUrl('success'),
         failureUrl: buildReturnUrl('failure'),
       });

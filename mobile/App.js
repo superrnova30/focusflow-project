@@ -4,9 +4,16 @@ import { navigationRef } from "./src/lib/navigationRef";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { StatusBar } from "expo-status-bar";
-import { AppState, View, ActivityIndicator, Text, Pressable } from "react-native";
+import { AppState, View, ActivityIndicator, Text, Pressable, LogBox } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
+
+// Expo Go SDK 53+ still warns that remote push was removed; local notifications work.
+LogBox.ignoreLogs([
+  "expo-notifications: Android Push notifications",
+  "was removed from Expo Go with the release of SDK 53",
+  "Use a development build instead of Expo Go",
+]);
 
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
 import { ThemeProvider, useTheme } from "./src/context/ThemeContext";
@@ -83,7 +90,7 @@ function MaintenanceScreen() {
           System Maintenance
         </Text>
         <Text style={{ color: colors.textMuted, fontSize: 14, lineHeight: 22, textAlign: "center" }}>
-          FocusFlow is temporarily unavailable while the admin performs maintenance. Please try again later.
+          PomodAI is temporarily unavailable while the admin performs maintenance. Please try again later.
         </Text>
       </View>
     </View>
@@ -379,7 +386,7 @@ class ErrorBoundary extends React.Component {
     if (!this.state.hasError) return this.props.children;
     return (
       <View style={{ flex: 1, backgroundColor: "#0E1220", justifyContent: "center", alignItems: "center", padding: 24 }}>
-        <Text style={{ color: "#F5F3EE", fontSize: 18, fontWeight: "700", marginBottom: 12 }}>FocusFlow hit a snag</Text>
+        <Text style={{ color: "#F5F3EE", fontSize: 18, fontWeight: "700", marginBottom: 12 }}>PomodAI hit a snag</Text>
         <Text style={{ color: "#8A8FA3", textAlign: "center", marginBottom: 16 }}>
           {this.state.error?.message || "An unexpected error occurred."}
         </Text>

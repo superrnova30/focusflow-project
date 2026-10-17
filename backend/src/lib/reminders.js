@@ -207,7 +207,7 @@ function buildReminderMessage(user) {
   if (streak > 0) parts.push(`You're on a ${streak}-day streak 🔥`);
   parts.push("Time for today's study session!");
   return {
-    title: "📚 FocusFlow study reminder",
+    title: "📚 PomodAI study reminder",
     body: parts.join(" "),
     data: { type: "daily_reminder" },
   };

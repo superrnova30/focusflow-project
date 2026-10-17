@@ -159,14 +159,14 @@ export default function LoginScreen({ navigation }) {
                         resizeMode="contain"
                       />
                     </View>
-                    <Text style={styles.mobileBrandName}>FocusFlow</Text>
+                    <Text style={styles.mobileBrandName}>PomodAI</Text>
                   </View>
                 )}
 
                 <View style={styles.headingRow}>
                   <View style={styles.headingCopy}>
                     <Text style={styles.eyebrow}>WELCOME BACK</Text>
-                    <Text style={styles.title}>Sign in to FocusFlow</Text>
+                    <Text style={styles.title}>Sign in to PomodAI</Text>
                     <Text style={styles.subtitle}>
                       Continue your study journey and pick up where you left off.
                     </Text>

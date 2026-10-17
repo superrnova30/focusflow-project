@@ -94,7 +94,7 @@ async function sendViaResend({ to, subject, html, text }) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      from: process.env.EMAIL_FROM || "FocusFlow <onboarding@resend.dev>",
+      from: process.env.EMAIL_FROM || "PomodAI <onboarding@resend.dev>",
       to: [to],
       subject,
       html,
@@ -131,7 +131,7 @@ async function sendEmail({ to, subject, html, text }) {
     throw new Error("Email delivery is not configured on this server");
   }
   const info = await transporter.sendMail({
-    from: `"FocusFlow" <${fromAddress}>`,
+    from: `"PomodAI" <${fromAddress}>`,
     replyTo: fromAddress,
     to: String(to || "").trim(),
     subject,
@@ -154,19 +154,19 @@ async function sendEmail({ to, subject, html, text }) {
 
 function verificationEmailContent(code) {
   const frontend = (process.env.FRONTEND_URL || "http://localhost:8081").replace(/\/$/, "");
-  const subject = "Your FocusFlow email verification code";
+  const subject = "Your PomodAI email verification code";
   const text = [
-    "Welcome to FocusFlow!",
+    "Welcome to PomodAI!",
     "",
     `Your verification code is: ${code}`,
     "",
     "Enter this code in the app to verify your email. The code expires in 15 minutes.",
     "",
-    `Open FocusFlow: ${frontend}`,
+    `Open PomodAI: ${frontend}`,
   ].join("\n");
   const html = `
     <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827;max-width:520px">
-      <h2 style="margin:0 0 12px">Verify your FocusFlow email</h2>
+      <h2 style="margin:0 0 12px">Verify your PomodAI email</h2>
       <p style="margin:0 0 16px">Enter this code in the app to finish creating your account:</p>
       <div style="font-size:32px;font-weight:800;letter-spacing:6px;padding:16px 20px;background:#F0ECFF;border-radius:12px;display:inline-block;color:#6C5CE7">
         ${code}
@@ -184,18 +184,18 @@ async function sendVerificationEmailMessage(email, code) {
 
 function passwordResetEmailContent(code, { initiatedBy = "self" } = {}) {
   const adminRequested = initiatedBy === "admin";
-  const subject = "Your FocusFlow password reset code";
+  const subject = "Your PomodAI password reset code";
   const intro = adminRequested
-    ? "An administrator requested a password reset for your FocusFlow account."
-    : "Use this verification code to choose a new FocusFlow password.";
+    ? "An administrator requested a password reset for your PomodAI account."
+    : "Use this verification code to choose a new PomodAI password.";
   const steps = [
-    "1. Open FocusFlow and tap Forgot password.",
+    "1. Open PomodAI and tap Forgot password.",
     "2. Enter this email address.",
     "3. Tap “I already have a code”, then enter the code below.",
     "4. Create and confirm your new password.",
   ];
   const text = [
-    "Reset your FocusFlow password",
+    "Reset your PomodAI password",
     "",
     intro,
     "",
@@ -210,14 +210,14 @@ function passwordResetEmailContent(code, { initiatedBy = "self" } = {}) {
   ].join("\n");
   const html = `
     <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827;max-width:520px">
-      <h2 style="margin:0 0 12px">Reset your FocusFlow password</h2>
+      <h2 style="margin:0 0 12px">Reset your PomodAI password</h2>
       <p style="margin:0 0 16px">${intro}</p>
       <div style="font-size:32px;font-weight:800;letter-spacing:6px;padding:16px 20px;background:#F0ECFF;border-radius:12px;display:inline-block;color:#6C5CE7">
         ${code}
       </div>
       <p style="margin:16px 0 8px">Then finish the reset in the app:</p>
       <ol style="margin:0 0 16px;padding-left:20px;color:#374151;font-size:14px">
-        <li>Open FocusFlow and tap Forgot password.</li>
+        <li>Open PomodAI and tap Forgot password.</li>
         <li>Enter this email address.</li>
         <li>Tap “I already have a code”, then enter the code above.</li>
         <li>Create and confirm your new password.</li>

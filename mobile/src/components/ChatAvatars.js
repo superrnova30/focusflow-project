@@ -21,7 +21,7 @@ export function AiAssistantAvatar({ size = 28, style }) {
         { backgroundColor: colors.tomatoSoft, borderColor: colors.border },
         style,
       ]}
-      accessibilityLabel="FocusFlow AI assistant"
+      accessibilityLabel="PomodAI AI assistant"
     >
       <Image source={LOGO} style={{ width: size * 0.68, height: size * 0.68 }} resizeMode="contain" />
     </View>

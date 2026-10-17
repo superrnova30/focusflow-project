@@ -224,14 +224,14 @@ export default function HomeScreen({ navigation }) {
           <Pressable
             onPress={() => navigation.navigate("Home")}
             accessibilityRole="button"
-            accessibilityLabel="FocusFlow home"
+            accessibilityLabel="PomodAI home"
             style={({ pressed }) => [styles.brand, pressed && { opacity: 0.75 }]}
           >
             <View style={styles.navLogo}>
               <LogoMark size={34} />
             </View>
             <View>
-              <Text style={styles.brandName}>FocusFlow</Text>
+              <Text style={styles.brandName}>PomodAI</Text>
               {tablet && <Text style={styles.brandTagline}>AI study companion</Text>}
           </View>
           </Pressable>
@@ -425,7 +425,7 @@ export default function HomeScreen({ navigation }) {
             <Text style={styles.sectionEyebrow}>EVERYTHING IN ONE PLACE</Text>
             <Text style={styles.sectionTitle}>A calmer way to get more done</Text>
             <Text style={styles.sectionSubtitle}>
-              FocusFlow combines the tools students use every day into one clear, connected workflow.
+              PomodAI combines the tools students use every day into one clear, connected workflow.
             </Text>
           </View>
 
@@ -522,7 +522,7 @@ export default function HomeScreen({ navigation }) {
         <View style={styles.footer}>
           <View style={styles.footerBrand}>
             <LogoMark size={28} />
-            <Text style={styles.footerName}>FocusFlow</Text>
+            <Text style={styles.footerName}>PomodAI</Text>
           </View>
           <Text style={styles.footerText}>AI-powered focus tools made for students.</Text>
           <Text style={styles.footerMeta}>Make every minute count.</Text>

@@ -48,7 +48,7 @@ export default function GoUnlimitedCheckoutModal({
           </View>
           <Text style={[styles.title, { color: colors.text }]}>Go Unlimited checkout</Text>
           <Text style={[styles.body, { color: colors.textMuted }]}>
-            Pay securely on Xendit's page (GCash, Maya, cards, and other methods in Test Mode). FocusFlow
+            Pay securely on Xendit's page (GCash, Maya, cards, and other methods in Test Mode). PomodAI
             upgrades your account only after payment is verified on our server.
           </Text>
           {testMode && (

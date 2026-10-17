@@ -1,4 +1,4 @@
-# FocusFlow System Flowchart
+# PomodAI System Flowchart
 
 ```mermaid
 flowchart TD

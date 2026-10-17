@@ -126,7 +126,7 @@ async function detectLiveApiBaseUrlFast() {
       client.defaults.baseURL = url;
       if (typeof __DEV__ !== "undefined" && __DEV__) {
         // eslint-disable-next-line no-console
-        console.log("FocusFlow API resolved to:", url);
+        console.log("PomodAI API resolved to:", url);
       }
       resolve(url);
     };
@@ -272,7 +272,7 @@ function enqueueOfflineRequest(config) {
 
 const FRIENDLY_NETWORK_ERROR = "Unable to connect to the server. Please try again later.";
 const CHECKOUT_NETWORK_ERROR =
-  "Could not reach the FocusFlow server to start checkout. Check that the app API URL matches your backend port (often 4000 or 4001).";
+  "Could not reach the PomodAI server to start checkout. Check that the app API URL matches your backend port (often 4000 or 4001).";
 
 function formatApiError(err, config) {
   const status = err?.response?.status;

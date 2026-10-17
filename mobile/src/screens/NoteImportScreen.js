@@ -168,7 +168,7 @@ export default function NoteImportScreen({ navigation }) {
     setGenerating(true);
     setImportedNote(null);
     setProgressStep(source === "file" ? "Reading your document" : "Preparing your source");
-    setProgressHint(source === "file" ? "Extracting text and starting the note generator." : "Sending your topic to FocusFlow AI.");
+    setProgressHint(source === "file" ? "Extracting text and starting the note generator." : "Sending your topic to PomodAI AI.");
     try {
       let payload = { isPublic };
       if (source === "file") {

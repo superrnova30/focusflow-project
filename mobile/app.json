@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "FocusFlow",
+    "name": "PomodAI",
     "slug": "focusflow",
     "version": "1.0.0",
     "scheme": "focusflow",
@@ -16,7 +16,9 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.focusflow.app",
       "infoPlist": {
-        "UIBackgroundModes": ["remote-notification"]
+        "UIBackgroundModes": [
+          "remote-notification"
+        ]
       }
     },
     "android": {
@@ -24,7 +26,11 @@
       "softwareKeyboardLayoutMode": "pan",
       "adaptiveIcon": {
         "backgroundColor": "#0E1220"
-      }
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
       "bundler": "metro"
@@ -42,7 +48,10 @@
       ]
     ],
     "extra": {
-      "eas": {}
-    }
+      "eas": {
+        "projectId": "44ac4a45-7bc9-4090-a528-cbe7c0de4b89"
+      }
+    },
+    "owner": "lemonade404"
   }
 }

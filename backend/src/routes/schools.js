@@ -65,7 +65,7 @@ router.post("/request", requireRole("STUDENT"), async (req, res) => {
     if (duplicate) {
       if (duplicate.status === "APPROVED") {
         return res.status(409).json({
-          error: "That school is already in FocusFlow. Search for it instead.",
+          error: "That school is already in PomodAI. Search for it instead.",
           schoolId: duplicate.id,
         });
       }

@@ -139,7 +139,7 @@ export default function StudentProfileScreen({ route, navigation }) {
   const shareProfile = async () => {
     const origin = Platform.OS === "web" && typeof window !== "undefined" ? window.location.origin : "https://focusflow.app";
     const url = `${origin}/?profile=${profile.id}`;
-    const message = `Follow ${profile.name} on FocusFlow\n${url}`;
+    const message = `Follow ${profile.name} on PomodAI\n${url}`;
     try {
       await Share.share({ message, url, title: profile.name });
     } catch {

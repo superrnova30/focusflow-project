@@ -135,7 +135,7 @@ export default function AdminSettingsScreen() {
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.page}>
         <View style={styles.header}>
           <Text style={styles.title}>System settings</Text>
-          <Text style={styles.subtitle}>Control who can use FocusFlow and how new student accounts start.</Text>
+          <Text style={styles.subtitle}>Control who can use PomodAI and how new student accounts start.</Text>
         </View>
 
         {error ? (

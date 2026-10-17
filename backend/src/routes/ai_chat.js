@@ -320,7 +320,7 @@ router.post('/chat', requireAuth, async (req, res) => {
       error: 'AI chat unavailable',
       message: status >= 400 && status < 500
         ? (err?.message || 'The request could not be completed.')
-        : 'FocusFlow AI could not complete that request. Please try again.',
+        : 'PomodAI AI could not complete that request. Please try again.',
     });
   }
 });

@@ -136,7 +136,7 @@ export default function SignupScreen({ navigation, route }) {
 
                   <Text style={styles.brandTitle}>Build better{"\n"}study habits.</Text>
                   <Text style={styles.brandSubtitle}>
-                    Join FocusFlow and turn every study session into meaningful progress.
+                    Join PomodAI and turn every study session into meaningful progress.
                   </Text>
 
                   <View style={styles.featureList}>
@@ -188,7 +188,7 @@ export default function SignupScreen({ navigation, route }) {
                         resizeMode="contain"
                       />
                     </View>
-                    <Text style={styles.mobileBrandName}>FocusFlow</Text>
+                    <Text style={styles.mobileBrandName}>PomodAI</Text>
                   </View>
                 )}
 
@@ -203,7 +203,7 @@ export default function SignupScreen({ navigation, route }) {
                 </View>
                 <Text style={styles.title}>Create your account</Text>
                   <Text style={styles.subtitle}>
-                    Start studying smarter with a free FocusFlow account.
+                    Start studying smarter with a free PomodAI account.
                   </Text>
                 </View>
 
@@ -323,7 +323,7 @@ export default function SignupScreen({ navigation, route }) {
                   </Pressable>
 
                   <Text style={styles.termsText}>
-                    By creating an account, you agree to use FocusFlow responsibly and receive account-related emails.
+                    By creating an account, you agree to use PomodAI responsibly and receive account-related emails.
                   </Text>
                 </View>
 

@@ -235,20 +235,20 @@ export default function SettingsScreen({ navigation }) {
           }
         }
 
-        if (result?.mode === "remote") {
+        if (result?.verifyInSeconds) {
+          Alert.alert(
+            "Notifications enabled",
+            `Minimize PomodAI now — a test reminder will appear in about ${result.verifyInSeconds} seconds.\n\nDaily study reminders are also scheduled at your reminder time.`
+          );
+        } else if (result?.mode === "remote" || result?.mode === "remote+local") {
           Alert.alert("Push enabled", "Background notifications are registered for this device.");
         } else if (result?.warning) {
           Alert.alert(
             "Reminders enabled on this device",
-            `${result.warning}\n\nDaily study reminders will still fire locally when the app is closed.`
-          );
-        } else if (isExpoGo) {
-          Alert.alert(
-            "Reminders enabled",
-            "Daily study reminders are scheduled on this device. Remote push requires a development build."
+            `${result.warning}\n\nDaily study reminders will still fire locally when the app is minimized.`
           );
         } else {
-          Alert.alert("Reminders enabled", "You will receive study reminders when the app is closed.");
+          Alert.alert("Reminders enabled", "You will receive study reminders when the app is minimized.");
         }
       } else {
         await disablePushNotifications();
@@ -740,8 +740,8 @@ export default function SettingsScreen({ navigation }) {
             {!supportsLocalNotifications
                   ? "Push notifications are available on iOS and Android devices."
                   : isExpoGo
-                  ? "Daily reminders are scheduled on this device. Remote push needs a development build."
-                  : "Turning this on or off takes effect immediately."}
+                  ? "Uses on-device reminders (works when minimized). Remote server push needs a development build."
+                  : "Turning this on or off takes effect immediately. Reminders also fire when the app is minimized."}
           </Text>
               {pushEnabled && supportsLocalNotifications && (
                 <Button title="Send test notification" onPress={handleTestPush} loading={pushBusy} variant="secondary" style={{ marginTop: 12 }} />

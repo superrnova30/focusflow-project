@@ -143,7 +143,7 @@ export function AIHistorySidebar({ navigation, onClose, variant = "docked" }) {
             <Ionicons name="chatbubble-ellipses-outline" size={22} color={colors.violet} />
           </View>
           <Text style={styles.emptyTitle}>No conversations yet</Text>
-          <Text style={styles.emptyText}>Ask FocusFlow AI a question and it will show up here.</Text>
+          <Text style={styles.emptyText}>Ask PomodAI AI a question and it will show up here.</Text>
           <Pressable onPress={startChat} style={({ pressed }) => [styles.emptyCta, pressed && styles.pressed]}>
             <Text style={styles.emptyCtaText}>Start a chat</Text>
           </Pressable>

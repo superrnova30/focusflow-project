@@ -67,7 +67,7 @@ async function notifyWelcome(userId) {
   return createNotification({
     userId,
     type: "welcome",
-    title: "Welcome to FocusFlow",
+    title: "Welcome to PomodAI",
     body: "Find classmates, share a deck, and start your first study streak.",
     data: { screen: "FindFriends" },
     dedupeKey: "welcome",

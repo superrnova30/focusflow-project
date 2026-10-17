@@ -4,7 +4,7 @@ const prisma = new PrismaClient();
 async function main() {
   const result = await prisma.user.updateMany({
     where: { role: "STUDENT", OR: [{ school: null }, { school: "" }] },
-    data: { school: "FocusFlow University" },
+    data: { school: "PomodAI University" },
   });
   console.log("updated", result.count);
 }

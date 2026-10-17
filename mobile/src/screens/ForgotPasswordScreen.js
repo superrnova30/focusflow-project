@@ -259,7 +259,7 @@ export default function ForgotPasswordScreen({ navigation }) {
                   <View style={styles.logoWrap}>
                     <Image source={require("../theme/logo.png")} style={styles.logo} resizeMode="contain" />
                   </View>
-                  <Text style={styles.brandName}>FocusFlow</Text>
+                  <Text style={styles.brandName}>PomodAI</Text>
                 </View>
                 <Text style={styles.brandTitle}>Reset your password in three short steps.</Text>
                 <Text style={styles.brandSubtitle}>
@@ -275,7 +275,7 @@ export default function ForgotPasswordScreen({ navigation }) {
                   <View style={styles.logoWrap}>
                     <Image source={require("../theme/logo.png")} style={styles.logo} resizeMode="contain" />
                   </View>
-                  <Text style={styles.brandName}>FocusFlow</Text>
+                  <Text style={styles.brandName}>PomodAI</Text>
                 </View>
               ) : null}
 

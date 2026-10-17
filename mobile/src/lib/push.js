@@ -7,17 +7,20 @@ import { flushQueue } from "../api/client";
 export const TOKEN_STORAGE_KEY = "focusflow_push_token";
 export const PREF_STORAGE_KEY = "focusflow_push_enabled";
 const LOCAL_REMINDER_ID = "focusflow-daily-study-reminder";
+const LOCAL_VERIFY_ID = "focusflow-verify-reminder";
 const ANDROID_CHANNEL_ID = "daily-reminder";
 
-/** Expo Go cannot obtain remote Expo push tokens on SDK 53+. */
+/** Expo Go: local notifications work; remote Expo push does not (SDK 53+). */
 export const isExpoGo = Constants.appOwnership === "expo";
 export const supportsRemotePush = !isExpoGo && Platform.OS !== "web";
 export const supportsLocalNotifications = Platform.OS === "ios" || Platform.OS === "android";
+/** Local scheduling is supported in Expo Go and native builds. */
+export const supportsNotificationsModule = supportsLocalNotifications;
 
 let notificationsPromise;
 
 async function getNotificationsModule() {
-  if (!supportsLocalNotifications) return null;
+  if (!supportsNotificationsModule) return null;
   if (!notificationsPromise) {
     notificationsPromise = import("expo-notifications")
       .then((Notifications) => {
@@ -31,14 +34,11 @@ async function getNotificationsModule() {
             }),
           });
         } catch (e) {
-          // Handler setup must never crash app boot (Expo Go / incomplete native module).
+          // Handler setup must never crash app boot.
         }
         return Notifications;
       })
-      .catch((e) => {
-        console.warn("[push] expo-notifications unavailable:", e?.message || e);
-        return null;
-      });
+      .catch(() => null);
   }
   return notificationsPromise;
 }
@@ -51,7 +51,7 @@ function parseReminderTime(value) {
 
 function permissionDeniedError() {
   const err = new Error(
-    "Notification permission was denied. Open your device settings and allow notifications for FocusFlow, then try again."
+    "Notification permission was denied. Open your device settings and allow notifications for PomodAI, then try again."
   );
   err.code = "PERMISSION_DENIED";
   return err;
@@ -67,10 +67,27 @@ async function ensureAndroidChannel(Notifications) {
       vibrationPattern: [0, 250, 250, 250],
       enableVibrate: true,
       lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+      bypassDnd: false,
     });
   } catch (e) {
     // channel setup is best-effort
   }
+}
+
+async function requestNotificationPermission(Notifications, { requestPermission }) {
+  const { status: existingStatus } = await Notifications.getPermissionsAsync();
+  let status = existingStatus;
+  if (existingStatus !== "granted" && requestPermission) {
+    const requested = await Notifications.requestPermissionsAsync({
+      ios: {
+        allowAlert: true,
+        allowBadge: true,
+        allowSound: true,
+      },
+    });
+    status = requested.status;
+  }
+  return status;
 }
 
 async function cachePreference(enabled) {
@@ -105,39 +122,79 @@ export async function openSystemNotificationSettings() {
 }
 
 export async function getNotificationPermissionStatus() {
-  if (!supportsLocalNotifications) return "unavailable";
+  if (!supportsNotificationsModule) return "unavailable";
   const Notifications = await getNotificationsModule();
   if (!Notifications) return "unavailable";
   const { status } = await Notifications.getPermissionsAsync();
   return status;
 }
 
-/** Cancel any locally scheduled daily study reminder. */
-export async function cancelLocalDailyReminder() {
-  if (!supportsLocalNotifications) return;
-  const Notifications = await getNotificationsModule();
-  if (!Notifications) return;
+async function cancelScheduled(Notifications, id) {
   try {
-    await Notifications.cancelScheduledNotificationAsync(LOCAL_REMINDER_ID);
+    await Notifications.cancelScheduledNotificationAsync(id);
   } catch (e) {
     // ignore missing schedules
   }
 }
 
+/** Cancel any locally scheduled daily study reminder. */
+export async function cancelLocalDailyReminder() {
+  if (!supportsNotificationsModule) return;
+  const Notifications = await getNotificationsModule();
+  if (!Notifications) return;
+  await cancelScheduled(Notifications, LOCAL_REMINDER_ID);
+  await cancelScheduled(Notifications, LOCAL_VERIFY_ID);
+}
+
 /**
- * Schedule a repeating local daily reminder so nudges still fire when the app
- * is closed (including Expo Go, where remote push is unavailable).
+ * Schedule a one-shot local notification so the user can minimize the app
+ * and confirm delivery works (~12 seconds).
+ */
+export async function scheduleVerificationNotification() {
+  if (!supportsNotificationsModule) return null;
+  const Notifications = await getNotificationsModule();
+  if (!Notifications) return null;
+
+  await ensureAndroidChannel(Notifications);
+  await cancelScheduled(Notifications, LOCAL_VERIFY_ID);
+
+  const intervalType = Notifications.SchedulableTriggerInputTypes?.TIME_INTERVAL;
+  const trigger = intervalType
+    ? { type: intervalType, seconds: 12, channelId: ANDROID_CHANNEL_ID }
+    : { seconds: 12, channelId: ANDROID_CHANNEL_ID };
+
+  try {
+    return await Notifications.scheduleNotificationAsync({
+      identifier: LOCAL_VERIFY_ID,
+      content: {
+        title: "PomodAI reminder works",
+        body: "You minimized the app and still got this notification.",
+        sound: "default",
+        data: { type: "verify", source: "local" },
+        ...(Platform.OS === "android" ? { channelId: ANDROID_CHANNEL_ID } : {}),
+      },
+      trigger,
+    });
+  } catch (e) {
+    console.warn("[push] Failed to schedule verification notification:", e?.message || e);
+    return null;
+  }
+}
+
+/**
+ * Schedule a repeating local daily reminder so nudges fire when the app
+ * is minimized or closed (works in Expo Go via local notifications).
  */
 export async function scheduleLocalDailyReminder({
   reminderTime = "18:00",
   streakCount = 0,
 } = {}) {
-  if (!supportsLocalNotifications) return null;
+  if (!supportsNotificationsModule) return null;
   const Notifications = await getNotificationsModule();
   if (!Notifications) return null;
 
   await ensureAndroidChannel(Notifications);
-  await cancelLocalDailyReminder();
+  await cancelScheduled(Notifications, LOCAL_REMINDER_ID);
 
   const { hour, minute } = parseReminderTime(reminderTime);
   const bodyParts = [];
@@ -153,7 +210,7 @@ export async function scheduleLocalDailyReminder({
     return await Notifications.scheduleNotificationAsync({
       identifier: LOCAL_REMINDER_ID,
       content: {
-        title: "FocusFlow study reminder",
+        title: "PomodAI study reminder",
         body: bodyParts.join(" "),
         sound: "default",
         data: { type: "daily_reminder", source: "local" },
@@ -170,7 +227,7 @@ export async function scheduleLocalDailyReminder({
 async function savePreferenceOnServer(enabled) {
   const { data } = await client.post("/push/preference", { enabled: Boolean(enabled) });
   await cachePreference(enabled);
-  return data; // { ok, enabled, user }
+  return data;
 }
 
 async function registerRemoteToken() {
@@ -191,6 +248,7 @@ async function registerRemoteToken() {
     throw err;
   }
 
+  // Remote-only API — never call this from Expo Go.
   const tokenData = await Notifications.getExpoPushTokenAsync({ projectId });
   const token = tokenData?.data || null;
   if (!token) {
@@ -218,14 +276,15 @@ async function registerRemoteToken() {
 }
 
 /**
- * Ask for permission, persist preference, register remote token when possible,
- * and schedule a local daily reminder when remote delivery is not available.
+ * Ask for permission, persist preference, schedule local reminders that fire
+ * while minimized, and register a remote token only in native builds.
  */
 export async function enablePushNotifications({
   requestPermission = true,
   reminderTime = "18:00",
   remindersEnabled = true,
   streakCount = 0,
+  scheduleVerify = true,
 } = {}) {
   if (!supportsLocalNotifications) {
     const err = new Error("Notifications are not available on this platform.");
@@ -242,20 +301,12 @@ export async function enablePushNotifications({
 
   await ensureAndroidChannel(Notifications);
 
-  const { status: existingStatus } = await Notifications.getPermissionsAsync();
-  let status = existingStatus;
-  if (existingStatus !== "granted" && requestPermission) {
-    const requested = await Notifications.requestPermissionsAsync();
-    status = requested.status;
-  }
+  const status = await requestNotificationPermission(Notifications, { requestPermission });
   if (status !== "granted") {
     if (!requestPermission) return { enabled: false, mode: "denied" };
     throw permissionDeniedError();
   }
 
-  // Persist preference first so the backend respects the toggle even before a token exists.
-  let remoteToken = null;
-  let mode = "local";
   let preferenceData;
   try {
     preferenceData = await savePreferenceOnServer(true);
@@ -265,34 +316,47 @@ export async function enablePushNotifications({
     throw err;
   }
 
+  let remoteToken = null;
+  let mode = "local";
+
+  // Always schedule local daily reminders so notifications work when minimized,
+  // including Expo Go (remote push is unavailable there).
+  if (remindersEnabled) {
+    await scheduleLocalDailyReminder({ reminderTime, streakCount });
+  } else {
+    await cancelScheduled(Notifications, LOCAL_REMINDER_ID);
+  }
+
+  if (scheduleVerify) {
+    await scheduleVerificationNotification();
+  }
+
   if (supportsRemotePush) {
     try {
       remoteToken = await registerRemoteToken();
-      mode = "remote";
-      // Avoid duplicate daily reminders: server scheduler owns delivery when a token exists.
-      await cancelLocalDailyReminder();
+      mode = "remote+local";
     } catch (e) {
-      // Fall back to local scheduling so the feature still works without a rebuild.
       mode = "local";
-      remoteToken = null;
-      if (remindersEnabled) {
-        await scheduleLocalDailyReminder({ reminderTime, streakCount });
-      }
       return {
         enabled: true,
         mode,
         token: null,
         warning: e.message,
         user: preferenceData?.user,
+        verifyInSeconds: scheduleVerify ? 12 : null,
       };
     }
-  } else if (remindersEnabled) {
-    await scheduleLocalDailyReminder({ reminderTime, streakCount });
   } else {
-    await cancelLocalDailyReminder();
+    mode = isExpoGo ? "local-expo-go" : "local";
   }
 
-  return { enabled: true, mode, token: remoteToken, user: preferenceData?.user };
+  return {
+    enabled: true,
+    mode,
+    token: remoteToken,
+    user: preferenceData?.user,
+    verifyInSeconds: scheduleVerify ? 12 : null,
+  };
 }
 
 /** Turn push off: cancel local schedules, drop tokens, persist preference. */
@@ -314,16 +378,14 @@ export async function disablePushNotifications() {
   return { enabled: false };
 }
 
-/**
- * Legacy helpers used by AuthContext / App.js.
- * Refresh only re-registers when the user previously opted in.
- */
 export async function registerForPushNotifications(options = {}) {
   const result = await enablePushNotifications(options);
   return result?.token || null;
 }
 
 export async function refreshPushRegistration(user) {
+  if (!supportsNotificationsModule) return null;
+
   const cachedPref = await getCachedPushPreference();
   const enabled =
     user?.pushNotificationsEnabled === true ||
@@ -340,6 +402,7 @@ export async function refreshPushRegistration(user) {
       reminderTime: user?.reminderTime || "18:00",
       remindersEnabled: user?.remindersEnabled !== false,
       streakCount: user?.streakCount || 0,
+      scheduleVerify: false,
     });
     return result?.token || null;
   } catch (e) {
@@ -347,7 +410,6 @@ export async function refreshPushRegistration(user) {
   }
 }
 
-/** Remove the token from the backend (e.g. on logout). Keeps the user preference. */
 export async function unregisterPushNotifications({ clearPreference = false } = {}) {
   try {
     if (clearPreference) {
@@ -359,13 +421,11 @@ export async function unregisterPushNotifications({ clearPreference = false } = 
       await client.post("/push/unregister", { token }).catch(() => {});
     }
     await AsyncStorage.removeItem(TOKEN_STORAGE_KEY);
-    // Keep PREF_STORAGE_KEY so re-login can restore registration.
   } catch (e) {
     // best effort
   }
 }
 
-/** Keep local schedules in sync when the user changes Study reminders settings. */
 export async function syncReminderDelivery({
   pushEnabled,
   remindersEnabled,
@@ -373,15 +433,15 @@ export async function syncReminderDelivery({
   streakCount = 0,
   hasRemoteToken,
 } = {}) {
+  if (!supportsNotificationsModule) return;
+
   if (!pushEnabled || !remindersEnabled) {
     await cancelLocalDailyReminder();
     return;
   }
-  // Remote builds with a registered token rely on the backend scheduler.
-  if (supportsRemotePush && (hasRemoteToken || (await getSavedPushToken()))) {
-    await cancelLocalDailyReminder();
-    return;
-  }
+
+  // Keep local daily reminders even when a remote token exists, so minimize/background
+  // delivery works reliably without waiting on the server scheduler.
   await scheduleLocalDailyReminder({ reminderTime, streakCount });
 }
 
@@ -393,34 +453,46 @@ export async function fetchPushStatus() {
   return data;
 }
 
-/** Send a test push from the backend (development / production builds only). */
+/** Immediate local test (Expo Go + native) or remote test (native with token). */
 export async function sendTestPush() {
-  if (!supportsRemotePush) {
-    // Deliver an immediate local notification so Expo Go users can still verify.
-    const Notifications = await getNotificationsModule();
-    if (!Notifications) throw new Error("Notifications are unavailable.");
-    await ensureAndroidChannel(Notifications);
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: "FocusFlow test",
-        body: "Local notifications are working on this device.",
-        sound: "default",
-        data: { type: "test", source: "local" },
-        ...(Platform.OS === "android" ? { channelId: ANDROID_CHANNEL_ID } : {}),
-      },
-      trigger: null,
-    });
-    return { ok: true, local: true };
+  const Notifications = await getNotificationsModule();
+  if (!Notifications) throw new Error("Notifications are unavailable.");
+
+  const status = await requestNotificationPermission(Notifications, { requestPermission: true });
+  if (status !== "granted") throw permissionDeniedError();
+
+  await ensureAndroidChannel(Notifications);
+
+  // Always fire a local notification so minimize/background can be verified immediately.
+  await Notifications.scheduleNotificationAsync({
+    content: {
+      title: "PomodAI test",
+      body: isExpoGo
+        ? "Local notifications work when the app is minimized."
+        : "You're all set for study reminders!",
+      sound: "default",
+      data: { type: "test", source: "local" },
+      ...(Platform.OS === "android" ? { channelId: ANDROID_CHANNEL_ID } : {}),
+    },
+    trigger: null,
+  });
+
+  if (supportsRemotePush) {
+    try {
+      const { data } = await client.post("/push/send-test", {
+        title: "AI Pomodoro Study System test",
+        body: "You're all set for push notifications! 🎉",
+      });
+      return { ...data, local: true };
+    } catch (e) {
+      // Local already delivered; remote is optional.
+      return { ok: true, local: true, remoteError: e?.response?.data?.error || e.message };
+    }
   }
 
-  const { data } = await client.post("/push/send-test", {
-    title: "AI Pomodoro Study System test",
-    body: "You're all set for push notifications! 🎉",
-  });
-  return data;
+  return { ok: true, local: true };
 }
 
-/** Replays any queued offline writes. Call on app focus / connectivity restore. */
 export async function retryOfflineWrites() {
   await flushQueue();
 }
